@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=WiiBackup Manager
+Comment=Gestor de respaldos ISO/WBFS de Wii
+Exec=wiibackup-manager
+Icon=drive-harddisk-symbolic
+Terminal=false
+Categories=Utility;Game;
+StartupNotify=true
