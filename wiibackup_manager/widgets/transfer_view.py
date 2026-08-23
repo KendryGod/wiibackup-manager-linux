@@ -101,6 +101,14 @@ class TransferView(Gtk.Box):
         dest_buttons.append(refresh_drives_btn)
         dest_buttons.append(add_folder_btn)
 
+        self.eject_button = Gtk.Button(label="Expulsar unidad")
+        self.eject_button.set_tooltip_text(
+            "Desmontar de forma segura la unidad seleccionada antes de desconectarla."
+        )
+        self.eject_button.set_sensitive(False)
+        self.eject_button.connect("clicked", self._on_eject_clicked)
+        dest_buttons.append(self.eject_button)
+
         self.dest_space_label = Gtk.Label(
             label="Elegí un destino para ver el espacio disponible.", xalign=0
         )
@@ -204,6 +212,7 @@ class TransferView(Gtk.Box):
     def _on_dest_row_selected(self, listbox, row):
         self._dest_path = getattr(row, "dest_path", None) if row else None
         self._update_dest_space_label()
+        self._update_eject_button()
 
     def _update_dest_space_label(self):
         if self._dest_path is None:
@@ -219,6 +228,43 @@ class TransferView(Gtk.Box):
         self.dest_space_label.set_label(
             f"Espacio en destino: {free_gb:.1f} GB libres de {total_gb:.1f} GB"
         )
+
+    def _update_eject_button(self):
+        if self._dest_path is not None and drives.is_mount_point(self._dest_path):
+            self.eject_button.set_sensitive(True)
+            self.eject_button.set_tooltip_text(
+                "Desmontar de forma segura la unidad seleccionada antes de desconectarla."
+            )
+        else:
+            self.eject_button.set_sensitive(False)
+            self.eject_button.set_tooltip_text(
+                "El destino elegido no es una unidad montada (es una carpeta local): "
+                "no hay nada que expulsar."
+            )
+
+    def _on_eject_clicked(self, *_):
+        if self._dest_path is None or not drives.is_mount_point(self._dest_path):
+            return
+        dest_path = self._dest_path
+        self.eject_button.set_sensitive(False)
+
+        def worker():
+            ok, message = drives.eject_mount_point(dest_path)
+            GLib.idle_add(self._on_eject_done, ok, message, dest_path)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_eject_done(self, ok: bool, message: str, dest_path: Path):
+        self._show_toast(message)
+        if ok:
+            # La unidad ya no está montada: si seguía elegida como destino,
+            # sacarla de la selección y refrescar la lista de unidades.
+            if self._dest_path == dest_path:
+                self.dest_list.unselect_all()
+            self._refresh_drives()
+        else:
+            self._update_eject_button()
+        return False
 
     def _on_add_folder(self, *_):
         dialog = Gtk.FileDialog(title="Elegí la carpeta destino")
