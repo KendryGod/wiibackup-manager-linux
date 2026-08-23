@@ -12,10 +12,13 @@ los repos de Fedora).
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +34,110 @@ _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 
 class WitNotFoundError(RuntimeError):
     """`wit` no está instalado o no se encuentra en el PATH."""
+
+
+class OperationCancelled(RuntimeError):
+    """El usuario canceló la operación desde la interfaz. No es un error:
+    quien llama lo distingue de un fallo real para no contarlo como tal."""
+
+
+# Segundos que se le dan a `wit` para terminar por las buenas (SIGTERM)
+# antes de matarlo a la fuerza (SIGKILL) al cancelar.
+_KILL_GRACE_SECONDS = 5.0
+
+
+def _terminate_process_group(proc: subprocess.Popen) -> None:
+    """Mata `proc` y todo su grupo de procesos.
+
+    Los subprocesos de `wit` se lanzan con `start_new_session=True`, o sea
+    en su propio grupo: matar el grupo entero (`os.killpg`) y no solo el
+    PID directo asegura que no quede ningún hijo de `wit` escribiendo en
+    el destino después de cancelar. Si por algún motivo no se puede
+    obtener el grupo, cae a señalar el proceso directamente.
+
+    Primero SIGTERM (le da la chance de cerrar y limpiar sus temporales) y,
+    si no se muere en `_KILL_GRACE_SECONDS`, SIGKILL."""
+    if proc.poll() is not None:
+        return
+
+    try:
+        pgid = os.getpgid(proc.pid)
+    except OSError:
+        pgid = None
+
+    def send(sig) -> None:
+        if pgid is not None:
+            try:
+                os.killpg(pgid, sig)
+                return
+            except OSError:
+                pass  # el grupo ya no existe: probamos con el proceso solo
+        try:
+            proc.send_signal(sig)
+        except OSError:
+            pass
+
+    send(signal.SIGTERM)
+    try:
+        proc.wait(timeout=_KILL_GRACE_SECONDS)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+
+    send(signal.SIGKILL)
+    try:
+        proc.wait(timeout=_KILL_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+class CancellationToken:
+    """Puente entre el botón "Cancelar" (hilo de GTK) y la operación de
+    `wit` que está corriendo en el hilo de fondo.
+
+    Antes la cancelación era solo una bandera que el worker miraba ENTRE
+    juegos: si `wit` llevaba 20 minutos copiando un archivo grande, el
+    botón no hacía nada hasta que ese archivo terminara. Este token
+    además guarda el proceso en curso y lo mata (a él y a su grupo) apenas
+    se cancela.
+
+    Es seguro usarlo desde dos hilos: todo el estado va bajo un lock."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cancelled = False
+        self._proc: Optional[subprocess.Popen] = None
+
+    @property
+    def cancelled(self) -> bool:
+        with self._lock:
+            return self._cancelled
+
+    def cancel(self) -> None:
+        """Marca la operación como cancelada y mata el proceso en curso (si
+        hay uno). Se llama desde el hilo de GTK."""
+        with self._lock:
+            self._cancelled = True
+            proc = self._proc
+        if proc is not None:
+            _terminate_process_group(proc)
+
+    def attach(self, proc: subprocess.Popen) -> bool:
+        """Registra el proceso recién lanzado. Devuelve False (y lo mata en
+        el acto) si la cancelación llegó justo antes de lanzarlo, para que
+        no quede un `wit` huérfano corriendo por esa ventana de carrera."""
+        with self._lock:
+            self._proc = proc
+            cancelled = self._cancelled
+        if cancelled:
+            _terminate_process_group(proc)
+            return False
+        return True
+
+    def detach(self, proc: subprocess.Popen) -> None:
+        with self._lock:
+            if self._proc is proc:
+                self._proc = None
 
 
 # Tamaño de partición al dividir un WBFS para que quepa en FAT32.
@@ -86,6 +193,10 @@ def _run(
             text=True,
             check=False,
             timeout=timeout,
+            # Grupo de procesos propio, igual que en `_run_with_progress`:
+            # así se puede matar el árbol entero de `wit` de una (ver
+            # `_terminate_process_group`).
+            start_new_session=True,
         )
     except subprocess.TimeoutExpired as exc:
         return _timeout_result([binary, *args], exc, timeout)
@@ -127,6 +238,53 @@ def _wbfs_temp_files(dest: Path):
         return []
 
 
+def _output_files(dest: Path) -> set:
+    """Todos los archivos que una operación hacia `dest` puede estar
+    escribiendo en este momento: los temporales de `wit` (ver
+    `_wbfs_temp_files`), el archivo final y sus partes `.wbf1`, `.wbf2`,
+    ... si se dividió."""
+    files = set(_wbfs_temp_files(dest))
+    try:
+        if dest.exists():
+            files.add(dest)
+    except OSError:
+        pass
+    stem = dest.with_suffix("")
+    part_num = 1
+    while True:
+        part = stem.with_suffix(f".wbf{part_num}")
+        try:
+            if not part.exists():
+                break
+        except OSError:
+            break
+        files.add(part)
+        part_num += 1
+    return files
+
+
+def _cleanup_new_output_files(dest: Path, before: set) -> None:
+    """Borra lo que ESTA operación dejó a medio escribir hacia `dest`.
+
+    Se compara contra el conjunto de archivos que ya existían antes de
+    arrancar y solo se borran los nuevos: un `glob()` amplio podría
+    llevarse por delante los temporales de otra operación en curso sobre
+    el mismo destino, o el archivo que el usuario ya tenía ahí.
+
+    Hay que mirar el archivo final y sus partes, no solo los temporales:
+    al recibir SIGTERM, `wit` alcanza a veces a renombrar su temporal al
+    nombre definitivo antes de salir (confirmado mandándole SIGTERM a una
+    copia real a mitad de camino), y ese archivo parcial pasaría por un
+    respaldo bueno en el próximo escaneo. Si el destino YA existía antes,
+    no se toca: puede ser el archivo original del usuario, que `wit` deja
+    intacto hasta el rename final."""
+    for f in _output_files(dest) - before:
+        try:
+            f.unlink()
+        except OSError:
+            pass
+
+
 def estimate_bytes_written(dest: Path) -> int:
     """Estimación best-effort de cuánto lleva escrito hacia `dest` (copia
     directa o `wit COPY`, dividido o no), sumando tanto sus archivos
@@ -137,27 +295,11 @@ def estimate_bytes_written(dest: Path) -> int:
     dos existe, salvo un instante muy breve durante el rename, donde
     sumar ambos no rompe nada."""
     total = 0
-    for f in _wbfs_temp_files(dest):
+    for f in _output_files(dest):
         try:
             total += f.stat().st_size
         except OSError:
             pass
-    try:
-        if dest.exists():
-            total += dest.stat().st_size
-    except OSError:
-        pass
-    stem = dest.with_suffix("")
-    part_num = 1
-    while True:
-        part = stem.with_suffix(f".wbf{part_num}")
-        try:
-            if not part.exists():
-                break
-            total += part.stat().st_size
-        except OSError:
-            break
-        part_num += 1
     return total
 
 
@@ -166,6 +308,7 @@ def _run_with_progress(
     dest: Path,
     timeout: Optional[float],
     bytes_progress_cb: Callable[[int], None],
+    cancel: Optional[CancellationToken] = None,
 ) -> subprocess.CompletedProcess:
     """Como `subprocess.run`, pero con `Popen` en vez de `.run()` para
     poder sondear cada 1s cuánto lleva escrito hacia `dest`
@@ -175,43 +318,61 @@ def _run_with_progress(
     stdout/stderr van a archivos temporales (no a `PIPE`): si se
     capturaran con `PIPE` y nadie los lee mientras este bucle sondea,
     `wit` podría bloquearse al llenar el buffer del pipe del kernel (típ.
-    64KiB) si llega a tirar mucha salida; con archivos no hay ese techo."""
+    64KiB) si llega a tirar mucha salida; con archivos no hay ese techo.
+
+    `start_new_session=True` pone a `wit` en su propio grupo de procesos
+    para que `cancel.cancel()` (desde el botón "Cancelar", en el hilo de
+    GTK) pueda matarlo de verdad en el acto, en vez de que la cancelación
+    recién surta efecto cuando el archivo grande en curso termine solo."""
+    # Lo que ya existía antes de arrancar: si hay que limpiar por una
+    # cancelación, se borra solo lo que agregó ESTA operación.
+    outputs_before = _output_files(dest)
     with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
-        proc = subprocess.Popen(args, stdout=out_f, stderr=err_f)
+        proc = subprocess.Popen(args, stdout=out_f, stderr=err_f, start_new_session=True)
+        # Si la cancelación llegó entre el chequeo previo y el Popen,
+        # `attach` lo mata en el acto y devuelve False.
+        running = cancel.attach(proc) if cancel is not None else True
         start = time.monotonic()
+        timed_out = False
         try:
-            while True:
+            while running:
                 try:
                     proc.wait(timeout=1.0)
                     break
                 except subprocess.TimeoutExpired:
                     bytes_progress_cb(estimate_bytes_written(dest))
                     if timeout is not None and (time.monotonic() - start) >= timeout:
-                        proc.kill()
-                        proc.wait()
-                        out_f.seek(0)
-                        err_f.seek(0)
-                        stderr = err_f.read().decode("utf-8", "replace")
-                        stdout = out_f.read().decode("utf-8", "replace")
-                        return subprocess.CompletedProcess(
-                            args=args,
-                            returncode=1,
-                            stdout=stdout,
-                            stderr=stderr
-                            + f"\n`wit` no respondió en {timeout:.0f}s: se lo dio por "
-                              "colgado y se canceló la operación.",
-                        )
+                        timed_out = True
+                        _terminate_process_group(proc)
+                        break
+            if not running:
+                proc.wait()
         except BaseException:
-            proc.kill()
-            proc.wait()
+            _terminate_process_group(proc)
+            _cleanup_new_output_files(dest, outputs_before)
             raise
+        finally:
+            if cancel is not None:
+                cancel.detach(proc)
+
+        cancelled = cancel is not None and cancel.cancelled
+        if cancelled or timed_out:
+            # El proceso murió a mitad de una escritura: los temporales que
+            # dejó no los va a renombrar ni limpiar nadie.
+            _cleanup_new_output_files(dest, outputs_before)
+
         out_f.seek(0)
         err_f.seek(0)
+        stdout = out_f.read().decode("utf-8", "replace")
+        stderr = err_f.read().decode("utf-8", "replace")
+        if timed_out:
+            stderr += (f"\n`wit` no respondió en {timeout:.0f}s: se lo dio por "
+                       "colgado y se canceló la operación.")
         return subprocess.CompletedProcess(
             args=args,
-            returncode=proc.returncode,
-            stdout=out_f.read().decode("utf-8", "replace"),
-            stderr=err_f.read().decode("utf-8", "replace"),
+            returncode=1 if (timed_out or cancelled) else proc.returncode,
+            stdout=stdout,
+            stderr=stderr,
         )
 
 
@@ -273,6 +434,7 @@ def convert(
     split: bool = False,
     timeout: Optional[float] = DEFAULT_WIT_TIMEOUT,
     bytes_progress_cb: Optional[Callable[[int], None]] = None,
+    cancel: Optional[CancellationToken] = None,
 ) -> subprocess.CompletedProcess:
     """Convierte src -> dest. target_format: 'WBFS' o 'ISO'.
 
@@ -293,9 +455,17 @@ def convert(
     genera varias partes cuando el resultado realmente supera ese límite,
     así que pasar `split=True` "por las dudas" en un filesystem que sí
     soporta archivos grandes no tiene costo: el archivo sale igual,
-    entero."""
+    entero.
+
+    `cancel`, si se pasa, permite matar el `wit` en curso desde otro hilo
+    (el botón "Cancelar" de la interfaz): en ese caso se levanta
+    `OperationCancelled` y se limpian los temporales que quedaron a medio
+    escribir, en vez de devolver un resultado con error."""
     if not find_wit(binary):
         raise WitNotFoundError(binary)
+
+    if cancel is not None and cancel.cancelled:
+        raise OperationCancelled("Operación cancelada antes de arrancar `wit`.")
 
     # wit infiere el formato de salida por la extensión de --dest, así que
     # nos aseguramos de que dest tenga la extensión correcta antes de llamar.
@@ -304,8 +474,12 @@ def convert(
         args += ["--split-size", _SPLIT_SIZE_ARG]
     args += [str(src), "--dest", str(dest)]
 
-    if bytes_progress_cb is not None:
-        result = _run_with_progress(args, dest, timeout, bytes_progress_cb)
+    # Con `cancel` siempre se usa el camino de `Popen` aunque no haga falta
+    # progreso: es el único que puede registrar el proceso para matarlo.
+    if bytes_progress_cb is not None or cancel is not None:
+        result = _run_with_progress(
+            args, dest, timeout, bytes_progress_cb or (lambda _n: None), cancel
+        )
     else:
         try:
             result = subprocess.run(
@@ -314,9 +488,14 @@ def convert(
                 text=True,
                 check=False,
                 timeout=timeout,
+                start_new_session=True,
             )
         except subprocess.TimeoutExpired as exc:
             result = _timeout_result(args, exc, timeout)
+
+    if cancel is not None and cancel.cancelled:
+        raise OperationCancelled("Transferencia cancelada por el usuario.")
+
     if progress_cb:
         progress_cb(result.stdout)
     return result

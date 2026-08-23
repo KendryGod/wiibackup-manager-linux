@@ -14,7 +14,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk, GLib  # noqa: E402
 
-from .. import drives, gametdb, library
+from .. import drives, gametdb, library, wit_wrapper
 from ..library import Game
 from . import gtk_helpers
 from .game_row import build_cover_widget
@@ -72,7 +72,11 @@ class TransferView(Gtk.Box):
         self._games: list[Game] = []
         self._game_rows: list[TransferGameRow] = []
         self._dest_path: Path | None = None
-        self._transfer_cancelled = False
+        # Token de cancelación de la transferencia en curso: además de la
+        # bandera "no sigas con el próximo juego", guarda el proceso de
+        # `wit` que está corriendo para poder matarlo al cancelar (ver
+        # `wit_wrapper.CancellationToken`).
+        self._cancel_token = wit_wrapper.CancellationToken()
         # Snapshot de los puntos de montaje detectados en el último refresco,
         # para que el sondeo periódico solo repueble la lista cuando algo
         # cambió de verdad (unidad nueva, expulsada, o carpeta manual que
@@ -414,7 +418,10 @@ class TransferView(Gtk.Box):
 
     def _start_transfer(self, selected: list[Game], dest_root: Path, overwrite: bool = False):
         wit_binary = self.settings.wit_binary
-        self._transfer_cancelled = False
+        # Token nuevo por transferencia: no arrastra el estado de una
+        # cancelación anterior.
+        cancel = wit_wrapper.CancellationToken()
+        self._cancel_token = cancel
         self.transfer_button.set_sensitive(False)
         self.cancel_button.set_visible(True)
         self.cancel_button.set_sensitive(True)
@@ -433,7 +440,7 @@ class TransferView(Gtk.Box):
             start_time = time.monotonic()
             cancelled = False
             for i, game in enumerate(selected, start=1):
-                if self._transfer_cancelled:
+                if cancel.cancelled:
                     cancelled = True
                     break
                 base_bytes_done = bytes_done
@@ -454,13 +461,23 @@ class TransferView(Gtk.Box):
                 try:
                     library.send_to_wbfs_drive(game, dest_root, wit_binary,
                                                 bytes_progress_cb=on_game_progress,
-                                                overwrite=overwrite)
+                                                overwrite=overwrite, cancel=cancel)
                     ok_count += 1
+                except wit_wrapper.OperationCancelled:
+                    # Cancelado a mitad de ESTE juego: no es un error, y no
+                    # se sigue con los que faltaban.
+                    cancelled = True
+                    break
                 except library.DestinationExistsError:
                     # El juego ya está en la unidad: ni éxito ni error, se
                     # cuenta aparte y se informa en el resumen final.
                     skipped_count += 1
                 except Exception:
+                    if cancel.cancelled:
+                        # El fallo es consecuencia de haber matado a `wit`
+                        # al cancelar, no un error real de la copia.
+                        cancelled = True
+                        break
                     # Un juego que falla no frena el resto: se cuenta como
                     # error y se sigue con el siguiente de la selección.
                     err_count += 1
@@ -471,8 +488,11 @@ class TransferView(Gtk.Box):
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_cancel_clicked(self, *_):
-        self._transfer_cancelled = True
+        # Mata el `wit` (o corta la copia) que esté corriendo ahora mismo,
+        # no solo evita que arranque el próximo juego.
+        self._cancel_token.cancel()
         self.cancel_button.set_sensitive(False)
+        self._show_toast("Cancelando la transferencia…")
 
     def _update_progress(self, done: int, total: int, title: str,
                           bytes_done: int, total_bytes: int, start_time: float):

@@ -190,23 +190,47 @@ def rename_to_standard(game: Game, dry_run: bool = False) -> Path:
 _COPY_CHUNK_BYTES = 4 * 1024 * 1024
 
 
-def _copy_with_progress(src: Path, dest: Path, progress_cb: Callable[[int], None]) -> None:
+def _copy_with_progress(
+    src: Path,
+    dest: Path,
+    progress_cb: Callable[[int], None],
+    cancel: Optional["wit_wrapper.CancellationToken"] = None,
+) -> None:
     """Igual que `shutil.copy2(src, dest)` (copia contenido + metadata),
     pero reportando cuánto lleva copiado cada ~1s vía `progress_cb`, algo
-    que `shutil.copy2` no ofrece."""
+    que `shutil.copy2` no ofrece.
+
+    Si se pasa `cancel`, se revisa entre bloques: cancelar corta la copia
+    en el momento (no cuando el archivo termina solo, que con varios GB
+    sobre USB pueden ser 20 minutos) y borra el destino a medio escribir,
+    que no sirve para nada y ocuparía lugar en la unidad."""
     written = 0
     last_report = time.monotonic()
-    with open(src, "rb") as fsrc, open(dest, "wb") as fdst:
-        while True:
-            buf = fsrc.read(_COPY_CHUNK_BYTES)
-            if not buf:
-                break
-            fdst.write(buf)
-            written += len(buf)
-            now = time.monotonic()
-            if now - last_report >= 1.0:
-                progress_cb(written)
-                last_report = now
+    try:
+        with open(src, "rb") as fsrc, open(dest, "wb") as fdst:
+            while True:
+                if cancel is not None and cancel.cancelled:
+                    raise wit_wrapper.OperationCancelled(
+                        "Transferencia cancelada por el usuario."
+                    )
+                buf = fsrc.read(_COPY_CHUNK_BYTES)
+                if not buf:
+                    break
+                fdst.write(buf)
+                written += len(buf)
+                now = time.monotonic()
+                if now - last_report >= 1.0:
+                    progress_cb(written)
+                    last_report = now
+    except BaseException:
+        # El destino quedó truncado a mitad de camino (open("wb") ya lo
+        # había vaciado): un WBFS parcial no sirve y confundiría al
+        # próximo escaneo, así que se borra.
+        try:
+            dest.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     progress_cb(written)
     shutil.copystat(src, dest)
 
@@ -243,6 +267,7 @@ def send_to_wbfs_drive(
     wit_binary: str = "wit",
     bytes_progress_cb: Optional[Callable[[int], None]] = None,
     overwrite: bool = False,
+    cancel: Optional["wit_wrapper.CancellationToken"] = None,
 ) -> Path:
     """Copia `game` a la estructura estándar 'wbfs/<ID6>/<ID6>.wbfs' que
     reconocen los USB Loaders de Wii (USB Loader GX, CFG USB Loader, etc.)
@@ -266,7 +291,14 @@ def send_to_wbfs_drive(
     directa con open("wb"), que trunca al instante, y `wit COPY
     --overwrite`) reemplazan el archivo sin vuelta atrás, así que la
     decisión de pisarlo es de quien llama, igual que ya pasaba al
-    convertir."""
+    convertir.
+
+    `cancel`, si se pasa, hace que cancelar corte esta copia/conversión en
+    el momento (matando el `wit` en curso o abortando la copia directa) y
+    levante `wit_wrapper.OperationCancelled`."""
+    if cancel is not None and cancel.cancelled:
+        raise wit_wrapper.OperationCancelled("Transferencia cancelada por el usuario.")
+
     dest = wbfs_dest_path(game, drive_root)
     dest_dir = dest.parent
 
@@ -281,8 +313,9 @@ def send_to_wbfs_drive(
     # dividir (si hiciera falta dividir, una copia plana no puede hacerlo:
     # hay que pasar por `wit COPY --split`).
     if game.fmt.upper() == "WBFS" and not (split and game.size_bytes >= _FAT32_SIZE_LIMIT_BYTES):
-        if bytes_progress_cb is not None:
-            _copy_with_progress(game.path, dest, bytes_progress_cb)
+        if bytes_progress_cb is not None or cancel is not None:
+            _copy_with_progress(game.path, dest,
+                                bytes_progress_cb or (lambda _n: None), cancel)
         else:
             shutil.copy2(game.path, dest)
         return dest
@@ -291,7 +324,7 @@ def send_to_wbfs_drive(
         raise wit_wrapper.WitNotFoundError(wit_binary)
 
     result = wit_wrapper.convert(game.path, dest, "WBFS", wit_binary, split=split,
-                                  bytes_progress_cb=bytes_progress_cb)
+                                  bytes_progress_cb=bytes_progress_cb, cancel=cancel)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "Error desconocido al convertir con wit")
     return dest

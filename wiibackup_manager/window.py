@@ -60,7 +60,9 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self._games: list[Game] = []
         self._rows: dict[str, GameRow] = {}
         self._library_available = config.library_path_available(self.settings)
-        self._send_cancelled = False
+        # Ver TransferView: el token guarda el proceso de `wit` en curso
+        # para poder matarlo al cancelar, no solo una bandera.
+        self._cancel_token = wit_wrapper.CancellationToken()
 
         self._build_ui()
 
@@ -273,8 +275,11 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             btn.set_sensitive(has_selection)
 
     def _on_progress_cancel_clicked(self, *_):
-        self._send_cancelled = True
+        # Mata el `wit` (o corta la copia) que esté corriendo ahora mismo,
+        # no solo evita que arranque el próximo juego.
+        self._cancel_token.cancel()
         self.progress_cancel_btn.set_sensitive(False)
+        self._show_toast("Cancelando el envío…")
 
     # ------------------------------------------------------ Acciones en lote --
     def _run_batch(self, games: list[Game], title: str, action_fn):
@@ -372,7 +377,10 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         # sentido mostrar tiempo estimado y permitir cancelar: es la
         # operación de transferencia real hacia una unidad WBFS, con
         # tamaños de archivo conocidos de antemano.
-        self._send_cancelled = False
+        # Token nuevo por envío: no arrastra el estado de una cancelación
+        # anterior.
+        cancel = wit_wrapper.CancellationToken()
+        self._cancel_token = cancel
         self.progress_bar.set_visible(True)
         self.progress_bar.set_fraction(0)
         self.progress_cancel_btn.set_visible(True)
@@ -391,7 +399,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             start_time = time.monotonic()
             cancelled = False
             for i, game in enumerate(games, start=1):
-                if self._send_cancelled:
+                if cancel.cancelled:
                     cancelled = True
                     break
                 base_bytes_done = bytes_done
@@ -409,13 +417,23 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 try:
                     library.send_to_wbfs_drive(game, dest_root, wit_binary,
                                                 bytes_progress_cb=on_game_progress,
-                                                overwrite=overwrite)
+                                                overwrite=overwrite, cancel=cancel)
                     ok += 1
+                except wit_wrapper.OperationCancelled:
+                    # Cancelado a mitad de ESTE juego: no es un error, y no
+                    # se sigue con los que faltaban.
+                    cancelled = True
+                    break
                 except library.DestinationExistsError:
                     # El juego ya está en la unidad: no es un error ni un
                     # éxito, se informa aparte en el resumen final.
                     skipped.append(game.title)
                 except Exception as e:
+                    if cancel.cancelled:
+                        # El fallo es consecuencia de haber matado a `wit`
+                        # al cancelar, no un error real del envío.
+                        cancelled = True
+                        break
                     # No frena el resto de la selección: se cuenta como
                     # error y se sigue con el siguiente juego.
                     errors.append(f"{game.title}: {e}")
