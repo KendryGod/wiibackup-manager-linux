@@ -7,7 +7,8 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gtk, GLib, Gio  # noqa: E402
+gi.require_version("Gdk", "4.0")
+from gi.repository import Adw, Gtk, GLib, Gio, Gdk  # noqa: E402
 
 from . import config, library, wit_wrapper
 
@@ -154,6 +155,12 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self.stack.add_named(self.status_page, "empty")
         content_box.append(self.stack)
         self.stack.set_vexpand(True)
+
+        # Arrastrar y soltar archivos/carpetas desde el gestor de archivos
+        # del sistema directo sobre la Biblioteca (lista o estado vacío).
+        drop_target = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
+        drop_target.connect("drop", self._on_files_dropped)
+        self.stack.add_controller(drop_target)
 
         self.view_stack.add_titled_with_icon(content_box, "library", "Biblioteca",
                                               "view-list-symbolic")
@@ -488,6 +495,35 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             self._show_toast("No se encontraron archivos válidos en esa carpeta.")
             return
         self._start_import(paths)
+
+    def _on_files_dropped(self, drop_target, value, x, y):
+        try:
+            files = value.get_files()
+        except AttributeError:
+            return False
+
+        paths: list[Path] = []
+        for f in files:
+            raw_path = f.get_path()
+            if not raw_path:
+                continue
+            p = Path(raw_path)
+            if p.is_dir():
+                paths.extend(
+                    sorted(q for q in p.rglob("*")
+                           if q.is_file() and q.suffix.lower() in library.VALID_EXTENSIONS)
+                )
+            elif p.is_file() and p.suffix.lower() in library.VALID_EXTENSIONS:
+                paths.append(p)
+
+        if not paths:
+            self._show_toast(
+                "No se encontraron archivos ISO/WBFS/CISO/WDF válidos en lo soltado."
+            )
+            return False
+
+        self._start_import(paths)
+        return True
 
     def _start_import(self, src_paths: list[Path]):
         """Copia `src_paths` a la biblioteca en background, identificando
