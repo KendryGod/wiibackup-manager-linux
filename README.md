@@ -92,16 +92,20 @@ cp data/com.gamefixsps.WiiBackupManager.desktop ~/.local/share/applications/
 
 ```
 wiibackup_manager/
-├── app.py              # Adw.Application
-├── window.py            # Ventana principal y lógica de UI
-├── config.py             # Preferencias persistidas (XDG)
-├── library.py            # Escaneo y modelo de datos de juegos
-├── disc_header.py        # Parseo de header de ISO plana (sin dependencias)
-├── wit_wrapper.py         # Llamadas a `wit` (conversión/identificación/verificación)
-├── gametdb.py             # Descarga y caché de carátulas
+├── app.py                       # Adw.Application
+├── window.py                    # Ventana principal: pestaña Biblioteca y lógica de UI
+├── config.py                    # Preferencias persistidas (XDG)
+├── library.py                   # Escaneo y modelo de datos de juegos
+├── disc_header.py                # Parseo de header de ISO plana (sin dependencias)
+├── wit_wrapper.py                # Llamadas a `wit` (conversión/identificación/verificación)
+├── gametdb.py                    # Descarga y caché de carátulas
+├── drives.py                     # Detección y expulsión de unidades USB/SD montadas
 └── widgets/
-    ├── game_row.py         # Fila de juego en la lista
-    └── preferences_dialog.py
+    ├── game_row.py                # Fila de juego en la lista de la Biblioteca
+    ├── game_detail_dialog.py       # Panel de detalle del juego (carátula + datos GameTDB)
+    ├── preferences_dialog.py       # Diálogo de Preferencias
+    ├── transfer_view.py            # Pestaña Transferir: elegir destino y copiar a WBFS
+    └── gtk_helpers.py              # Utilidades chicas compartidas por diálogos de GTK
 ```
 
 ## Changelog
