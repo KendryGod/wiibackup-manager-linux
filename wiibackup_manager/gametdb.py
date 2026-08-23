@@ -236,6 +236,53 @@ _wiitdb_lock = threading.Lock()
 _wiitdb_index: Optional[dict[str, ET.Element]] = None
 
 
+# Vocabulario de accesorios de GameTDB (documentado en la cabecera del
+# propio wiitdb.xml) traducido a nombres que se entiendan en la interfaz.
+# Un tipo que no esté acá se muestra tal como vino: la lista de GameTDB
+# crece (en el volcado actual ya aparecen "mii", "3dglasses" y "gameboy
+# advance", que no figuran en su documentación), y mostrar el nombre crudo
+# es preferible a tragarse el dato.
+CONTROL_LABELS = {
+    "wiimote": "Wii Remote",
+    "nunchuk": "Nunchuk",
+    "motionplus": "Wii MotionPlus",
+    "classiccontroller": "Classic Controller",
+    "gamecube": "Mando de GameCube",
+    "wheel": "Wii Wheel",
+    "zapper": "Wii Zapper",
+    "balanceboard": "Wii Balance Board",
+    "wiispeak": "Wii Speak",
+    "microphone": "Micrófono",
+    "guitar": "Guitarra",
+    "drums": "Batería",
+    "dancepad": "Alfombra de baile",
+    "keyboard": "Teclado USB",
+    "nintendods": "Nintendo DS",
+    "udraw": "uDraw GameTablet",
+    "mii": "Mii",
+    "3dglasses": "Gafas 3D",
+    "gameboy advance": "Game Boy Advance",
+}
+
+
+@dataclass(frozen=True)
+class GameControl:
+    """Un accesorio soportado por el juego, según GameTDB."""
+
+    type: str
+    required: bool
+
+    @property
+    def label(self) -> str:
+        return CONTROL_LABELS.get(self.type, self.type)
+
+    def describe(self) -> str:
+        """Nombre para mostrar, aclarando si es opcional. Los obligatorios
+        van sin aclaración: son el caso normal y ponerles "(obligatorio)"
+        a todos convertiría la lista en ruido."""
+        return self.label if self.required else f"{self.label} (opcional)"
+
+
 @dataclass
 class GameExtraInfo:
     genre: Optional[str] = None
@@ -250,11 +297,20 @@ class GameExtraInfo:
     # aporta algo y cuál sería un duplicado. Ver `title_to_show_next_to`.
     localized_title: Optional[str] = None
     original_title: Optional[str] = None
+    # Sinopsis en el idioma configurado, cayendo al inglés si ese idioma no
+    # la tiene (la trae el 80% de los juegos en EN y el 51% en ES).
+    synopsis: Optional[str] = None
+    # Accesorios soportados, en el orden en que los lista GameTDB (que
+    # arranca por el mando principal). Tupla y no lista: este dataclass se
+    # comparte entre hilos, y una tupla no se puede modificar sin querer
+    # desde la interfaz.
+    controls: tuple = ()
 
     def is_empty(self) -> bool:
         return not any((self.genre, self.players, self.release_date,
                          self.publisher, self.developer,
-                         self.localized_title, self.original_title))
+                         self.localized_title, self.original_title,
+                         self.synopsis, self.controls))
 
     def title_to_show_next_to(self, displayed_title: str):
         """Devuelve (etiqueta, título) con el título de GameTDB que vale la
@@ -362,19 +418,61 @@ def _ensure_wiitdb_index() -> dict[str, ET.Element]:
         return _wiitdb_index
 
 
-def _locale_titles(game_el: ET.Element) -> dict:
-    """Títulos de un <game> por idioma: {"EN": "...", "ES": "...", ...}.
+def _locale_texts(game_el: ET.Element, tag: str) -> dict:
+    """Textos de un <game> por idioma: {"EN": "...", "ES": "...", ...}.
 
-    En wiitdb.xml cada idioma es un <locale lang="XX"> con su <title>
-    adentro. Los idiomas sin título informado (los hay, sobre todo en KO)
-    no entran al diccionario."""
-    titles = {}
+    En wiitdb.xml cada idioma es un <locale lang="XX"> con <title> y
+    <synopsis> adentro. Los idiomas que traen la etiqueta vacía (los hay,
+    sobre todo <synopsis /> en KO) no entran al diccionario, para que el
+    respaldo al inglés se active en vez de dejar el campo en blanco."""
+    texts = {}
     for locale_el in game_el.findall("locale"):
         lang = (locale_el.get("lang") or "").upper()
-        title_el = locale_el.find("title")
-        if lang and title_el is not None and title_el.text and title_el.text.strip():
-            titles[lang] = title_el.text.strip()
-    return titles
+        el = locale_el.find(tag)
+        if lang and el is not None and el.text and el.text.strip():
+            texts[lang] = el.text.strip()
+    return texts
+
+
+def _clean_synopsis(text: Optional[str]) -> Optional[str]:
+    """Normaliza los saltos de línea de una sinopsis de GameTDB.
+
+    Los textos vienen con párrafos separados por líneas que tienen un
+    espacio suelto (" \n \n"), que al mostrarlos tal cual dejan huecos
+    irregulares. Se limpian los espacios al final de cada línea y se
+    colapsan las corridas de líneas vacías a una sola."""
+    if not text:
+        return None
+    lines = [line.strip() for line in text.splitlines()]
+    paragraphs = []
+    for line in lines:
+        if line:
+            paragraphs.append(line)
+        elif paragraphs and paragraphs[-1] != "":
+            paragraphs.append("")
+    cleaned = "\n".join(paragraphs).strip()
+    return cleaned or None
+
+
+def _parse_controls(game_el: ET.Element) -> tuple:
+    """Accesorios soportados, sin repetidos y respetando el orden de
+    GameTDB. Un <control> sin `type` se ignora (no hay nada que mostrar);
+    `required` se toma como verdadero salvo que diga explícitamente
+    "false", para no marcar como opcional algo que en realidad no sabemos.
+    """
+    input_el = game_el.find(".//input")
+    if input_el is None:
+        return ()
+    controls = []
+    seen = set()
+    for control_el in input_el.findall("control"):
+        ctype = (control_el.get("type") or "").strip().lower()
+        if not ctype or ctype in seen:
+            continue
+        seen.add(ctype)
+        controls.append(GameControl(type=ctype,
+                                     required=control_el.get("required") != "false"))
+    return tuple(controls)
 
 
 def get_game_extra_info(game_id: str,
@@ -395,11 +493,20 @@ def get_game_extra_info(game_id: str,
             return child.text.strip()
         return None
 
-    titles = _locale_titles(game_el)
+    lang = language_for_region(language)
+
+    titles = _locale_texts(game_el, "title")
     # El título "original" es el inglés: es el que GameTDB usa como
     # canónico y del que salen las traducciones del resto de los idiomas.
     original_title = titles.get(DEFAULT_LANGUAGE)
-    localized_title = titles.get(language_for_region(language))
+    localized_title = titles.get(lang)
+
+    # La sinopsis sí cae al inglés si el idioma configurado no la tiene:
+    # a diferencia del título (donde mostrar el inglés cuando ya se ve el
+    # inglés no aporta nada), acá el respaldo es la diferencia entre leer
+    # de qué se trata el juego o no leer nada.
+    synopses = _locale_texts(game_el, "synopsis")
+    synopsis = _clean_synopsis(synopses.get(lang) or synopses.get(DEFAULT_LANGUAGE))
 
     players = None
     input_el = game_el.find(".//input")
@@ -422,6 +529,8 @@ def get_game_extra_info(game_id: str,
         developer=text_of("developer"),
         localized_title=localized_title,
         original_title=original_title,
+        synopsis=synopsis,
+        controls=_parse_controls(game_el),
     )
     return None if info.is_empty() else info
 

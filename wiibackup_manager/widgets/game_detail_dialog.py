@@ -1,8 +1,10 @@
 """Panel de detalle de un juego: carátula grande + datos conocidos del
-archivo (ID, formato, tamaño) más lo que GameTDB tenga disponible (género,
-jugadores, fecha de lanzamiento, publisher, developer). Si GameTDB no trae
-alguno de esos datos para el juego, esa fila simplemente no se muestra: no
-se inventa ni se rellena con un placeholder."""
+archivo (ID, formato, tamaño) más lo que GameTDB tenga disponible (título
+original, género, jugadores, fecha de lanzamiento, publisher, developer,
+controles compatibles y sinopsis). Si GameTDB no trae alguno de esos datos
+para el juego, esa fila (o esa sección entera, en el caso de la sinopsis)
+simplemente no se muestra: no se inventa ni se rellena con un
+placeholder."""
 from __future__ import annotations
 
 import gi
@@ -55,6 +57,39 @@ class GameDetailDialog(Adw.Dialog):
         self._extra_status_row.add_suffix(spinner)
         self.info_group.add(self._extra_status_row)
 
+        # Sinopsis: arranca oculta y solo se muestra si GameTDB tiene una
+        # para este juego (la tiene ~el 80% de la base).
+        self.synopsis_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
+                                     visible=False)
+        synopsis_heading = Gtk.Label(label="Sinopsis", xalign=0)
+        synopsis_heading.add_css_class("heading")
+        self.synopsis_box.append(synopsis_heading)
+
+        # `use_markup` queda en False (el valor por defecto): la sinopsis
+        # es texto que baja de GameTDB, y no puede traer etiquetas Pango
+        # que terminen interpretadas como formato.
+        self._synopsis_label = Gtk.Label(xalign=0, yalign=0, wrap=True,
+                                          margin_start=8, margin_end=8,
+                                          margin_top=8, margin_bottom=8)
+        self._synopsis_label.set_selectable(True)
+
+        # Scroll propio y acotado en vez de dejar crecer el panel: hay
+        # sinopsis de más de 7000 caracteres en la base, y sin tope el
+        # resto de los datos quedaría a varias pantallas de distancia.
+        # Con `propagate_natural_height` una sinopsis corta no deja hueco
+        # vacío ni muestra barra: el marco se ajusta a lo que ocupa.
+        synopsis_scroller = Gtk.ScrolledWindow()
+        synopsis_scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        synopsis_scroller.set_propagate_natural_height(True)
+        synopsis_scroller.set_max_content_height(260)
+        synopsis_scroller.set_child(self._synopsis_label)
+
+        synopsis_frame = Gtk.Frame()
+        synopsis_frame.set_child(synopsis_scroller)
+        self.synopsis_box.append(synopsis_frame)
+
+        outer.append(self.synopsis_box)
+
         scroller = Gtk.ScrolledWindow()
         scroller.set_child(outer)
         scroller.set_vexpand(True)
@@ -65,8 +100,13 @@ class GameDetailDialog(Adw.Dialog):
         self._load_cover_async(cover_region)
         self._load_extra_info_async()
 
-    def _add_row(self, label: str, value: str):
+    def _add_row(self, label: str, value: str, wrap: bool = False):
         row = Adw.ActionRow(title=label, subtitle=value)
+        if wrap:
+            # 0 = sin límite de líneas. La lista de controles de un juego
+            # como Mario Kart Wii son seis accesorios y no entra en una
+            # sola línea: sin esto se cortaría con puntos suspensivos.
+            row.set_subtitle_lines(0)
         self.info_group.add(row)
         return row
 
@@ -126,4 +166,13 @@ class GameDetailDialog(Adw.Dialog):
             self._add_row("Publisher", info.publisher)
         if info.developer:
             self._add_row("Developer", info.developer)
+        if info.controls:
+            self._add_row(
+                "Controles compatibles",
+                " · ".join(control.describe() for control in info.controls),
+                wrap=True,
+            )
+        if info.synopsis:
+            self._synopsis_label.set_label(info.synopsis)
+            self.synopsis_box.set_visible(True)
         return False
