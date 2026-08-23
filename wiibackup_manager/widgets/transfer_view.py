@@ -15,6 +15,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk, GLib  # noqa: E402
 
 from .. import drives, gametdb, library, wit_wrapper
+from ..operations import OperationBusy, OperationKind
 from ..library import Game
 from . import gtk_helpers
 from .game_row import build_cover_widget
@@ -65,10 +66,18 @@ class TransferGameRow(Adw.ActionRow):
 
 
 class TransferView(Gtk.Box):
-    def __init__(self, settings, show_toast_cb):
+    def __init__(self, settings, show_toast_cb, ops=None):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.settings = settings
         self._show_toast = show_toast_cb
+        # Gestor de operaciones compartido con la ventana principal: es el
+        # que evita, por ejemplo, transferir un juego que se está
+        # convirtiendo o borrando desde la Biblioteca. Ver operations.py.
+        if ops is None:
+            from ..operations import OperationManager
+            ops = OperationManager()
+        self.ops = ops
+        self.ops.add_listener(lambda: GLib.idle_add(self._update_operation_ui))
         self._games: list[Game] = []
         self._game_rows: list[TransferGameRow] = []
         self._dest_path: Path | None = None
@@ -181,6 +190,18 @@ class TransferView(Gtk.Box):
         self.append(action_box)
 
         self._refresh_drives()
+        self._update_operation_ui()
+
+    def _update_operation_ui(self):
+        """Apaga el botón de transferir mientras haya cualquier operación en
+        curso (propia o de la Biblioteca): son los mismos archivos."""
+        busy_label = self.ops.busy_label()
+        self.transfer_button.set_sensitive(busy_label is None)
+        self.transfer_button.set_tooltip_text(
+            f"Hay una operación en curso: {busy_label}. Esperá a que termine."
+            if busy_label else None
+        )
+        return False
 
     # ------------------------------------------------------------ Destino --
     @staticmethod
@@ -417,6 +438,12 @@ class TransferView(Gtk.Box):
         self._start_transfer(selected, dest_root)
 
     def _start_transfer(self, selected: list[Game], dest_root: Path, overwrite: bool = False):
+        try:
+            op = self.ops.start(OperationKind.TRANSFERRING, [g.path for g in selected])
+        except OperationBusy as e:
+            self._show_toast(f"No se puede ahora: {e.detail}.")
+            return
+
         wit_binary = self.settings.wit_binary
         # Token nuevo por transferencia: no arrastra el estado de una
         # cancelación anterior.
@@ -483,7 +510,7 @@ class TransferView(Gtk.Box):
                     err_count += 1
                 bytes_done += game.size_bytes
             GLib.idle_add(self._on_transfer_done, ok_count, err_count, cancelled,
-                          skipped_count)
+                          skipped_count, op)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -519,7 +546,8 @@ class TransferView(Gtk.Box):
         return False
 
     def _on_transfer_done(self, ok_count: int, err_count: int, cancelled: bool = False,
-                           skipped_count: int = 0):
+                           skipped_count: int = 0, op=None):
+        self.ops.finish(op)
         self.transfer_button.set_sensitive(True)
         self.cancel_button.set_visible(False)
         self.transfer_progress.set_visible(False)
