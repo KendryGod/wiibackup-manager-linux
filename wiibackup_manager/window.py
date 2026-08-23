@@ -36,6 +36,7 @@ SORT_OPTIONS = [
 from .library import Game
 from .widgets.game_detail_dialog import GameDetailDialog
 from .widgets.game_row import GameRow
+from .widgets import gtk_helpers
 from .widgets.preferences_dialog import PreferencesDialog
 from .widgets.transfer_view import TransferView
 
@@ -582,6 +583,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
     def _on_add_folder(self, *_):
         dialog = Gtk.FileDialog(title="Agregar carpeta completa")
+        dialog.set_initial_folder(gtk_helpers.safe_initial_folder())
         dialog.select_folder(self, None, self._on_folder_chosen)
 
     def _on_folder_chosen(self, dialog, result):

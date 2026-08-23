@@ -2,6 +2,7 @@
 juegos seleccionados de la biblioteca hacia allí en formato WBFS."""
 from __future__ import annotations
 
+import os
 import shutil
 import threading
 import time
@@ -15,6 +16,7 @@ from gi.repository import Adw, Gtk, GLib  # noqa: E402
 
 from .. import drives, gametdb, library
 from ..library import Game
+from . import gtk_helpers
 from .game_row import build_cover_widget
 
 
@@ -71,8 +73,14 @@ class TransferView(Gtk.Box):
         self._game_rows: list[TransferGameRow] = []
         self._dest_path: Path | None = None
         self._transfer_cancelled = False
+        # Snapshot de los puntos de montaje detectados en el último refresco,
+        # para que el sondeo periódico solo repueble la lista cuando algo
+        # cambió de verdad (unidad nueva, expulsada, o carpeta manual que
+        # dejó de existir) en vez de reconstruir todo cada 3 segundos.
+        self._known_auto_mounts: set[Path] = set()
 
         self._build_ui()
+        GLib.timeout_add_seconds(3, self._poll_drives)
 
     # ---------------------------------------------------------------- UI --
     def _build_ui(self):
@@ -171,11 +179,27 @@ class TransferView(Gtk.Box):
         self._refresh_drives()
 
     # ------------------------------------------------------------ Destino --
+    @staticmethod
+    def _is_dest_valid(path: Path) -> bool:
+        """True si `path` todavía existe y es una carpeta legible. Cubre
+        tanto la carpeta agregada a mano que quedó huérfana (la unidad que
+        la contenía se expulsó/desconectó) como una carpeta local borrada
+        después de agregarla."""
+        try:
+            return path.is_dir() and os.access(path, os.R_OK)
+        except OSError:
+            return False
+
     def _refresh_drives(self):
         """Vuelve a detectar las unidades removibles montadas y repuebla la
-        lista, preservando las carpetas que el usuario agregó a mano
-        (esas no se "detectan", así que no deben desaparecer al refrescar)."""
-        manual_rows = [row for row in self._iter_dest_rows() if getattr(row, "is_manual", False)]
+        lista, preservando las carpetas que el usuario agregó a mano (esas
+        no se "detectan" solas) pero solo si siguen siendo accesibles: una
+        carpeta manual cuya unidad ya se expulsó desaparece de la lista en
+        vez de quedar mostrada con un error de espacio genérico."""
+        manual_rows = [
+            row for row in self._iter_dest_rows()
+            if getattr(row, "is_manual", False) and self._is_dest_valid(row.dest_path)
+        ]
         selected_path = self._dest_path
 
         child = self.dest_list.get_first_child()
@@ -184,24 +208,50 @@ class TransferView(Gtk.Box):
             self.dest_list.remove(child)
             child = nxt
 
-        for drive in drives.list_removable_drives():
+        auto_drives = drives.list_removable_drives()
+        for drive in auto_drives:
             subtitle = f"{drive.free_gb:.1f} GB libres de {drive.total_gb:.1f} GB · {drive.mount_point}"
             row = Adw.ActionRow(title=drive.name, subtitle=subtitle)
             row.dest_path = drive.mount_point
             row.is_manual = False
             row.add_prefix(Gtk.Image.new_from_icon_name("drive-removable-media-symbolic"))
             self.dest_list.append(row)
+        self._known_auto_mounts = {d.mount_point for d in auto_drives}
 
         for row in manual_rows:
             self.dest_list.append(row)
 
         # Si el destino elegido sigue en la lista (unidad que ya estaba
-        # conectada o carpeta manual), lo re-seleccionamos.
+        # conectada o carpeta manual todavía válida), lo re-seleccionamos.
+        reselected = False
         if selected_path is not None:
             for row in self._iter_dest_rows():
                 if getattr(row, "dest_path", None) == selected_path:
                     self.dest_list.select_row(row)
+                    reselected = True
                     break
+
+        if selected_path is not None and not reselected:
+            # El destino elegido ya no está disponible (unidad expulsada o
+            # desconectada, o carpeta manual borrada): se saca de la
+            # selección en vez de dejarlo mostrado con un error genérico.
+            self._dest_path = None
+            self.dest_list.unselect_all()
+            self._update_dest_space_label()
+            self._update_eject_button()
+            self._show_toast("El destino elegido ya no está disponible y se quitó de la lista.")
+
+    def _poll_drives(self):
+        """Sondeo periódico (mismo patrón que la detección de la Biblioteca
+        desconectada): solo repuebla la lista de destinos cuando algo
+        cambió de verdad, para no reconstruirla sin necesidad cada pocos
+        segundos."""
+        current_auto = {d.mount_point for d in drives.list_removable_drives()}
+        manual_rows = [row for row in self._iter_dest_rows() if getattr(row, "is_manual", False)]
+        manual_became_invalid = any(not self._is_dest_valid(row.dest_path) for row in manual_rows)
+        if current_auto != self._known_auto_mounts or manual_became_invalid:
+            self._refresh_drives()
+        return True  # seguir sondeando
 
     def _iter_dest_rows(self):
         row = self.dest_list.get_first_child()
@@ -268,6 +318,7 @@ class TransferView(Gtk.Box):
 
     def _on_add_folder(self, *_):
         dialog = Gtk.FileDialog(title="Elegí la carpeta destino")
+        dialog.set_initial_folder(gtk_helpers.safe_initial_folder())
         dialog.select_folder(self.get_root(), None, self._on_folder_picked)
 
     def _on_folder_picked(self, dialog, result):
