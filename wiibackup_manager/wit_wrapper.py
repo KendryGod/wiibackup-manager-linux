@@ -105,15 +105,29 @@ def convert(
     target_format: str,
     binary: str = "wit",
     progress_cb: Optional[Callable[[str], None]] = None,
+    split: bool = False,
 ) -> subprocess.CompletedProcess:
-    """Convierte src -> dest. target_format: 'WBFS' o 'ISO'."""
+    """Convierte src -> dest. target_format: 'WBFS' o 'ISO'.
+
+    `split=True` agrega `--split` (división en partes de ~4GiB, el tamaño
+    por defecto de `wit`), necesario para destinos en FAT32, que no admite
+    archivos más grandes y con el que hay discos Wii dual-layer que no
+    entran enteros. `wit` solo genera varias partes cuando el resultado
+    realmente supera ese límite, así que pasar `split=True` "por las
+    dudas" en un filesystem que sí soporta archivos grandes no tiene
+    costo: el archivo sale igual, entero."""
     if not find_wit(binary):
         raise WitNotFoundError(binary)
 
     # wit infiere el formato de salida por la extensión de --dest, así que
     # nos aseguramos de que dest tenga la extensión correcta antes de llamar.
+    args = [binary, "COPY", "--overwrite"]
+    if split:
+        args.append("--split")
+    args += [str(src), "--dest", str(dest)]
+
     result = subprocess.run(
-        [binary, "COPY", "--overwrite", str(src), "--dest", str(dest)],
+        args,
         capture_output=True,
         text=True,
         check=False,

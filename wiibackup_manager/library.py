@@ -8,10 +8,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import wit_wrapper
+from . import drives, wit_wrapper
 from .disc_header import DiscInfo, read_plain_iso_header
 
 VALID_EXTENSIONS = {".iso", ".wbfs", ".ciso", ".wdf"}
+
+# Límite duro de FAT32 por archivo (en realidad 2^32 - 1 bytes; usamos
+# 4 GiB parejo, igual que el tamaño de partición por defecto de `wit
+# --split`, para decidir si un WBFS ya existente entra sin dividir).
+_FAT32_SIZE_LIMIT_BYTES = 4 * 1024 ** 3
 
 _INVALID_FS_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
@@ -159,21 +164,32 @@ def rename_to_standard(game: Game, dry_run: bool = False) -> Path:
 def send_to_wbfs_drive(game: Game, drive_root: Path, wit_binary: str = "wit") -> Path:
     """Copia `game` a la estructura estándar 'wbfs/<ID6>/<ID6>.wbfs' que
     reconocen los USB Loaders de Wii (USB Loader GX, CFG USB Loader, etc.)
-    dentro de `drive_root`. Si el origen ya es WBFS se copia tal cual; para
-    cualquier otro formato (ISO/CISO/WDF) se delega la conversión en `wit`,
-    que es quien sabe empaquetar el WBFS correctamente."""
+    dentro de `drive_root`. Si el origen ya es WBFS y entra entero se copia
+    tal cual; para cualquier otro formato (ISO/CISO/WDF), o si el destino
+    puede necesitar dividir el archivo, se delega en `wit`, que es quien
+    sabe empaquetar (y, si hace falta, partir) el WBFS correctamente.
+
+    FAT32 tiene un límite duro de ~4GiB por archivo, y hay discos Wii
+    dual-layer que lo superan: si el filesystem del destino no se puede
+    determinar con confianza, se asume que hace falta dividir (ver
+    `drives.needs_wbfs_split`)."""
     dest_dir = Path(drive_root) / "wbfs" / game.game_id
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / f"{game.game_id}.wbfs"
 
-    if game.fmt.upper() == "WBFS":
+    split = drives.needs_wbfs_split(dest_dir)
+
+    # Copia directa solo si ya es WBFS Y sabemos que entra entero sin
+    # dividir (si hiciera falta dividir, una copia plana no puede hacerlo:
+    # hay que pasar por `wit COPY --split`).
+    if game.fmt.upper() == "WBFS" and not (split and game.size_bytes >= _FAT32_SIZE_LIMIT_BYTES):
         shutil.copy2(game.path, dest)
         return dest
 
     if not wit_wrapper.is_available(wit_binary):
         raise wit_wrapper.WitNotFoundError(wit_binary)
 
-    result = wit_wrapper.convert(game.path, dest, "WBFS", wit_binary)
+    result = wit_wrapper.convert(game.path, dest, "WBFS", wit_binary, split=split)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "Error desconocido al convertir con wit")
     return dest

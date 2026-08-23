@@ -94,6 +94,48 @@ def _block_device_for(path: Path) -> str | None:
     return result.stdout.strip() or None
 
 
+# FAT clásico (FAT12/16/32, que Linux suele reportar como "vfat" o a veces
+# "msdos"): límite duro de ~4GiB por archivo. exFAT explícitamente NO entra
+# acá: se diseñó justamente para levantar ese límite.
+_FAT32_FSTYPES = {"vfat", "fat", "fat12", "fat16", "fat32", "msdos"}
+
+
+def filesystem_of(path: Path) -> str | None:
+    """Tipo de filesystem (ej. 'vfat', 'ext4') montado en `path` o en el
+    punto de montaje que lo contiene, vía findmnt. None si no se pudo
+    determinar con confianza (findmnt ausente, `path` no corresponde a
+    ningún punto de montaje reconocible, etc.)."""
+    try:
+        result = subprocess.run(
+            ["findmnt", "-no", "FSTYPE", "--target", str(path)],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    lines = result.stdout.strip().splitlines()
+    return lines[0].strip().lower() if lines and lines[0].strip() else None
+
+
+def needs_wbfs_split(path: Path) -> bool:
+    """True si hay que dividir el WBFS resultante en partes de ~4GiB para
+    que quepa en el filesystem del destino (`path`, que debe existir).
+
+    FAT32 tiene un límite duro de ~4GiB por archivo, y hay discos Wii
+    dual-layer que lo superan. Si no podemos determinar el filesystem con
+    confianza (findmnt ausente, montaje no reconocible, etc.) preferimos
+    dividir de todos modos: la opción `--split` de `wit` solo separa el
+    archivo cuando el resultado realmente supera ese límite (ver
+    `wit_wrapper.convert`), así que pedir la división "por las dudas" en un
+    filesystem que sí soporta archivos grandes no rompe nada, solo es una
+    precaución de sobra."""
+    fstype = filesystem_of(path)
+    if fstype is None:
+        return True
+    return fstype in _FAT32_FSTYPES
+
+
 def eject_mount_point(path: Path) -> tuple[bool, str]:
     """Desmonta de forma segura `path` para que la unidad se pueda
     desconectar físicamente. Usa udisksctl (unmount + power-off, lo que
