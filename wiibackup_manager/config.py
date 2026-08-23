@@ -20,8 +20,49 @@ XDG_CACHE_HOME = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
 
 CONFIG_DIR = XDG_CONFIG_HOME / "wiibackup-manager"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+# El historial de operaciones va junto a la configuración y NO en la
+# caché: la caché es todo contenido que se puede volver a bajar de
+# GameTDB (carátulas, wiitdb.xml), así que borrarla tiene que ser
+# inofensivo. El historial, en cambio, no se puede reconstruir de ningún
+# lado si se pierde.
+HISTORY_FILE = CONFIG_DIR / "history.json"
 CACHE_DIR = XDG_CACHE_HOME / "wiibackup-manager"
 COVERS_DIR = CACHE_DIR / "covers"
+
+
+def write_json_atomic(path: Path, payload: str) -> None:
+    """Escribe `payload` en `path` de forma atómica.
+
+    Se escribe primero a un temporal en la MISMA carpeta (para que el
+    rename sea dentro del mismo filesystem, condición para que sea
+    atómico), se fuerza el flush a disco y recién ahí se reemplaza el
+    archivo real con `os.replace`. Así el archivo nunca queda a medio
+    escribir: o está el contenido viejo entero, o el nuevo entero.
+
+    Antes esto era un `write_text()` directo en config.json: si la app o
+    el sistema se cortaba en ese instante, el archivo quedaba truncado y
+    el próximo arranque volvía a los valores por defecto sin decir nada,
+    perdiendo las preferencias del usuario. El historial de operaciones
+    usa la misma escritura por el mismo motivo.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Temporal con nombre único: dos guardados simultáneos no se pisan
+    # el temporal entre sí (el último `os.replace` gana, entero).
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent),
+                                     prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 @dataclass
@@ -77,37 +118,9 @@ class Settings:
         return cls(**values)
 
     def save(self) -> None:
-        """Guarda la configuración de forma atómica.
-
-        Se escribe primero a un temporal en la MISMA carpeta (para que el
-        rename sea dentro del mismo filesystem, condición para que sea
-        atómico), se fuerza el flush a disco y recién ahí se reemplaza el
-        archivo real con `os.replace`. Así config.json nunca queda a medio
-        escribir: o está el contenido viejo entero, o el nuevo entero.
-
-        Antes era un `write_text()` directo: si la app o el sistema se
-        cortaba en ese instante, el archivo quedaba truncado y el próximo
-        arranque volvía a los valores por defecto sin decir nada, perdiendo
-        las preferencias del usuario."""
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps(asdict(self), indent=2)
-
-        # Temporal con nombre único: dos guardados simultáneos no se pisan
-        # el temporal entre sí (el último `os.replace` gana, entero).
-        fd, tmp_name = tempfile.mkstemp(dir=str(CONFIG_DIR), prefix=".config.json.",
-                                         suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(payload)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_name, CONFIG_FILE)
-        except BaseException:
-            try:
-                os.unlink(tmp_name)
-            except OSError:
-                pass
-            raise
+        """Guarda la configuración de forma atómica (ver
+        `write_json_atomic`, compartida con el historial de operaciones)."""
+        write_json_atomic(CONFIG_FILE, json.dumps(asdict(self), indent=2))
 
 
 def ensure_dirs(settings: Settings) -> None:

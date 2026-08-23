@@ -71,6 +71,19 @@ class Operation:
         return self.kind.label
 
 
+@dataclass(frozen=True)
+class OperationOutcome:
+    """Cómo terminó una operación, para el historial.
+
+    `target` es sobre qué se operó (el título del juego, o un resumen como
+    "12 juegos" en las operaciones en lote) y `detail` el motivo del error
+    o el desglose, vacío si no hay nada que aclarar."""
+
+    status: str
+    target: str
+    detail: str = ""
+
+
 class OperationBusy(RuntimeError):
     """No se puede arrancar la operación pedida porque hay otra en curso
     que la bloquea. `blocker` es esa otra operación."""
@@ -97,13 +110,20 @@ def _normalize(paths: Iterable) -> frozenset:
 class OperationManager:
     """Registro de las operaciones en curso. Seguro entre hilos: la
     interfaz consulta desde el hilo de GTK y los workers terminan sus
-    operaciones desde hilos de fondo."""
+    operaciones desde hilos de fondo.
 
-    def __init__(self) -> None:
+    Si se le pasa un `log` (un `oplog.OperationLog`), cada operación que
+    termina informando su resultado queda registrada en el historial. El
+    enganche va acá y no en cada worker porque este es el único lugar por
+    el que pasan todas las operaciones largas de la app, así que ninguna
+    se puede olvidar de registrarse."""
+
+    def __init__(self, log=None) -> None:
         self._lock = threading.RLock()
         self._active: dict = {}
         self._next_id = 1
         self._listeners: list = []
+        self._log = log
 
     # ------------------------------------------------------------ Estado --
     def active_operations(self) -> list:
@@ -196,16 +216,31 @@ class OperationManager:
         self._notify()
         return op
 
-    def finish(self, op: Optional[Operation]) -> None:
+    def finish(self, op: Optional[Operation], result: Optional["OperationOutcome"] = None) -> None:
         """Marca la operación como terminada. Tolera `None` y llamadas
         repetidas para que el `finally` de un worker no tenga que
-        preocuparse por si la operación llegó a arrancar."""
+        preocuparse por si la operación llegó a arrancar.
+
+        `result`, si se pasa, es lo que se guarda en el historial. Solo se
+        registra en la primera llamada (la que efectivamente saca la
+        operación de la lista de activas): un worker que llama a `finish`
+        en un `finally` y otra vez al terminar no puede dejar la operación
+        anotada dos veces.
+
+        El escaneo de la biblioteca no se registra aunque informe
+        resultado: no es una acción que el usuario pida (corre solo al
+        arrancar y después de cada operación) y llenaría el historial de
+        entradas que no dicen nada."""
         if op is None:
             return
         with self._lock:
             existed = self._active.pop(op.id, None) is not None
-        if existed:
-            self._notify()
+        if not existed:
+            return
+        if (result is not None and self._log is not None
+                and op.kind is not OperationKind.SCANNING):
+            self._log.record(op.label, result.target, result.status, result.detail)
+        self._notify()
 
     # --------------------------------------------------------- Listeners --
     def add_listener(self, callback: Callable[[], None]) -> None:

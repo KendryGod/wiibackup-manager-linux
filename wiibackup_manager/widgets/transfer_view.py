@@ -14,8 +14,8 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk, GLib  # noqa: E402
 
-from .. import drives, gametdb, library, wit_wrapper
-from ..operations import OperationBusy, OperationKind
+from .. import drives, gametdb, library, oplog, wit_wrapper
+from ..operations import OperationBusy, OperationKind, OperationOutcome
 from ..library import Game
 from . import gtk_helpers
 from .game_row import build_cover_widget
@@ -525,6 +525,11 @@ class TransferView(Gtk.Box):
 
         total = len(selected)
         total_bytes = sum(g.size_bytes for g in selected)
+        # Igual que en la Biblioteca: el título si es uno solo, el recuento
+        # si es un lote. Se calcula acá (no en el worker) porque `selected`
+        # es la lista con la que arrancó la transferencia.
+        target = (selected[0].title if len(selected) == 1
+                  else f"{len(selected)} juegos")
 
         def worker():
             ok_count = 0
@@ -577,7 +582,7 @@ class TransferView(Gtk.Box):
                     err_count += 1
                 bytes_done += game.size_bytes
             GLib.idle_add(self._on_transfer_done, ok_count, err_count, cancelled,
-                          skipped_count, op)
+                          skipped_count, op, target)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -613,8 +618,26 @@ class TransferView(Gtk.Box):
         return False
 
     def _on_transfer_done(self, ok_count: int, err_count: int, cancelled: bool = False,
-                           skipped_count: int = 0, op=None):
-        self.ops.finish(op)
+                           skipped_count: int = 0, op=None, target: str = ""):
+        # El resultado que se le pasa a `finish` es lo que queda anotado en
+        # la pestaña Log. Cancelado gana sobre el resto (lo pidió el
+        # usuario); un lote con parte copiada y parte fallada queda como
+        # "parcial", que no es lo mismo que no haber copiado nada.
+        detail_parts = [f"{ok_count} ok"]
+        if skipped_count:
+            detail_parts.append(f"{skipped_count} ya estaban en el destino")
+        if err_count:
+            detail_parts.append(f"{err_count} con error")
+        if cancelled:
+            status = oplog.STATUS_CANCELLED
+        elif not err_count:
+            status = oplog.STATUS_OK
+        elif ok_count:
+            status = oplog.STATUS_PARTIAL
+        else:
+            status = oplog.STATUS_ERROR
+        self.ops.finish(op, OperationOutcome(status=status, target=target,
+                                              detail=" · ".join(detail_parts)))
         self.transfer_button.set_sensitive(True)
         self.cancel_button.set_visible(False)
         self.transfer_progress.set_visible(False)
