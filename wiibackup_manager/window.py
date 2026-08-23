@@ -13,6 +13,12 @@ from gi.repository import Adw, Gtk, GLib, Gio, Gdk  # noqa: E402
 
 from . import __version__, config, library, wit_wrapper
 
+
+class BatchSkip(Exception):
+    """Una acción de `_run_batch` levanta esto para saltar un juego a
+    propósito (ni error ni éxito), p. ej. porque ya existe el destino."""
+
+
 # (etiqueta, función de orden, invertir) para el desplegable de orden de la
 # Biblioteca. La fecha de agregado usa st_ctime (no st_mtime): _start_import
 # copia con shutil.copy2, que preserva la fecha de modificación original del
@@ -272,8 +278,12 @@ class WiiBackupWindow(Adw.ApplicationWindow):
     # ------------------------------------------------------ Acciones en lote --
     def _run_batch(self, games: list[Game], title: str, action_fn):
         """Corre `action_fn(game)` para cada juego en un hilo aparte,
-        mostrando progreso y un resumen final de éxitos/errores. Se reusa
-        para enviar a WBFS, convertir, verificar y eliminar en lote."""
+        mostrando progreso y un resumen final de éxitos/omitidos/errores. Se
+        reusa para enviar a WBFS, convertir, verificar y eliminar en lote.
+
+        `action_fn` puede levantar `BatchSkip` para señalar que ese juego se
+        salteó a propósito (no es un error ni un éxito, p. ej. porque ya
+        existe el destino): se cuenta y se muestra aparte en el resumen."""
         self.progress_bar.set_visible(True)
         self.progress_bar.set_fraction(0)
         self.set_title(f"WiiBackup Manager — {title}…")
@@ -282,25 +292,33 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         def worker():
             ok = 0
             errors: list[str] = []
+            skipped: list[str] = []
             for i, game in enumerate(games, start=1):
                 try:
                     action_fn(game)
                     ok += 1
+                except BatchSkip as e:
+                    skipped.append(f"{game.title}: {e}" if str(e) else game.title)
                 except Exception as e:
                     errors.append(f"{game.title}: {e}")
                 GLib.idle_add(self.progress_bar.set_fraction, i / max(total, 1))
-            GLib.idle_add(self._on_batch_done, title, ok, errors)
+            GLib.idle_add(self._on_batch_done, title, ok, errors, skipped)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_batch_done(self, title: str, ok: int, errors: list[str]):
+    def _on_batch_done(self, title: str, ok: int, errors: list[str], skipped: list[str] | None = None):
+        skipped = skipped or []
         self.progress_bar.set_visible(False)
+        parts = [f"{ok} ok" if (errors or skipped) else f"{ok} completado(s) ✓"]
+        if skipped:
+            preview = "; ".join(skipped[:3])
+            more = f" (+{len(skipped) - 3} más)" if len(skipped) > 3 else ""
+            parts.append(f"{len(skipped)} omitido(s): {preview}{more}")
         if errors:
             preview = "; ".join(errors[:3])
             more = f" (+{len(errors) - 3} más)" if len(errors) > 3 else ""
-            self._show_toast(f"{title}: {ok} ok, {len(errors)} con error: {preview}{more}")
-        else:
-            self._show_toast(f"{title}: {ok} completado(s) ✓")
+            parts.append(f"{len(errors)} con error: {preview}{more}")
+        self._show_toast(f"{title}: " + " · ".join(parts))
         self.rescan_library()
         return False
 
@@ -413,6 +431,11 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         def convert_one(g: Game):
             target_ext = ".wbfs" if g.fmt.upper() != "WBFS" else ".iso"
             dest = g.path.with_suffix(target_ext)
+            if dest.exists():
+                # En lote no tiene sentido preguntar por cada uno: se
+                # saltea y se informa aparte en el resumen final, en vez de
+                # pisar en silencio o frenar todo el lote por esto.
+                raise BatchSkip("ya existe el destino")
             result = wit_wrapper.convert(g.path, dest, target_ext.strip("."),
                                           self.settings.wit_binary)
             if result.returncode != 0:
@@ -720,6 +743,30 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         target_ext = ".wbfs" if game.fmt.upper() != "WBFS" else ".iso"
         dest = game.path.with_suffix(target_ext)
 
+        if dest.exists():
+            # Ya hay un archivo con ese nombre de destino (no necesariamente
+            # el mismo juego): confirmar antes de pisarlo, en vez de dejar
+            # que --overwrite lo reemplace en silencio.
+            dialog = Adw.AlertDialog(
+                heading="¿Sobrescribir el archivo existente?",
+                body=f"Ya existe un archivo en:\n{dest.name}\n\n"
+                     f"Convertir '{game.title}' lo va a reemplazar. "
+                     "Esta acción no se puede deshacer.",
+            )
+            dialog.add_response("cancel", "Cancelar")
+            dialog.add_response("overwrite", "Sobrescribir")
+            dialog.set_response_appearance("overwrite", Adw.ResponseAppearance.DESTRUCTIVE)
+            dialog.connect("response", self._on_convert_overwrite_response, game, dest, target_ext)
+            dialog.present(self)
+            return
+
+        self._start_convert(game, dest, target_ext)
+
+    def _on_convert_overwrite_response(self, dialog, response, game: Game, dest: Path, target_ext: str):
+        if response == "overwrite":
+            self._start_convert(game, dest, target_ext)
+
+    def _start_convert(self, game: Game, dest: Path, target_ext: str):
         def worker():
             result = wit_wrapper.convert(game.path, dest, target_ext.strip("."),
                                           self.settings.wit_binary)
