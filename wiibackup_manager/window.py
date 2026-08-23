@@ -11,7 +11,7 @@ gi.require_version("Adw", "1")
 gi.require_version("Gdk", "4.0")
 from gi.repository import Adw, Gtk, GLib, Gio, Gdk  # noqa: E402
 
-from . import config, library, wit_wrapper
+from . import __version__, config, library, wit_wrapper
 
 # (etiqueta, función de orden, invertir) para el desplegable de orden de la
 # Biblioteca. La fecha de agregado usa st_ctime (no st_mtime): _start_import
@@ -779,7 +779,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         about = Adw.AboutDialog(
             application_name="WiiBackup Manager",
             application_icon="drive-harddisk-symbolic",
-            version="0.1.0",
+            version=__version__,
             developer_name="GameFix SPS",
             license_type=Gtk.License.MIT_X11,
             comments="Gestor de respaldos de Wii (ISO/WBFS) para Linux, "
