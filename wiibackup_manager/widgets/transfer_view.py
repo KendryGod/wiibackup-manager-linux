@@ -412,10 +412,24 @@ class TransferView(Gtk.Box):
                 if self._transfer_cancelled:
                     cancelled = True
                     break
+                base_bytes_done = bytes_done
+
+                def on_game_progress(current: int, _base=base_bytes_done, _game=game):
+                    # Tope al 97% del tamaño esperado de ESTE juego: es una
+                    # estimación por tamaño de archivo, y wit puede seguir
+                    # cerrando/renombrando un instante más después de
+                    # escribir el último byte. Sin este margen la barra
+                    # llegaría al 100% y se quedaría ahí "clavada" un rato
+                    # antes de que el juego realmente termine.
+                    est = min(current, int(_game.size_bytes * 0.97))
+                    GLib.idle_add(self._update_progress, i, total, _game.title,
+                                  _base + est, total_bytes, start_time)
+
                 GLib.idle_add(self._update_progress, i, total, game.title,
                               bytes_done, total_bytes, start_time)
                 try:
-                    library.send_to_wbfs_drive(game, dest_root, wit_binary)
+                    library.send_to_wbfs_drive(game, dest_root, wit_binary,
+                                                bytes_progress_cb=on_game_progress)
                     ok_count += 1
                 except Exception:
                     # Un juego que falla no frena el resto: se cuenta como
@@ -432,7 +446,16 @@ class TransferView(Gtk.Box):
 
     def _update_progress(self, done: int, total: int, title: str,
                           bytes_done: int, total_bytes: int, start_time: float):
-        self.transfer_progress.set_fraction((done - 1) / max(total, 1))
+        # Fracción por bytes reales (no por "juegos completados"): con un
+        # solo juego grande, `done` no cambia hasta que termina, así que
+        # basarse solo en eso deja la barra clavada en 0% durante toda la
+        # copia/conversión. Con total_bytes en 0 (no debería pasar, pero
+        # por las dudas) cae al cálculo viejo por cantidad de juegos.
+        if total_bytes > 0:
+            fraction = min(bytes_done / total_bytes, 0.99)
+        else:
+            fraction = (done - 1) / max(total, 1)
+        self.transfer_progress.set_fraction(fraction)
         elapsed = time.monotonic() - start_time
         if bytes_done > 0 and elapsed > 1:
             speed = bytes_done / elapsed

@@ -370,10 +370,21 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 if self._send_cancelled:
                     cancelled = True
                     break
+                base_bytes_done = bytes_done
+
+                def on_game_progress(current: int, _base=base_bytes_done, _game=game):
+                    # Tope al 97%: es una estimación por tamaño de archivo,
+                    # y wit puede seguir cerrando/renombrando un instante
+                    # más después de escribir el último byte.
+                    est = min(current, int(_game.size_bytes * 0.97))
+                    GLib.idle_add(self._update_send_progress, i, total, _game.title,
+                                  _base + est, total_bytes, start_time)
+
                 GLib.idle_add(self._update_send_progress, i, total, game.title,
                               bytes_done, total_bytes, start_time)
                 try:
-                    library.send_to_wbfs_drive(game, dest_root, wit_binary)
+                    library.send_to_wbfs_drive(game, dest_root, wit_binary,
+                                                bytes_progress_cb=on_game_progress)
                     ok += 1
                 except Exception as e:
                     # No frena el resto de la selección: se cuenta como
@@ -386,7 +397,14 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
     def _update_send_progress(self, done: int, total: int, title: str,
                                bytes_done: int, total_bytes: int, start_time: float):
-        self.progress_bar.set_fraction((done - 1) / max(total, 1))
+        # Fracción por bytes reales, no por "juegos completados": con un
+        # solo juego grande `done` no cambia hasta que termina, así que
+        # basarse solo en eso deja la barra clavada en 0% toda la copia.
+        if total_bytes > 0:
+            fraction = min(bytes_done / total_bytes, 0.99)
+        else:
+            fraction = (done - 1) / max(total, 1)
+        self.progress_bar.set_fraction(fraction)
         elapsed = time.monotonic() - start_time
         if bytes_done > 0 and elapsed > 1:
             speed = bytes_done / elapsed
@@ -428,20 +446,53 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             self._show_toast("No se encontró 'wit'. Instalalo para poder convertir (ver README).")
             return
 
-        def convert_one(g: Game):
-            target_ext = ".wbfs" if g.fmt.upper() != "WBFS" else ".iso"
-            dest = g.path.with_suffix(target_ext)
-            if dest.exists():
-                # En lote no tiene sentido preguntar por cada uno: se
-                # saltea y se informa aparte en el resumen final, en vez de
-                # pisar en silencio o frenar todo el lote por esto.
-                raise BatchSkip("ya existe el destino")
-            result = wit_wrapper.convert(g.path, dest, target_ext.strip("."),
-                                          self.settings.wit_binary)
-            if result.returncode != 0:
-                raise RuntimeError(result.stderr.strip()[:200] or "error de wit")
+        # Worker dedicado (no _run_batch genérico) porque acá sí tiene
+        # sentido mostrar progreso real por bytes dentro de la conversión
+        # de un solo juego grande, igual que en el envío a unidad WBFS:
+        # con _run_batch la barra solo avanza entre juegos y se queda
+        # clavada en 0% durante la conversión de uno solo pesado.
+        self.progress_bar.set_visible(True)
+        self.progress_bar.set_fraction(0)
+        self.set_title("WiiBackup Manager — Convirtiendo…")
 
-        self._run_batch(games, "Convirtiendo", convert_one)
+        total_bytes = sum(g.size_bytes for g in games)
+        wit_binary = self.settings.wit_binary
+
+        def worker():
+            ok = 0
+            errors: list[str] = []
+            skipped: list[str] = []
+            bytes_done = 0
+            for game in games:
+                target_ext = ".wbfs" if game.fmt.upper() != "WBFS" else ".iso"
+                dest = game.path.with_suffix(target_ext)
+                base_bytes_done = bytes_done
+
+                def on_progress(current: int, _base=base_bytes_done, _game=game):
+                    est = min(current, int(_game.size_bytes * 0.97))
+                    frac = min((_base + est) / max(total_bytes, 1), 0.99)
+                    GLib.idle_add(self.progress_bar.set_fraction, frac)
+
+                GLib.idle_add(self.progress_bar.set_fraction,
+                              min(bytes_done / max(total_bytes, 1), 0.99))
+                if dest.exists():
+                    # En lote no tiene sentido preguntar por cada uno: se
+                    # saltea y se informa aparte en el resumen final, en
+                    # vez de pisar en silencio o frenar todo el lote.
+                    skipped.append(game.title)
+                else:
+                    try:
+                        result = wit_wrapper.convert(game.path, dest, target_ext.strip("."),
+                                                      wit_binary, bytes_progress_cb=on_progress)
+                        if result.returncode != 0:
+                            raise RuntimeError(result.stderr.strip()[:200] or "error de wit")
+                        ok += 1
+                    except Exception as e:
+                        errors.append(f"{game.title}: {e}")
+                bytes_done += game.size_bytes
+            GLib.idle_add(self._on_batch_done, "Convirtiendo", ok, errors, skipped)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _on_batch_verify(self):
         games = self._selected_games()
@@ -767,11 +818,25 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             self._start_convert(game, dest, target_ext)
 
     def _start_convert(self, game: Game, dest: Path, target_ext: str):
+        # Muestra progreso real por bytes: antes esta conversión individual
+        # ni siquiera mostraba la barra, así que con un juego grande no
+        # había ninguna señal de que algo estaba pasando durante los
+        # varios minutos que puede tardar.
+        self.progress_bar.set_visible(True)
+        self.progress_bar.set_fraction(0)
+        self.set_title("WiiBackup Manager — Convirtiendo…")
+        total_bytes = max(game.size_bytes, 1)
+
+        def on_progress(current: int):
+            est = min(current, int(game.size_bytes * 0.97))
+            GLib.idle_add(self.progress_bar.set_fraction, min(est / total_bytes, 0.99))
+
         def worker():
             result = wit_wrapper.convert(game.path, dest, target_ext.strip("."),
-                                          self.settings.wit_binary)
+                                          self.settings.wit_binary, bytes_progress_cb=on_progress)
             ok = result.returncode == 0
             msg = f"Convertido a {dest.name}" if ok else f"Error al convertir: {result.stderr.strip()[:200]}"
+            GLib.idle_add(self.progress_bar.set_visible, False)
             GLib.idle_add(self._show_toast, msg)
             if ok:
                 GLib.idle_add(self.rescan_library)

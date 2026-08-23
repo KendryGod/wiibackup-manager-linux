@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import time
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,8 +15,12 @@ from .disc_header import DiscInfo, read_plain_iso_header
 VALID_EXTENSIONS = {".iso", ".wbfs", ".ciso", ".wdf"}
 
 # Límite duro de FAT32 por archivo (en realidad 2^32 - 1 bytes; usamos
-# 4 GiB parejo, igual que el tamaño de partición por defecto de `wit
-# --split`, para decidir si un WBFS ya existente entra sin dividir).
+# 4 GiB parejo como aproximación) para decidir si un WBFS ya existente
+# entra sin dividir. Nota: esto es distinto de
+# `wit_wrapper.FAT32_SPLIT_SIZE_BYTES` (4 GB, más chico a propósito), que es
+# el tamaño de partición que le pedimos a `wit` cuando sí hace falta
+# dividir — no hace falta que coincidan, uno decide "¿hace falta dividir?"
+# y el otro "¿dónde corta wit cada parte?".
 _FAT32_SIZE_LIMIT_BYTES = 4 * 1024 ** 3
 
 _INVALID_FS_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -161,7 +166,40 @@ def rename_to_standard(game: Game, dry_run: bool = False) -> Path:
     return new_path
 
 
-def send_to_wbfs_drive(game: Game, drive_root: Path, wit_binary: str = "wit") -> Path:
+# Tamaño de bloque para la copia manual con progreso (_copy_with_progress).
+# 4 MiB: bastante grande para no perder tiempo en overhead de syscalls en
+# un archivo de varios GB, bastante chico para reportar progreso con
+# granularidad razonable.
+_COPY_CHUNK_BYTES = 4 * 1024 * 1024
+
+
+def _copy_with_progress(src: Path, dest: Path, progress_cb: Callable[[int], None]) -> None:
+    """Igual que `shutil.copy2(src, dest)` (copia contenido + metadata),
+    pero reportando cuánto lleva copiado cada ~1s vía `progress_cb`, algo
+    que `shutil.copy2` no ofrece."""
+    written = 0
+    last_report = time.monotonic()
+    with open(src, "rb") as fsrc, open(dest, "wb") as fdst:
+        while True:
+            buf = fsrc.read(_COPY_CHUNK_BYTES)
+            if not buf:
+                break
+            fdst.write(buf)
+            written += len(buf)
+            now = time.monotonic()
+            if now - last_report >= 1.0:
+                progress_cb(written)
+                last_report = now
+    progress_cb(written)
+    shutil.copystat(src, dest)
+
+
+def send_to_wbfs_drive(
+    game: Game,
+    drive_root: Path,
+    wit_binary: str = "wit",
+    bytes_progress_cb: Optional[Callable[[int], None]] = None,
+) -> Path:
     """Copia `game` a la estructura estándar 'wbfs/<ID6>/<ID6>.wbfs' que
     reconocen los USB Loaders de Wii (USB Loader GX, CFG USB Loader, etc.)
     dentro de `drive_root`. Si el origen ya es WBFS y entra entero se copia
@@ -172,7 +210,12 @@ def send_to_wbfs_drive(game: Game, drive_root: Path, wit_binary: str = "wit") ->
     FAT32 tiene un límite duro de ~4GiB por archivo, y hay discos Wii
     dual-layer que lo superan: si el filesystem del destino no se puede
     determinar con confianza, se asume que hace falta dividir (ver
-    `drives.needs_wbfs_split`)."""
+    `drives.needs_wbfs_split`).
+
+    `bytes_progress_cb`, si se pasa, se llama periódicamente con los bytes
+    escritos hasta el momento hacia `dest` (copia directa o vía `wit`, ver
+    `wit_wrapper.convert`), para poder mostrar progreso real dentro de la
+    copia/conversión de un solo juego grande."""
     dest_dir = Path(drive_root) / "wbfs" / game.game_id
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / f"{game.game_id}.wbfs"
@@ -183,13 +226,17 @@ def send_to_wbfs_drive(game: Game, drive_root: Path, wit_binary: str = "wit") ->
     # dividir (si hiciera falta dividir, una copia plana no puede hacerlo:
     # hay que pasar por `wit COPY --split`).
     if game.fmt.upper() == "WBFS" and not (split and game.size_bytes >= _FAT32_SIZE_LIMIT_BYTES):
-        shutil.copy2(game.path, dest)
+        if bytes_progress_cb is not None:
+            _copy_with_progress(game.path, dest, bytes_progress_cb)
+        else:
+            shutil.copy2(game.path, dest)
         return dest
 
     if not wit_wrapper.is_available(wit_binary):
         raise wit_wrapper.WitNotFoundError(wit_binary)
 
-    result = wit_wrapper.convert(game.path, dest, "WBFS", wit_binary, split=split)
+    result = wit_wrapper.convert(game.path, dest, "WBFS", wit_binary, split=split,
+                                  bytes_progress_cb=bytes_progress_cb)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "Error desconocido al convertir con wit")
     return dest
