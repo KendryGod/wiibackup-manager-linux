@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import threading
+import time
 from pathlib import Path
 
 import gi
@@ -15,15 +16,6 @@ from gi.repository import Adw, Gtk, GLib  # noqa: E402
 from .. import drives, gametdb, library
 from ..library import Game
 from .game_row import build_cover_widget
-
-
-def _format_bytes(n: int) -> str:
-    """GB con un decimal, o MB si es menos de 1 GB (evita mostrar '0.0 GB'
-    para transferencias chicas)."""
-    gb = n / (1024 ** 3)
-    if gb >= 1:
-        return f"{gb:.1f} GB"
-    return f"{n / (1024 ** 2):.1f} MB"
 
 
 class TransferGameRow(Adw.ActionRow):
@@ -78,6 +70,7 @@ class TransferView(Gtk.Box):
         self._games: list[Game] = []
         self._game_rows: list[TransferGameRow] = []
         self._dest_path: Path | None = None
+        self._transfer_cancelled = False
 
         self._build_ui()
 
@@ -160,6 +153,11 @@ class TransferView(Gtk.Box):
         self.transfer_button.add_css_class("suggested-action")
         self.transfer_button.connect("clicked", self._on_transfer_clicked)
         action_box.append(self.transfer_button)
+
+        self.cancel_button = Gtk.Button(label="Cancelar", visible=False)
+        self.cancel_button.connect("clicked", self._on_cancel_clicked)
+        action_box.append(self.cancel_button)
+
         self.append(action_box)
 
         self._refresh_drives()
@@ -288,44 +286,76 @@ class TransferView(Gtk.Box):
         if free_bytes is not None and total_bytes > free_bytes:
             self._show_toast(
                 f"No hay espacio suficiente en el destino: se necesitan "
-                f"{_format_bytes(total_bytes)} y hay {_format_bytes(free_bytes)} libres "
-                f"(faltan {_format_bytes(total_bytes - free_bytes)}). "
+                f"{library.format_size(total_bytes)} y hay {library.format_size(free_bytes)} libres "
+                f"(faltan {library.format_size(total_bytes - free_bytes)}). "
                 "Liberá espacio o elegí menos juegos."
             )
             return
 
         dest_root = self._dest_path
         wit_binary = self.settings.wit_binary
+        self._transfer_cancelled = False
         self.transfer_button.set_sensitive(False)
+        self.cancel_button.set_visible(True)
+        self.cancel_button.set_sensitive(True)
         self.transfer_progress.set_fraction(0)
         self.transfer_progress.set_text(f"0/{len(selected)} transferidos")
         self.transfer_progress.set_visible(True)
 
+        total = len(selected)
+        total_bytes = sum(g.size_bytes for g in selected)
+
         def worker():
             ok_count = 0
             err_count = 0
-            total = len(selected)
+            bytes_done = 0
+            start_time = time.monotonic()
+            cancelled = False
             for i, game in enumerate(selected, start=1):
+                if self._transfer_cancelled:
+                    cancelled = True
+                    break
+                GLib.idle_add(self._update_progress, i, total, game.title,
+                              bytes_done, total_bytes, start_time)
                 try:
                     library.send_to_wbfs_drive(game, dest_root, wit_binary)
                     ok_count += 1
                 except Exception:
+                    # Un juego que falla no frena el resto: se cuenta como
+                    # error y se sigue con el siguiente de la selección.
                     err_count += 1
-                GLib.idle_add(self._update_progress, i, total)
-            GLib.idle_add(self._on_transfer_done, ok_count, err_count)
+                bytes_done += game.size_bytes
+            GLib.idle_add(self._on_transfer_done, ok_count, err_count, cancelled)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _update_progress(self, done: int, total: int):
-        self.transfer_progress.set_fraction(done / max(total, 1))
-        self.transfer_progress.set_text(f"{done}/{total} transferidos")
+    def _on_cancel_clicked(self, *_):
+        self._transfer_cancelled = True
+        self.cancel_button.set_sensitive(False)
+
+    def _update_progress(self, done: int, total: int, title: str,
+                          bytes_done: int, total_bytes: int, start_time: float):
+        self.transfer_progress.set_fraction((done - 1) / max(total, 1))
+        elapsed = time.monotonic() - start_time
+        if bytes_done > 0 and elapsed > 1:
+            speed = bytes_done / elapsed
+            remaining = max(total_bytes - bytes_done, 0)
+            eta_text = f" · ~{library.format_eta(remaining / speed)} restantes" if speed > 0 else ""
+        elif total > 1:
+            eta_text = " · calculando tiempo restante…"
+        else:
+            eta_text = ""
+        self.transfer_progress.set_text(f"{done}/{total} · {title}{eta_text}")
         return False
 
-    def _on_transfer_done(self, ok_count: int, err_count: int):
+    def _on_transfer_done(self, ok_count: int, err_count: int, cancelled: bool = False):
         self.transfer_button.set_sensitive(True)
+        self.cancel_button.set_visible(False)
         self.transfer_progress.set_visible(False)
         self._update_dest_space_label()
-        if err_count:
+        if cancelled:
+            msg = f"Transferencia cancelada: {ok_count} ok, {err_count} con error antes de cancelar."
+        elif err_count:
             msg = f"Transferencia terminada: {ok_count} ok, {err_count} con error."
         else:
             msg = f"Transferencia terminada: {ok_count} juego(s) copiados ✓"

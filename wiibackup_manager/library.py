@@ -16,6 +16,27 @@ VALID_EXTENSIONS = {".iso", ".wbfs", ".ciso", ".wdf"}
 _INVALID_FS_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
+def format_size(n: int) -> str:
+    """GB con un decimal, o MB si es menos de 1 GB (evita mostrar '0.0 GB'
+    para tamaños chicos)."""
+    gb = n / (1024 ** 3)
+    if gb >= 1:
+        return f"{gb:.1f} GB"
+    return f"{n / (1024 ** 2):.1f} MB"
+
+
+def format_eta(seconds: float) -> str:
+    """Tiempo estimado restante en formato corto ('45s', '2m 15s', '1h 5m')."""
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, secs = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {secs}s" if secs else f"{minutes}m"
+    hours, mins = divmod(minutes, 60)
+    return f"{hours}h {mins}m" if mins else f"{hours}h"
+
+
 @dataclass
 class Game:
     path: Path
