@@ -72,6 +72,11 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         refresh_button.connect("clicked", lambda *_: self.rescan_library())
         header.pack_start(refresh_button)
 
+        self.select_toggle = Gtk.ToggleButton(icon_name="object-select-symbolic")
+        self.select_toggle.set_tooltip_text("Selección múltiple")
+        self.select_toggle.connect("toggled", self._on_select_mode_toggled)
+        header.pack_start(self.select_toggle)
+
         menu_button = Gtk.MenuButton(icon_name="open-menu-symbolic")
         menu = Gio.Menu()
         menu.append("Preferencias", "win.preferences")
@@ -144,10 +149,184 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         toolbar_view.add_top_bar(self._library_banner)
         self._update_library_banner()
 
+        # Barra de acciones en lote: aparece al activar el modo selección.
+        self._selection_bar = Gtk.ActionBar()
+        self._sel_count_label = Gtk.Label(label="0 seleccionados")
+        self._selection_bar.pack_start(self._sel_count_label)
+        self._selection_bar.pack_start(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
+
+        self._batch_send_btn = Gtk.Button(label="Enviar a unidad WBFS")
+        self._batch_send_btn.connect("clicked", lambda *_: self._on_batch_send())
+        self._selection_bar.pack_start(self._batch_send_btn)
+
+        self._batch_convert_btn = Gtk.Button(label="Convertir")
+        self._batch_convert_btn.connect("clicked", lambda *_: self._on_batch_convert())
+        self._selection_bar.pack_start(self._batch_convert_btn)
+
+        self._batch_verify_btn = Gtk.Button(label="Verificar")
+        self._batch_verify_btn.connect("clicked", lambda *_: self._on_batch_verify())
+        self._selection_bar.pack_start(self._batch_verify_btn)
+
+        self._batch_delete_btn = Gtk.Button(label="Eliminar")
+        self._batch_delete_btn.add_css_class("destructive-action")
+        self._batch_delete_btn.connect("clicked", lambda *_: self._on_batch_delete())
+        self._selection_bar.pack_start(self._batch_delete_btn)
+
+        cancel_selection_btn = Gtk.Button(icon_name="window-close-symbolic")
+        cancel_selection_btn.set_tooltip_text("Cancelar selección")
+        cancel_selection_btn.connect("clicked", lambda *_: self.select_toggle.set_active(False))
+        self._selection_bar.pack_end(cancel_selection_btn)
+
+        self._selection_bar.set_revealed(False)
+        toolbar_view.add_bottom_bar(self._selection_bar)
+        self._update_selection_bar()
+
     def _add_action(self, name: str, callback):
         action = Gio.SimpleAction.new(name, None)
         action.connect("activate", lambda *_: callback())
         self.add_action(action)
+
+    # --------------------------------------------------------- Selección --
+    def _on_select_mode_toggled(self, toggle_button):
+        enabled = toggle_button.get_active()
+        for row in self._rows.values():
+            row.set_selection_mode(enabled)
+        self._selection_bar.set_revealed(enabled)
+        self._update_selection_bar()
+
+    def _selected_games(self) -> list[Game]:
+        return [row.game for row in self._rows.values() if row.is_selected()]
+
+    def _update_selection_bar(self):
+        count = len(self._selected_games())
+        self._sel_count_label.set_label(f"{count} seleccionado(s)")
+        has_selection = count > 0
+        for btn in (self._batch_send_btn, self._batch_convert_btn,
+                    self._batch_verify_btn, self._batch_delete_btn):
+            btn.set_sensitive(has_selection)
+
+    # ------------------------------------------------------ Acciones en lote --
+    def _run_batch(self, games: list[Game], title: str, action_fn):
+        """Corre `action_fn(game)` para cada juego en un hilo aparte,
+        mostrando progreso y un resumen final de éxitos/errores. Se reusa
+        para enviar a WBFS, convertir, verificar y eliminar en lote."""
+        self.progress_bar.set_visible(True)
+        self.progress_bar.set_fraction(0)
+        self.set_title(f"WiiBackup Manager — {title}…")
+        total = len(games)
+
+        def worker():
+            ok = 0
+            errors: list[str] = []
+            for i, game in enumerate(games, start=1):
+                try:
+                    action_fn(game)
+                    ok += 1
+                except Exception as e:
+                    errors.append(f"{game.title}: {e}")
+                GLib.idle_add(self.progress_bar.set_fraction, i / max(total, 1))
+            GLib.idle_add(self._on_batch_done, title, ok, errors)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_batch_done(self, title: str, ok: int, errors: list[str]):
+        self.progress_bar.set_visible(False)
+        if errors:
+            preview = "; ".join(errors[:3])
+            more = f" (+{len(errors) - 3} más)" if len(errors) > 3 else ""
+            self._show_toast(f"{title}: {ok} ok, {len(errors)} con error: {preview}{more}")
+        else:
+            self._show_toast(f"{title}: {ok} completado(s) ✓")
+        self.rescan_library()
+        return False
+
+    def _on_batch_send(self):
+        games = self._selected_games()
+        if not games:
+            return
+        dialog = Gtk.FileDialog(title="Elegí la unidad/carpeta destino (WBFS)")
+        dialog.select_folder(self, None,
+                              lambda d, r: self._on_batch_send_folder_chosen(d, r, games))
+
+    def _on_batch_send_folder_chosen(self, dialog, result, games: list[Game]):
+        try:
+            folder = dialog.select_folder_finish(result)
+        except Exception:
+            return
+        if not folder:
+            return
+        dest_root = Path(folder.get_path())
+        if any(g.fmt.upper() != "WBFS" for g in games) and \
+                not wit_wrapper.is_available(self.settings.wit_binary):
+            self._show_toast(
+                "No se encontró 'wit'; no se puede convertir a WBFS los que no lo son ya."
+            )
+            return
+
+        def send_one(g: Game):
+            library.send_to_wbfs_drive(g, dest_root, self.settings.wit_binary)
+
+        self._run_batch(games, "Enviando a unidad WBFS", send_one)
+
+    def _on_batch_convert(self):
+        games = self._selected_games()
+        if not games:
+            return
+        if not wit_wrapper.is_available(self.settings.wit_binary):
+            self._show_toast("No se encontró 'wit'. Instalalo para poder convertir (ver README).")
+            return
+
+        def convert_one(g: Game):
+            target_ext = ".wbfs" if g.fmt.upper() != "WBFS" else ".iso"
+            dest = g.path.with_suffix(target_ext)
+            result = wit_wrapper.convert(g.path, dest, target_ext.strip("."),
+                                          self.settings.wit_binary)
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.strip()[:200] or "error de wit")
+
+        self._run_batch(games, "Convirtiendo", convert_one)
+
+    def _on_batch_verify(self):
+        games = self._selected_games()
+        if not games:
+            return
+        if not wit_wrapper.is_available(self.settings.wit_binary):
+            self._show_toast("No se encontró 'wit'. Instalalo para poder verificar (ver README).")
+            return
+
+        def verify_one(g: Game):
+            ok, _output = wit_wrapper.verify(g.path, self.settings.wit_binary)
+            if not ok:
+                raise RuntimeError("verificación con errores")
+
+        self._run_batch(games, "Verificando", verify_one)
+
+    def _on_batch_delete(self):
+        games = self._selected_games()
+        if not games:
+            return
+        names = "\n".join(g.path.name for g in games[:8])
+        if len(games) > 8:
+            names += "\n…"
+        dialog = Adw.AlertDialog(
+            heading="¿Eliminar los juegos seleccionados?",
+            body=f"Se van a borrar {len(games)} archivo(s):\n{names}\n\n"
+                 "Esta acción no se puede deshacer.",
+        )
+        dialog.add_response("cancel", "Cancelar")
+        dialog.add_response("delete", "Eliminar")
+        dialog.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.connect("response", self._on_batch_delete_confirmed, games)
+        dialog.present(self)
+
+    def _on_batch_delete_confirmed(self, dialog, response, games: list[Game]):
+        if response != "delete":
+            return
+
+        def delete_one(g: Game):
+            g.path.unlink()
+
+        self._run_batch(games, "Eliminando", delete_one)
 
     # -------------------------------------------------------- Library --
     def _update_library_banner(self):
@@ -208,6 +387,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             row.connect("convert-requested", self._on_convert_requested)
             row.connect("verify-requested", self._on_verify_requested)
             row.connect("delete-requested", self._on_delete_requested)
+            row.connect("selection-toggled", lambda *_: self._update_selection_bar())
+            row.set_selection_mode(self.select_toggle.get_active())
             self.list_box.append(row)
             self._rows[str(game.path)] = row
             row.load_cover_async()

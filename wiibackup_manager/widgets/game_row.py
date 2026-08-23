@@ -64,6 +64,7 @@ class GameRow(Adw.ActionRow):
         "rename-requested": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "verify-requested": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "delete-requested": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        "selection-toggled": (GObject.SignalFlags.RUN_FIRST, None, (bool,)),
     }
 
     def __init__(self, game: Game, cover_region: str = "EN"):
@@ -74,6 +75,15 @@ class GameRow(Adw.ActionRow):
         self.set_title(GLib.markup_escape_text(game.title))
         subtitle = f"{game.game_id} · {game.fmt} · {game.size_mb:,.0f} MB"
         self.set_subtitle(subtitle)
+
+        # Casilla de selección múltiple: oculta por defecto, se muestra al
+        # activar el modo selección desde la ventana principal.
+        self.select_check = Gtk.CheckButton(visible=False)
+        self.select_check.set_valign(Gtk.Align.CENTER)
+        self.select_check.connect(
+            "toggled", lambda cb: self.emit("selection-toggled", cb.get_active())
+        )
+        self.add_prefix(self.select_check)
 
         self._cover_widget, self._cover = build_cover_widget()
         self.add_prefix(self._cover_widget)
@@ -95,6 +105,19 @@ class GameRow(Adw.ActionRow):
         menu.append("Verificar integridad", "row.verify")
         menu.append("Eliminar", "row.delete")
         return menu
+
+    def set_selection_mode(self, enabled: bool):
+        """Muestra u oculta la casilla de selección. Con el modo activo,
+        clickear la fila alterna la casilla en vez de no hacer nada."""
+        self.select_check.set_visible(enabled)
+        if enabled:
+            self.set_activatable_widget(self.select_check)
+        else:
+            self.set_activatable_widget(None)
+            self.select_check.set_active(False)
+
+    def is_selected(self) -> bool:
+        return self.select_check.get_active()
 
     def load_cover_async(self):
         """Descarga (o toma de caché) la carátula usando el pool compartido
