@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, asdict
+import sys
+import tempfile
+from dataclasses import dataclass, asdict, fields
 from pathlib import Path
 
 APP_ID = "com.gamefixsps.WiiBackupManager"
@@ -32,18 +34,80 @@ class Settings:
 
     @classmethod
     def load(cls) -> "Settings":
-        if CONFIG_FILE.exists():
-            try:
-                data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-                known = {f: data[f] for f in cls.__dataclass_fields__ if f in data}
-                return cls(**known)
-            except (json.JSONDecodeError, OSError):
-                pass
-        return cls()
+        """Lee la configuración del disco, cayendo a los valores por defecto
+        de cada campo que falte o venga con el tipo equivocado.
+
+        La validación es por campo y no "todo o nada": si alguien editó el
+        JSON a mano y dejó `auto_scan_on_start: "si"` (texto en vez de
+        booleano), se pierde solo esa preferencia y no las otras cuatro.
+        Sin esto el valor entraba tal cual al dataclass y reventaba recién
+        más tarde, en cualquier lugar que lo usara."""
+        defaults = cls()
+        if not CONFIG_FILE.exists():
+            return defaults
+
+        try:
+            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError, ValueError) as e:
+            print(f"[wiibackup-manager] config.json ilegible ({e}); "
+                  "se usan los valores por defecto.", file=sys.stderr)
+            return defaults
+
+        if not isinstance(data, dict):
+            print("[wiibackup-manager] config.json no contiene un objeto JSON; "
+                  "se usan los valores por defecto.", file=sys.stderr)
+            return defaults
+
+        values = {}
+        for f in fields(cls):
+            if f.name not in data:
+                continue
+            value = data[f.name]
+            expected = type(getattr(defaults, f.name))
+            # `type(...) is` y no isinstance: en Python bool es subclase
+            # de int, así que con isinstance un True se colaría en un campo
+            # numérico (y al revés, un 1 pasaría por booleano).
+            if type(value) is not expected:
+                print(f"[wiibackup-manager] config.json: '{f.name}' tiene un valor "
+                      f"inválido ({value!r}); se usa el valor por defecto "
+                      f"({getattr(defaults, f.name)!r}).", file=sys.stderr)
+                continue
+            values[f.name] = value
+
+        return cls(**values)
 
     def save(self) -> None:
+        """Guarda la configuración de forma atómica.
+
+        Se escribe primero a un temporal en la MISMA carpeta (para que el
+        rename sea dentro del mismo filesystem, condición para que sea
+        atómico), se fuerza el flush a disco y recién ahí se reemplaza el
+        archivo real con `os.replace`. Así config.json nunca queda a medio
+        escribir: o está el contenido viejo entero, o el nuevo entero.
+
+        Antes era un `write_text()` directo: si la app o el sistema se
+        cortaba en ese instante, el archivo quedaba truncado y el próximo
+        arranque volvía a los valores por defecto sin decir nada, perdiendo
+        las preferencias del usuario."""
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        CONFIG_FILE.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
+        payload = json.dumps(asdict(self), indent=2)
+
+        # Temporal con nombre único: dos guardados simultáneos no se pisan
+        # el temporal entre sí (el último `os.replace` gana, entero).
+        fd, tmp_name = tempfile.mkstemp(dir=str(CONFIG_DIR), prefix=".config.json.",
+                                         suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_name, CONFIG_FILE)
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
 
 
 def ensure_dirs(settings: Settings) -> None:
