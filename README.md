@@ -104,6 +104,42 @@ wiibackup_manager/
     └── preferences_dialog.py
 ```
 
+## Changelog
+
+### 0.1.3
+
+- La pestaña Transferir valida sus destinos (unidades y carpetas agregadas
+  a mano) al refrescar: si dejaron de existir o ser accesibles (unidad
+  expulsada/desconectada), desaparecen solos de la lista en vez de quedar
+  mostrados con un error genérico de espacio.
+- Detección automática de unidades nuevas/desconectadas en Transferir por
+  sondeo periódico (cada 3s, mismo patrón que la detección de la
+  Biblioteca desconectada): ya no hace falta cambiar de pestaña ni
+  refrescar a mano.
+- El selector de "Agregar carpeta" (Biblioteca y Transferir) ya no muestra
+  el error nativo "No se pudo encontrar «...»" cuando la última carpeta
+  usada quedó en una unidad desconectada: cae en silencio a la carpeta
+  home.
+- La versión mostrada en "Acerca de" ahora se toma de `__version__`.
+
+### 0.1.2
+
+- Barra de estado en la Biblioteca con el total de juegos y tamaño.
+- Botón para expulsar la unidad WBFS de forma segura antes de
+  desconectarla.
+
+### 0.1.1
+
+- Pestaña Transferir: copiar juegos seleccionados a una unidad WBFS (USB
+  Loader), con ETA, progreso y cancelación.
+- Selección múltiple y acciones en lote (enviar, convertir, verificar,
+  eliminar) en la Biblioteca.
+- Panel de detalle del juego, orden de la lista y arrastrar y soltar
+  (drag & drop) para agregar archivos.
+- Mostrar espacio libre del destino y validarlo antes de transferir.
+- Evitar un crash al abrir la app con `library_path` apuntando a un mount
+  desconectado.
+
 ## Roadmap / ideas pendientes
 
 - [ ] Vista de cuadrícula con carátulas grandes (alternativa a la lista)
