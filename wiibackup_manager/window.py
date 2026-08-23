@@ -33,6 +33,7 @@ SORT_OPTIONS = [
     ("Formato (A-Z)", lambda g: (g.fmt, g.title.lower()), False),
 ]
 from .library import Game
+from .widgets.game_detail_dialog import GameDetailDialog
 from .widgets.game_row import GameRow
 from .widgets.preferences_dialog import PreferencesDialog
 from .widgets.transfer_view import TransferView
@@ -424,6 +425,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             row.connect("verify-requested", self._on_verify_requested)
             row.connect("delete-requested", self._on_delete_requested)
             row.connect("selection-toggled", lambda *_: self._update_selection_bar())
+            row.connect("detail-requested", self._on_game_detail_requested)
             row.set_selection_mode(self.select_toggle.get_active())
             self.list_box.append(row)
             self._rows[str(game.path)] = row
@@ -589,6 +591,10 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self._show_toast(". ".join(parts) + ".")
         self.rescan_library()
         return False
+
+    def _on_game_detail_requested(self, row: GameRow):
+        dialog = GameDetailDialog(row.game, self.settings.cover_region)
+        dialog.present(self)
 
     def _on_rename_requested(self, row: GameRow):
         try:

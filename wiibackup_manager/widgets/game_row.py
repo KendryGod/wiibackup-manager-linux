@@ -65,6 +65,7 @@ class GameRow(Adw.ActionRow):
         "verify-requested": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "delete-requested": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "selection-toggled": (GObject.SignalFlags.RUN_FIRST, None, (bool,)),
+        "detail-requested": (GObject.SignalFlags.RUN_FIRST, None, ()),
     }
 
     def __init__(self, game: Game, cover_region: str = "EN"):
@@ -96,6 +97,17 @@ class GameRow(Adw.ActionRow):
 
         action_group = Gio_SimpleActionGroup(self)
         self.insert_action_group("row", action_group)
+
+        # Clickear la fila (fuera del menú de tres puntos y, si el modo
+        # selección está activo, fuera de la casilla) abre el panel de
+        # detalle. set_activatable_widget (en set_selection_mode) redirige
+        # el click a la casilla en vez de esto mientras dura la selección.
+        self.set_activatable(True)
+        self.connect("activated", self._on_activated)
+
+    def _on_activated(self, *_):
+        if not self.select_check.get_visible():
+            self.emit("detail-requested")
 
     def _build_menu(self):
         from gi.repository import Gio
