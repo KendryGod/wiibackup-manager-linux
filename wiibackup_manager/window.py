@@ -892,7 +892,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
     def _on_about(self):
         about = Adw.AboutDialog(
             application_name="WiiBackup Manager",
-            application_icon="drive-harddisk-symbolic",
+            application_icon=config.APP_ID,
             version=__version__,
             developer_name="GameFix SPS",
             license_type=Gtk.License.MIT_X11,
