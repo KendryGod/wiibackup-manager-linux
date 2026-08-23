@@ -5,8 +5,6 @@ alguno de esos datos para el juego, esa fila simplemente no se muestra: no
 se inventa ni se rellena con un placeholder."""
 from __future__ import annotations
 
-import threading
-
 import gi
 
 gi.require_version("Gtk", "4.0")
@@ -25,6 +23,7 @@ class GameDetailDialog(Adw.Dialog):
     def __init__(self, game: Game, cover_region: str = "EN"):
         super().__init__()
         self.game = game
+        self._cover_region = cover_region
         self.set_content_width(420)
         self.set_content_height(560)
 
@@ -91,11 +90,14 @@ class GameDetailDialog(Adw.Dialog):
 
     # --------------------------------------------------- Metadata extra --
     def _load_extra_info_async(self):
-        def worker():
-            info = gametdb.get_game_extra_info(self.game.game_id)
-            GLib.idle_add(self._apply_extra_info, info)
-
-        threading.Thread(target=worker, daemon=True).start()
+        # Mismo worker compartido que usan las filas de la Biblioteca: si
+        # el índice de wiitdb.xml ya se armó (o se está armando) para la
+        # lista, este panel lo reusa en vez de volver a bajar y parsear los
+        # 30+ MB del volcado.
+        gametdb.fetch_extra_info_async(
+            self.game.game_id, self._cover_region,
+            lambda info: GLib.idle_add(self._apply_extra_info, info),
+        )
 
     def _apply_extra_info(self, info: gametdb.GameExtraInfo | None):
         self.info_group.remove(self._extra_status_row)
@@ -108,6 +110,12 @@ class GameDetailDialog(Adw.Dialog):
             self.info_group.add(placeholder)
             return False
 
+        # El título de GameTDB va primero: es el dato que identifica al
+        # juego, y solo aparece si dice algo distinto del título que el
+        # panel ya muestra arriba de la carátula.
+        extra_title = info.title_to_show_next_to(self.game.title)
+        if extra_title is not None:
+            self._add_row(*extra_title)
         if info.genre:
             self._add_row("Género", info.genre)
         if info.players:

@@ -60,8 +60,13 @@ class GameRow(Adw.ActionRow):
         self.cover_region = cover_region
 
         self.set_title(GLib.markup_escape_text(game.title))
-        subtitle = f"{game.game_id} · {game.fmt} · {game.size_mb:,.0f} MB"
-        self.set_subtitle(subtitle)
+        # Subtítulo base (ID/formato/tamaño). Si GameTDB tiene un título
+        # que aporte algo (ver `load_extra_info_async`) se le agrega una
+        # línea ARRIBA de esta, para que el dato del título quede pegado al
+        # título principal y no perdido después de los números.
+        self._base_subtitle = f"{game.game_id} · {game.fmt} · {game.size_mb:,.0f} MB"
+        self.set_subtitle(self._base_subtitle)
+        self.set_subtitle_lines(2)
 
         # Casilla de selección múltiple: oculta por defecto, se muestra al
         # activar el modo selección desde la ventana principal.
@@ -136,6 +141,38 @@ class GameRow(Adw.ActionRow):
                 self._cover.set_filename(path)
             except GLib.Error:
                 pass
+        return False
+
+    # ------------------------------------------------- Título de GameTDB --
+    def load_extra_info_async(self):
+        """Pide la metadata de GameTDB para mostrar el título original (o el
+        traducido) abajo del título que ya muestra la fila.
+
+        Igual que la carátula, va por el pool de `gametdb` y se aplica en el
+        hilo de GTK: armar el índice de wiitdb.xml la primera vez implica
+        bajar y parsear decenas de MB, que en el hilo principal congelaría
+        la ventana entera."""
+        gametdb.fetch_extra_info_async(
+            self.game.game_id, self.cover_region,
+            lambda info: GLib.idle_add(self._apply_extra_title, info),
+        )
+
+    def _apply_extra_title(self, info):
+        """Agrega la línea del título de GameTDB si aporta algo.
+
+        `title_to_show_next_to` devuelve None cuando el título de GameTDB
+        es el mismo que la fila ya muestra (comparando sin mayúsculas ni
+        puntuación), que es el caso más común: ahí la fila queda tal cual,
+        sin una línea repetida."""
+        if info is None:
+            return False
+        extra = info.title_to_show_next_to(self.game.title)
+        if extra is None:
+            return False
+        label, title = extra
+        self.set_subtitle(
+            f"{label}: {GLib.markup_escape_text(title)}\n{self._base_subtitle}"
+        )
         return False
 
 

@@ -11,10 +11,12 @@ art.gametdb.com y son de uso libre para proyectos como este.
 """
 from __future__ import annotations
 
+import io
 import threading
 import urllib.request
 import urllib.error
 import xml.etree.ElementTree as ET
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -203,8 +205,32 @@ def covers_in_flight() -> int:
 # en cualquier profundidad dentro de <game>): si GameTDB no trae alguno de
 # estos campos para un juego puntual, o el XML no pudo descargarse, se
 # devuelve None para ese campo (o para todo) en vez de inventar un valor.
-WIITDB_URL = "https://www.gametdb.com/wiitdb.xml"
-WIITDB_DOWNLOAD_TIMEOUT = 30
+# GameTDB publica el volcado como ZIP, no como XML suelto: la URL
+# .../wiitdb.xml responde 404 (probado contra el servidor real), así que
+# hasta ahora esta parte no traía nunca ningún dato y el panel de detalle
+# mostraba siempre "no se encontró información adicional". El ZIP pesa
+# ~8 MB y adentro trae un único miembro, wiitdb.xml, de ~32 MB.
+WIITDB_URL = "https://www.gametdb.com/wiitdb.zip"
+WIITDB_MEMBER = "wiitdb.xml"
+WIITDB_DOWNLOAD_TIMEOUT = 60
+# Tope de lo que se acepta descomprimir del ZIP. El volcado real ronda los
+# 32 MB; 256 MB deja margen de sobra para que crezca sin que un ZIP
+# malformado (o una "zip bomb") pueda llenar la caché del usuario.
+WIITDB_MAX_UNCOMPRESSED = 256 * 1024 * 1024
+
+# La región de las carátulas es también el idioma con el que se busca el
+# título y la sinopsis en wiitdb.xml. "US" no es un idioma: es la región
+# NTSC-U, cuyo idioma en la base es EN. El resto de las opciones que
+# ofrece Preferencias ya son códigos de idioma válidos de la base.
+_REGION_TO_LANGUAGE = {"US": "EN"}
+DEFAULT_LANGUAGE = "EN"
+
+
+def language_for_region(region: str) -> str:
+    """Idioma de wiitdb.xml para una región de carátulas de Preferencias."""
+    region = (region or DEFAULT_LANGUAGE).upper()
+    return _REGION_TO_LANGUAGE.get(region, region)
+
 
 _wiitdb_lock = threading.Lock()
 _wiitdb_index: Optional[dict[str, ET.Element]] = None
@@ -217,10 +243,46 @@ class GameExtraInfo:
     release_date: Optional[str] = None
     publisher: Optional[str] = None
     developer: Optional[str] = None
+    # Título en el idioma configurado por el usuario y título original
+    # (EN) de GameTDB. Se guardan los dos porque el título que la app ya
+    # muestra sale del header del disco (o de la base de `wit`), y puede
+    # coincidir con cualquiera de los dos: quien los muestra decide cuál
+    # aporta algo y cuál sería un duplicado. Ver `title_to_show_next_to`.
+    localized_title: Optional[str] = None
+    original_title: Optional[str] = None
 
     def is_empty(self) -> bool:
         return not any((self.genre, self.players, self.release_date,
-                         self.publisher, self.developer))
+                         self.publisher, self.developer,
+                         self.localized_title, self.original_title))
+
+    def title_to_show_next_to(self, displayed_title: str):
+        """Devuelve (etiqueta, título) con el título de GameTDB que vale la
+        pena mostrar al lado de `displayed_title`, o None si no aporta
+        nada.
+
+        La comparación es laxa a propósito (sin mayúsculas, sin espacios
+        ni puntuación): muchos headers de disco traen el título en
+        mayúsculas o con la puntuación cambiada ("SUPER SMASH BROS BRAWL"
+        contra "Super Smash Bros. Brawl"), y repetir eso como si fuera un
+        dato nuevo es ruido, no información.
+
+        Se prioriza el título original (EN) porque es el que el usuario
+        pidió ver; si ese ya es el que se está mostrando, se ofrece el
+        localizado, que en ~1 de cada 6 juegos de la base difiere del
+        inglés y sí es información nueva."""
+        shown = _normalize_title(displayed_title)
+        if self.original_title and _normalize_title(self.original_title) != shown:
+            return ("Título original", self.original_title)
+        if self.localized_title and _normalize_title(self.localized_title) != shown:
+            return ("Título traducido", self.localized_title)
+        return None
+
+
+def _normalize_title(title: str) -> str:
+    """Título reducido a letras y números en minúscula, para comparar dos
+    títulos sin que los separe solo la puntuación o las mayúsculas."""
+    return "".join(ch for ch in (title or "").lower() if ch.isalnum())
 
 
 def wiitdb_cache_path() -> Path:
@@ -228,6 +290,12 @@ def wiitdb_cache_path() -> Path:
 
 
 def _download_wiitdb() -> Optional[Path]:
+    """Descarga el volcado de GameTDB y deja wiitdb.xml en la caché.
+
+    Lo que se baja es un ZIP con un único miembro (wiitdb.xml), así que
+    hay un paso de descompresión antes de guardar. Devuelve la ruta del
+    XML ya listo, o None si algo falló (sin red, servidor caído, ZIP
+    corrupto): en ese caso la app sigue andando sin metadata extendida."""
     path = wiitdb_cache_path()
     if path.exists():
         return path
@@ -242,13 +310,26 @@ def _download_wiitdb() -> Optional[Path]:
     except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError):
         return None
 
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            # Se lee el miembro por nombre y nunca se usa `extract`/
+            # `extractall`: esos escriben usando la ruta que viene adentro
+            # del ZIP, que es contenido remoto y podría traer "../" para
+            # escribir fuera de la carpeta de caché.
+            info = zf.getinfo(WIITDB_MEMBER)
+            if info.file_size > WIITDB_MAX_UNCOMPRESSED:
+                return None
+            xml_bytes = zf.read(WIITDB_MEMBER)
+    except (zipfile.BadZipFile, KeyError, OSError, EOFError):
+        return None
+
     # Escribir a un temporal y mover: si el proceso se corta a mitad de la
-    # descarga (20+ MB), no queremos dejar un wiitdb.xml truncado que
+    # escritura (30+ MB), no queremos dejar un wiitdb.xml truncado que
     # después ET.parse() no pueda leer y quede cacheado como "ya existe"
     # para siempre.
     tmp_path = path.with_suffix(".xml.tmp")
     try:
-        tmp_path.write_bytes(data)
+        tmp_path.write_bytes(xml_bytes)
         tmp_path.replace(path)
     except OSError:
         return None
@@ -281,11 +362,28 @@ def _ensure_wiitdb_index() -> dict[str, ET.Element]:
         return _wiitdb_index
 
 
-def get_game_extra_info(game_id: str) -> Optional[GameExtraInfo]:
-    """Busca género, cantidad de jugadores, fecha de lanzamiento, publisher
-    y developer para `game_id` en wiitdb.xml. Devuelve None si el juego no
-    está en la base descargada (o no se pudo descargar), o si está pero
-    ninguno de estos campos viene informado para él."""
+def _locale_titles(game_el: ET.Element) -> dict:
+    """Títulos de un <game> por idioma: {"EN": "...", "ES": "...", ...}.
+
+    En wiitdb.xml cada idioma es un <locale lang="XX"> con su <title>
+    adentro. Los idiomas sin título informado (los hay, sobre todo en KO)
+    no entran al diccionario."""
+    titles = {}
+    for locale_el in game_el.findall("locale"):
+        lang = (locale_el.get("lang") or "").upper()
+        title_el = locale_el.find("title")
+        if lang and title_el is not None and title_el.text and title_el.text.strip():
+            titles[lang] = title_el.text.strip()
+    return titles
+
+
+def get_game_extra_info(game_id: str,
+                        language: str = DEFAULT_LANGUAGE) -> Optional[GameExtraInfo]:
+    """Busca género, cantidad de jugadores, fecha de lanzamiento, publisher,
+    developer y los títulos (original y en `language`) para `game_id` en
+    wiitdb.xml. Devuelve None si el juego no está en la base descargada (o
+    no se pudo descargar), o si está pero ninguno de estos campos viene
+    informado para él."""
     index = _ensure_wiitdb_index()
     game_el = index.get(game_id)
     if game_el is None:
@@ -296,6 +394,12 @@ def get_game_extra_info(game_id: str) -> Optional[GameExtraInfo]:
         if child is not None and child.text and child.text.strip():
             return child.text.strip()
         return None
+
+    titles = _locale_titles(game_el)
+    # El título "original" es el inglés: es el que GameTDB usa como
+    # canónico y del que salen las traducciones del resto de los idiomas.
+    original_title = titles.get(DEFAULT_LANGUAGE)
+    localized_title = titles.get(language_for_region(language))
 
     players = None
     input_el = game_el.find(".//input")
@@ -316,5 +420,55 @@ def get_game_extra_info(game_id: str) -> Optional[GameExtraInfo]:
         release_date=release_date,
         publisher=text_of("publisher"),
         developer=text_of("developer"),
+        localized_title=localized_title,
+        original_title=original_title,
     )
     return None if info.is_empty() else info
+
+
+# --- Metadata extendida en segundo plano ---
+#
+# Un solo worker y no un pool: lo caro es armar el índice (bajar 8 MB,
+# descomprimir 32 MB de XML y parsearlos), y eso pasa UNA vez por
+# ejecución detrás de `_wiitdb_lock`. Con varios workers, todos menos uno
+# se quedarían igual esperando ese lock; después de armado, cada consulta
+# es una búsqueda en un dict y no necesita paralelismo. Lo importante es
+# que nada de esto ocurra en el hilo de GTK: una biblioteca de 300 juegos
+# pide metadata para las 300 filas y no puede congelar la ventana.
+_metadata_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wiitdb")
+
+ExtraInfoCallback = Callable[[Optional[GameExtraInfo]], None]
+
+
+def fetch_extra_info_async(game_id: str, language: str = DEFAULT_LANGUAGE,
+                           on_done: Optional[ExtraInfoCallback] = None) -> None:
+    """Pide la metadata de `game_id` y llama a `on_done(info_o_None)` al
+    terminar.
+
+    Igual que `fetch_cover_async`: `on_done` corre en un hilo de fondo, así
+    que quien toque widgets de GTK adentro tiene que reenviarlo con
+    `GLib.idle_add`. Un juego sin identificar se resuelve como None en el
+    acto, sin ocupar el worker."""
+    if on_done is None:
+        return
+
+    if not is_valid_game_id(game_id):
+        on_done(None)
+        return
+
+    game_id = validate_game_id(game_id)
+
+    def job():
+        try:
+            info = get_game_extra_info(game_id, language)
+        except Exception:
+            info = None
+        try:
+            on_done(info)
+        except Exception:
+            # Un callback que falla (p. ej. una fila que ya no existe) no
+            # puede llevarse puesto al worker y dejar sin metadata al
+            # resto de la biblioteca.
+            pass
+
+    _metadata_executor.submit(job)

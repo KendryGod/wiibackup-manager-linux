@@ -796,6 +796,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             self.list_box.append(row)
             self._rows[str(game.path)] = row
             row.load_cover_async()
+            row.load_extra_info_async()
 
     # ------------------------------------------------------------ Orden --
     def _apply_sort(self):
