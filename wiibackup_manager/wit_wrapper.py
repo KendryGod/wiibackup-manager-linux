@@ -156,10 +156,20 @@ def list_wbfs_container(path: Path, binary: str = "wit") -> list[DiscInfo]:
     if result.returncode != 0:
         return games
     for line in result.stdout.splitlines():
-        line = line.strip()
+        line = _strip_ansi(line).strip()
         if not line or line.startswith("*") or line.startswith("-"):
             continue
-        parts = line.split(None, 1)
-        if len(parts) == 2 and len(parts[0]) == 6:
-            games.append(DiscInfo(game_id=parts[0], title=parts[1].strip(), source="wit"))
+        # Mismo patrón que _find_id6_line/identify(): con --long la fila de
+        # datos tiene 4 columnas (ID6, MiB, Región, Título); split(None, 1)
+        # mezclaba MiB y Región dentro del título.
+        parts = line.split(None, 3)
+        if len(parts) < 4:
+            continue
+        game_id = parts[0]
+        if len(game_id) != 6 or not game_id.isalnum():
+            continue
+        title = parts[3].strip()
+        if not title:
+            continue
+        games.append(DiscInfo(game_id=game_id, title=title, source="wit"))
     return games
