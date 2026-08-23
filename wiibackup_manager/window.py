@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 
 import gi
@@ -51,6 +52,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self._games: list[Game] = []
         self._rows: dict[str, GameRow] = {}
         self._library_available = config.library_path_available(self.settings)
+        self._send_cancelled = False
 
         self._build_ui()
 
@@ -127,11 +129,18 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self.sort_dropdown.connect("notify::selected", self._on_sort_changed)
         search_bar_box.append(self.sort_dropdown)
 
-        self.progress_bar = Gtk.ProgressBar(visible=False)
+        self.progress_bar = Gtk.ProgressBar(visible=False, show_text=True, hexpand=True)
+        self.progress_cancel_btn = Gtk.Button(label="Cancelar", visible=False)
+        self.progress_cancel_btn.connect("clicked", self._on_progress_cancel_clicked)
+
+        progress_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+                                margin_start=12, margin_end=12)
+        progress_box.append(self.progress_bar)
+        progress_box.append(self.progress_cancel_btn)
 
         content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         content_box.append(search_bar_box)
-        content_box.append(self.progress_bar)
+        content_box.append(progress_box)
 
         self.list_box = Gtk.ListBox()
         self.list_box.set_selection_mode(Gtk.SelectionMode.NONE)
@@ -234,12 +243,21 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         return [row.game for row in self._rows.values() if row.is_selected()]
 
     def _update_selection_bar(self):
-        count = len(self._selected_games())
-        self._sel_count_label.set_label(f"{count} seleccionado(s)")
+        games = self._selected_games()
+        count = len(games)
+        if count:
+            total_size = library.format_size(sum(g.size_bytes for g in games))
+            self._sel_count_label.set_label(f"{count} seleccionado(s) · {total_size}")
+        else:
+            self._sel_count_label.set_label("0 seleccionado(s)")
         has_selection = count > 0
         for btn in (self._batch_send_btn, self._batch_convert_btn,
                     self._batch_verify_btn, self._batch_delete_btn):
             btn.set_sensitive(has_selection)
+
+    def _on_progress_cancel_clicked(self, *_):
+        self._send_cancelled = True
+        self.progress_cancel_btn.set_sensitive(False)
 
     # ------------------------------------------------------ Acciones en lote --
     def _run_batch(self, games: list[Game], title: str, action_fn):
@@ -299,10 +317,80 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             )
             return
 
-        def send_one(g: Game):
-            library.send_to_wbfs_drive(g, dest_root, self.settings.wit_binary)
+        # Worker dedicado (no _run_batch genérico) porque acá sí tiene
+        # sentido mostrar tiempo estimado y permitir cancelar: es la
+        # operación de transferencia real hacia una unidad WBFS, con
+        # tamaños de archivo conocidos de antemano.
+        self._send_cancelled = False
+        self.progress_bar.set_visible(True)
+        self.progress_bar.set_fraction(0)
+        self.progress_cancel_btn.set_visible(True)
+        self.progress_cancel_btn.set_sensitive(True)
+        self.set_title("WiiBackup Manager — Enviando a unidad WBFS…")
 
-        self._run_batch(games, "Enviando a unidad WBFS", send_one)
+        total = len(games)
+        total_bytes = sum(g.size_bytes for g in games)
+        wit_binary = self.settings.wit_binary
+
+        def worker():
+            ok = 0
+            errors: list[str] = []
+            bytes_done = 0
+            start_time = time.monotonic()
+            cancelled = False
+            for i, game in enumerate(games, start=1):
+                if self._send_cancelled:
+                    cancelled = True
+                    break
+                GLib.idle_add(self._update_send_progress, i, total, game.title,
+                              bytes_done, total_bytes, start_time)
+                try:
+                    library.send_to_wbfs_drive(game, dest_root, wit_binary)
+                    ok += 1
+                except Exception as e:
+                    # No frena el resto de la selección: se cuenta como
+                    # error y se sigue con el siguiente juego.
+                    errors.append(f"{game.title}: {e}")
+                bytes_done += game.size_bytes
+            GLib.idle_add(self._on_send_done, ok, errors, cancelled)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _update_send_progress(self, done: int, total: int, title: str,
+                               bytes_done: int, total_bytes: int, start_time: float):
+        self.progress_bar.set_fraction((done - 1) / max(total, 1))
+        elapsed = time.monotonic() - start_time
+        if bytes_done > 0 and elapsed > 1:
+            speed = bytes_done / elapsed
+            remaining = max(total_bytes - bytes_done, 0)
+            eta_text = f" · ~{library.format_eta(remaining / speed)} restantes" if speed > 0 else ""
+        elif total > 1:
+            eta_text = " · calculando tiempo restante…"
+        else:
+            eta_text = ""
+        self.progress_bar.set_text(f"{done}/{total} · {title}{eta_text}")
+        return False
+
+    def _on_send_done(self, ok: int, errors: list[str], cancelled: bool):
+        self.progress_bar.set_visible(False)
+        # Volver a None (no "") es lo que hace que el ProgressBar caiga de
+        # nuevo a mostrar el porcentaje en las demás operaciones (rescan,
+        # importar, convertir/verificar/eliminar en lote) en vez de dejar
+        # pegado el último "N/total · nombre del juego" de este envío.
+        self.progress_bar.set_text(None)
+        self.progress_cancel_btn.set_visible(False)
+        if cancelled:
+            self._show_toast(
+                f"Envío a unidad WBFS cancelado: {ok} ok, {len(errors)} con error antes de cancelar."
+            )
+        elif errors:
+            preview = "; ".join(errors[:3])
+            more = f" (+{len(errors) - 3} más)" if len(errors) > 3 else ""
+            self._show_toast(f"Enviando a unidad WBFS: {ok} ok, {len(errors)} con error: {preview}{more}")
+        else:
+            self._show_toast(f"Enviando a unidad WBFS: {ok} completado(s) ✓")
+        self.rescan_library()
+        return False
 
     def _on_batch_convert(self):
         games = self._selected_games()
