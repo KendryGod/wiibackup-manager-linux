@@ -12,6 +12,7 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Adw, Gtk, GLib, Gio, Gdk  # noqa: E402
 
 from . import __version__, config, library, wit_wrapper
+from .disc_header import UNKNOWN_GAME_ID
 
 
 class BatchSkip(Exception):
@@ -720,7 +721,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             self._show_toast(f"No se pudo escribir en la carpeta de biblioteca: {e}")
             return
 
-        known_ids = {g.game_id for g in self._games if g.game_id != "??????"}
+        known_ids = {g.game_id for g in self._games if g.game_id != UNKNOWN_GAME_ID}
 
         self.progress_bar.set_visible(True)
         self.progress_bar.set_fraction(0)
@@ -738,7 +739,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 if game is None:
                     continue
 
-                if game.game_id != "??????" and game.game_id in known_ids:
+                if game.game_id != UNKNOWN_GAME_ID and game.game_id in known_ids:
                     skipped.append(game.title)
                     continue
 
@@ -749,7 +750,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                     except OSError:
                         continue
 
-                if game.game_id != "??????":
+                if game.game_id != UNKNOWN_GAME_ID:
                     known_ids.add(game.game_id)
                 added.append(game.title)
 

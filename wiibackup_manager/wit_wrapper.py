@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from .disc_header import DiscInfo
+from .disc_header import DiscInfo, is_valid_game_id, validate_game_id
 
 # Algunas builds de `wit` colorean su salida con secuencias ANSI aunque la
 # salida esté redirigida a una pipe (no es una terminal), así que no podemos
@@ -222,9 +222,9 @@ def _find_id6_line(output: str) -> Optional[tuple[str, str]]:
     No podemos asumir que esa fila esté en un índice fijo: `wit LIST`
     antepone líneas de encabezado y separadores (p. ej. "ID6  MiB Reg. …",
     "----…") que varían de una build a otra. En cambio, reconocemos la fila
-    de datos por su forma: empieza con un ID6 real (6 caracteres
-    alfanuméricos), seguido de tamaño y región, y el resto de la línea es
-    el título del juego.
+    de datos por su forma: empieza con un ID6 real (6 caracteres A-Z/0-9,
+    ver `disc_header.is_valid_game_id`), seguido de tamaño y región, y el
+    resto de la línea es el título del juego.
     """
     for raw_line in output.splitlines():
         line = _strip_ansi(raw_line).strip()
@@ -232,12 +232,14 @@ def _find_id6_line(output: str) -> Optional[tuple[str, str]]:
         if len(parts) < 4:
             continue
         game_id = parts[0]
-        if len(game_id) != 6 or not game_id.isalnum():
+        # `is_valid_game_id` en vez de `isalnum()`: este ID termina
+        # formando parte de rutas del filesystem, ver disc_header.
+        if not is_valid_game_id(game_id):
             continue
         title = parts[3].strip()
         if not title:
             continue
-        return game_id, title
+        return validate_game_id(game_id), title
     return None
 
 
@@ -351,10 +353,10 @@ def list_wbfs_container(path: Path, binary: str = "wit") -> list[DiscInfo]:
         if len(parts) < 4:
             continue
         game_id = parts[0]
-        if len(game_id) != 6 or not game_id.isalnum():
+        if not is_valid_game_id(game_id):
             continue
         title = parts[3].strip()
         if not title:
             continue
-        games.append(DiscInfo(game_id=game_id, title=title, source="wit"))
+        games.append(DiscInfo(game_id=validate_game_id(game_id), title=title, source="wit"))
     return games

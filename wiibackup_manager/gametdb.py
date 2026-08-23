@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import config
+from .disc_header import is_valid_game_id, validate_game_id
 
 COVER_URL_TEMPLATE = "https://art.gametdb.com/wii/cover/{region}/{game_id}.png"
 # GameTDB no siempre sube la carátula bajo la región "EN": muchos títulos
@@ -31,7 +32,11 @@ PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
 
 def cover_cache_path(game_id: str) -> Path:
-    return config.COVERS_DIR / f"{game_id}.png"
+    """Ruta del PNG cacheado para `game_id`. Levanta ValueError si el ID no
+    es un ID6 válido: acá el ID se convierte en nombre de archivo dentro de
+    la caché (y más abajo en parte de una URL), así que no puede venir
+    crudo del header de un archivo. Ver `disc_header.validate_game_id`."""
+    return config.COVERS_DIR / f"{validate_game_id(game_id)}.png"
 
 
 def _is_valid_cached_cover(path: Path) -> bool:
@@ -54,8 +59,14 @@ def _is_valid_cached_cover(path: Path) -> bool:
 def get_cover_path(game_id: str, region: str = "EN", force: bool = False) -> Optional[Path]:
     """Devuelve la ruta local de la carátula, descargándola si hace falta.
 
-    Devuelve None si no se pudo obtener de ninguna región.
+    Devuelve None si no se pudo obtener de ninguna región, incluido el caso
+    de un juego sin identificar ("??????") o con un ID que no es un ID6
+    válido: para esos no hay carátula que pedir y su ID no puede usarse ni
+    como nombre de archivo de caché ni dentro de la URL.
     """
+    if not is_valid_game_id(game_id):
+        return None
+    game_id = validate_game_id(game_id)
     cache_path = cover_cache_path(game_id)
     if cache_path.exists():
         if not force and _is_valid_cached_cover(cache_path):

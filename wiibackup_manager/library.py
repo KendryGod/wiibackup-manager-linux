@@ -10,7 +10,13 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import drives, wit_wrapper
-from .disc_header import DiscInfo, read_plain_iso_header
+from .disc_header import (
+    UNKNOWN_GAME_ID,
+    DiscInfo,
+    is_valid_game_id,
+    read_plain_iso_header,
+    validate_game_id,
+)
 
 VALID_EXTENSIONS = {".iso", ".wbfs", ".ciso", ".wdf"}
 
@@ -96,11 +102,15 @@ def identify_file(path: Path, wit_binary: str = "wit") -> Optional[Game]:
         except wit_wrapper.WitNotFoundError:
             info = None
 
-    if info is None:
+    # Punto único donde nace el game_id de un `Game`: si lo que devolvió el
+    # header (o `wit`) no es un ID6 válido, el archivo se trata como no
+    # identificado en vez de arrastrar un ID que después terminaría
+    # formando parte de una ruta del filesystem (ver disc_header).
+    if info is None or not is_valid_game_id(info.game_id):
         return Game(
             path=path,
-            game_id="??????",
-            title=path.stem,
+            game_id=UNKNOWN_GAME_ID,
+            title=info.title if info is not None and info.title else path.stem,
             fmt=_format_from_suffix(path),
             size_bytes=size,
             identified_by="unknown",
@@ -108,7 +118,7 @@ def identify_file(path: Path, wit_binary: str = "wit") -> Optional[Game]:
 
     return Game(
         path=path,
-        game_id=info.game_id,
+        game_id=validate_game_id(info.game_id),
         title=info.title,
         fmt=_format_from_suffix(path),
         size_bytes=size,
@@ -145,10 +155,17 @@ def scan_library(
 
 def standard_filename(game: Game) -> str:
     """Nombre estándar sugerido: 'Título [GAMEID].ext', como usa el
-    WiiBackup Manager clásico y la mayoría de USB Loaders."""
+    WiiBackup Manager clásico y la mayoría de USB Loaders.
+
+    Si el juego no está identificado (o su ID no es un ID6 válido) se
+    omite el sufijo '[ID]' en vez de meter en el nombre del archivo algo
+    que no es un ID: '??????' trae caracteres que FAT32 no acepta, y un ID
+    arbitrario leído del header podría traer separadores de ruta."""
     safe_title = sanitize_filename(game.title)
     ext = game.path.suffix
-    return f"{safe_title} [{game.game_id}]{ext}"
+    if not is_valid_game_id(game.game_id):
+        return f"{safe_title}{ext}"
+    return f"{safe_title} [{validate_game_id(game.game_id)}]{ext}"
 
 
 def rename_to_standard(game: Game, dry_run: bool = False) -> Path:
@@ -216,9 +233,15 @@ def send_to_wbfs_drive(
     escritos hasta el momento hacia `dest` (copia directa o vía `wit`, ver
     `wit_wrapper.convert`), para poder mostrar progreso real dentro de la
     copia/conversión de un solo juego grande."""
-    dest_dir = Path(drive_root) / "wbfs" / game.game_id
+    # Validar ANTES de armar la ruta (no solo al mostrar el ID en la
+    # interfaz): el game_id sale del header del archivo, que la app no
+    # controla, y acá se convierte en un componente de ruta real. Ver
+    # `disc_header.validate_game_id`.
+    game_id = validate_game_id(game.game_id)
+
+    dest_dir = Path(drive_root) / "wbfs" / game_id
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / f"{game.game_id}.wbfs"
+    dest = dest_dir / f"{game_id}.wbfs"
 
     split = drives.needs_wbfs_split(dest_dir)
 
