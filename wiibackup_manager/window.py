@@ -13,6 +13,7 @@ from . import config, library, wit_wrapper
 from .library import Game
 from .widgets.game_row import GameRow
 from .widgets.preferences_dialog import PreferencesDialog
+from .widgets.transfer_view import TransferView
 
 
 class WiiBackupWindow(Adw.ApplicationWindow):
@@ -43,12 +44,24 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         header = Adw.HeaderBar()
         toolbar_view.add_top_bar(header)
 
-        self.title_widget = Adw.WindowTitle(title="WiiBackup Manager", subtitle="")
+        # El stack de vistas se crea acá porque el switcher del header lo
+        # necesita (Adw.ViewSwitcher se ata a un Adw.ViewStack), pero
+        # se llena de contenido más abajo.
+        self.view_stack = Adw.ViewStack()
+
+        # Switcher tipo "pill" siempre arriba, integrado en el header
+        # (como en Archivos/Configuración de GNOME), sin comportamiento
+        # adaptativo hacia una barra inferior.
+        self.title_widget = Adw.ViewSwitcher(stack=self.view_stack,
+                                              policy=Adw.ViewSwitcherPolicy.WIDE)
         header.set_title_widget(self.title_widget)
 
-        add_button = Gtk.Button(icon_name="list-add-symbolic")
+        add_button = Gtk.MenuButton(icon_name="list-add-symbolic")
         add_button.set_tooltip_text("Agregar juegos (ISO/WBFS)")
-        add_button.connect("clicked", self._on_add_games)
+        add_menu = Gio.Menu()
+        add_menu.append("Agregar archivos", "win.add-files")
+        add_menu.append("Agregar carpeta completa", "win.add-folder")
+        add_button.set_menu_model(add_menu)
         header.pack_start(add_button)
 
         refresh_button = Gtk.Button(icon_name="view-refresh-symbolic")
@@ -65,6 +78,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
         self._add_action("preferences", self._on_preferences)
         self._add_action("about", self._on_about)
+        self._add_action("add-files", self._on_add_files)
+        self._add_action("add-folder", self._on_add_folder)
 
         # Barra de búsqueda
         self.search_entry = Gtk.SearchEntry(placeholder_text="Buscar por título o ID…")
@@ -104,7 +119,14 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         content_box.append(self.stack)
         self.stack.set_vexpand(True)
 
-        toolbar_view.set_content(content_box)
+        self.view_stack.add_titled_with_icon(content_box, "library", "Biblioteca",
+                                              "view-list-symbolic")
+
+        self.transfer_view = TransferView(self.settings, self._show_toast)
+        self.view_stack.add_titled_with_icon(self.transfer_view, "transfer", "Transferir",
+                                              "drive-removable-media-symbolic")
+
+        toolbar_view.set_content(self.view_stack)
 
         if not wit_wrapper.is_available(self.settings.wit_binary):
             banner = Adw.Banner(
@@ -124,7 +146,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         root = Path(self.settings.library_path)
         self.progress_bar.set_visible(True)
         self.progress_bar.set_fraction(0)
-        self.title_widget.set_subtitle("Escaneando…")
+        self.set_title("WiiBackup Manager — Escaneando…")
 
         def worker():
             def progress(done, total):
@@ -139,9 +161,10 @@ class WiiBackupWindow(Adw.ApplicationWindow):
     def _on_scan_done(self, games: list[Game]):
         self._games = games
         self.progress_bar.set_visible(False)
-        self.title_widget.set_subtitle(f"{len(games)} juegos")
+        self.set_title(f"WiiBackup Manager — {len(games)} juegos")
         self._populate_list()
         self.stack.set_visible_child_name("list" if games else "empty")
+        self.transfer_view.set_games(games)
         return False
 
     def _populate_list(self):
@@ -173,8 +196,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         return query in row.game.title.lower() or query in row.game.game_id.lower()
 
     # ----------------------------------------------------------- Actions --
-    def _on_add_games(self, *_):
-        dialog = Gtk.FileDialog(title="Agregar juegos")
+    def _on_add_files(self, *_):
+        dialog = Gtk.FileDialog(title="Agregar archivos")
         filt = Gtk.FileFilter()
         filt.set_name("Imágenes de Wii (*.iso, *.wbfs, *.ciso, *.wdf)")
         for pattern in ("*.iso", "*.wbfs", "*.ciso", "*.wdf"):
@@ -192,24 +215,91 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         if not files:
             return
 
+        paths = [Path(files.get_item(i).get_path()) for i in range(files.get_n_items())]
+        self._start_import(paths)
+
+    def _on_add_folder(self, *_):
+        dialog = Gtk.FileDialog(title="Agregar carpeta completa")
+        dialog.select_folder(self, None, self._on_folder_chosen)
+
+    def _on_folder_chosen(self, dialog, result):
+        try:
+            folder = dialog.select_folder_finish(result)
+        except Exception:
+            return
+        if folder is None:
+            return
+
+        root = Path(folder.get_path())
+        paths = sorted(
+            p for p in root.rglob("*")
+            if p.is_file() and p.suffix.lower() in library.VALID_EXTENSIONS
+        )
+        if not paths:
+            self._show_toast("No se encontraron archivos válidos en esa carpeta.")
+            return
+        self._start_import(paths)
+
+    def _start_import(self, src_paths: list[Path]):
+        """Copia `src_paths` a la biblioteca en background, identificando
+        cada archivo primero para no duplicar juegos que ya están en el
+        último escaneo (self._games), comparando por game_id."""
         import shutil as _shutil
+
         dest_dir = Path(self.settings.library_path)
         dest_dir.mkdir(parents=True, exist_ok=True)
 
+        known_ids = {g.game_id for g in self._games if g.game_id != "??????"}
+
+        self.progress_bar.set_visible(True)
+        self.progress_bar.set_fraction(0)
+        self.set_title("WiiBackup Manager — Agregando…")
+
         def worker():
-            n = files.get_n_items()
-            for i in range(n):
-                f = files.get_item(i)
-                src = Path(f.get_path())
+            added: list[str] = []
+            skipped: list[str] = []
+            total = len(src_paths)
+
+            for i, src in enumerate(src_paths, start=1):
+                GLib.idle_add(self.progress_bar.set_fraction, i / max(total, 1))
+
+                game = library.identify_file(src, self.settings.wit_binary)
+                if game is None:
+                    continue
+
+                if game.game_id != "??????" and game.game_id in known_ids:
+                    skipped.append(game.title)
+                    continue
+
                 dest = dest_dir / src.name
                 if src.resolve() != dest.resolve():
                     try:
                         _shutil.copy2(src, dest)
                     except OSError:
                         continue
-            GLib.idle_add(self.rescan_library)
+
+                if game.game_id != "??????":
+                    known_ids.add(game.game_id)
+                added.append(game.title)
+
+            GLib.idle_add(self._on_import_done, added, skipped)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _on_import_done(self, added: list[str], skipped: list[str]):
+        parts = []
+        if added:
+            parts.append(f"{len(added)} juego(s) nuevo(s) agregado(s)")
+        if skipped:
+            if len(skipped) <= 5:
+                parts.append(f"{len(skipped)} omitido(s) por ya existir: " + ", ".join(skipped))
+            else:
+                parts.append(f"{len(skipped)} omitido(s) por ya existir en la biblioteca")
+        if not parts:
+            parts.append("No se agregó ningún juego nuevo")
+        self._show_toast(". ".join(parts) + ".")
+        self.rescan_library()
+        return False
 
     def _on_rename_requested(self, row: GameRow):
         try:

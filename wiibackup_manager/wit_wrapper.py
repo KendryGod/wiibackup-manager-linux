@@ -12,6 +12,7 @@ los repos de Fedora).
 """
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -20,9 +21,18 @@ from typing import Callable, Optional
 
 from .disc_header import DiscInfo
 
+# Algunas builds de `wit` colorean su salida con secuencias ANSI aunque la
+# salida esté redirigida a una pipe (no es una terminal), así que no podemos
+# confiar en que stdout venga "limpio" solo por capturarlo con subprocess.
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+
 
 class WitNotFoundError(RuntimeError):
     """`wit` no está instalado o no se encuentra en el PATH."""
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_ESCAPE_RE.sub("", text)
 
 
 def find_wit(binary_name: str = "wit") -> Optional[str]:
@@ -42,24 +52,50 @@ def _run(binary: str, *args: str) -> subprocess.CompletedProcess:
     )
 
 
+def _find_id6_line(output: str) -> Optional[tuple[str, str]]:
+    """Busca, entre las líneas de salida de `wit LIST`, la fila de datos de
+    un disco y devuelve (game_id, title).
+
+    No podemos asumir que esa fila esté en un índice fijo: `wit LIST`
+    antepone líneas de encabezado y separadores (p. ej. "ID6  MiB Reg. …",
+    "----…") que varían de una build a otra. En cambio, reconocemos la fila
+    de datos por su forma: empieza con un ID6 real (6 caracteres
+    alfanuméricos), seguido de tamaño y región, y el resto de la línea es
+    el título del juego.
+    """
+    for raw_line in output.splitlines():
+        line = _strip_ansi(raw_line).strip()
+        parts = line.split(None, 3)
+        if len(parts) < 4:
+            continue
+        game_id = parts[0]
+        if len(game_id) != 6 or not game_id.isalnum():
+            continue
+        title = parts[3].strip()
+        if not title:
+            continue
+        return game_id, title
+    return None
+
+
 def identify(path: Path, binary: str = "wit") -> Optional[DiscInfo]:
-    """Usa `wit ID6 --long` para identificar un juego (ISO o WBFS)."""
+    """Usa `wit LIST --long` para identificar un juego (ISO o WBFS).
+
+    Sin --long, `wit LIST` cambia de formato (a veces omite las columnas
+    MiB/Región) según detecte o no una terminal, lo que corre el título de
+    lugar. Con --long el formato de 4 columnas (ID6, MiB, Región, Título)
+    es estable tanto en terminal como redirigido a una pipe."""
     if not find_wit(binary):
         raise WitNotFoundError(binary)
 
-    result = _run(binary, "ID6", "--long", str(path))
+    result = _run(binary, "LIST", "--long", str(path))
     if result.returncode != 0 or not result.stdout.strip():
         return None
 
-    # Formato típico de salida: "RMCE01 The Legend of Zelda: TP"
-    line = result.stdout.strip().splitlines()[0]
-    parts = line.split(None, 1)
-    if not parts:
+    found = _find_id6_line(result.stdout)
+    if found is None:
         return None
-    game_id = parts[0].strip()
-    title = parts[1].strip() if len(parts) > 1 else game_id
-    if not game_id:
-        return None
+    game_id, title = found
     return DiscInfo(game_id=game_id, title=title, source="wit")
 
 

@@ -1,6 +1,8 @@
 """Fila de la lista de juegos: carátula + info + botón de acciones."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import gi
 
 gi.require_version("Gtk", "4.0")
@@ -10,8 +12,50 @@ from gi.repository import Adw, Gtk, GdkPixbuf, GLib, GObject  # noqa: E402
 from .. import gametdb
 from ..library import Game
 
-COVER_WIDTH = 48
-COVER_HEIGHT = 67  # proporción típica de carátula frontal de Wii (~0.71)
+COVER_WIDTH = 120
+COVER_HEIGHT = 168  # proporción típica de carátula frontal de Wii (~0.71)
+COVER_PLACEHOLDER_ICON = "media-optical-symbolic"
+
+
+def build_cover_widget(width: int = COVER_WIDTH, height: int = COVER_HEIGHT):
+    """Arma el widget de carátula: tamaño fijo con un ícono de disco de
+    placeholder de fondo y la carátula real superpuesta cuando termina de
+    cargar. Como el tamaño se fija de entrada (no depende de si hay imagen
+    cargada), la fila nunca cambia de tamaño ni "salta" al terminar la
+    descarga, y si la descarga falla el placeholder queda visible en vez de
+    un hueco vacío.
+
+    Devuelve (widget_a_insertar, picture_para_setear_la_carátula).
+    """
+    overlay = Gtk.Overlay()
+    overlay.set_size_request(width, height)
+    overlay.add_css_class("card")
+
+    placeholder = Gtk.Image.new_from_icon_name(COVER_PLACEHOLDER_ICON)
+    placeholder.set_pixel_size(int(min(width, height) * 0.4))
+    placeholder.add_css_class("dim-label")
+    overlay.set_child(placeholder)
+
+    picture = Gtk.Picture()
+    picture.set_content_fit(Gtk.ContentFit.COVER)
+    picture.set_can_shrink(True)
+    picture.set_halign(Gtk.Align.FILL)
+    picture.set_valign(Gtk.Align.FILL)
+    overlay.add_overlay(picture)
+
+    return overlay, picture
+
+
+# Pool compartido por todas las filas: antes cada GameRow disparaba su propio
+# threading.Thread sin límite, así que una biblioteca de 50 juegos lanzaba 50
+# descargas simultáneas contra GameTDB (saturando la conexión y haciendo que
+# el servidor cuelgue/rechace pedidos). Con un pool acotado, una carátula
+# lenta o colgada no bloquea a las demás: como mucho ocupa uno de los
+# workers, y el resto sigue descargando en paralelo.
+_COVER_DOWNLOAD_WORKERS = 6
+_cover_executor = ThreadPoolExecutor(
+    max_workers=_COVER_DOWNLOAD_WORKERS, thread_name_prefix="cover-dl"
+)
 
 
 class GameRow(Adw.ActionRow):
@@ -31,12 +75,8 @@ class GameRow(Adw.ActionRow):
         subtitle = f"{game.game_id} · {game.fmt} · {game.size_mb:,.0f} MB"
         self.set_subtitle(subtitle)
 
-        self._cover = Gtk.Picture()
-        self._cover.set_size_request(COVER_WIDTH, COVER_HEIGHT)
-        self._cover.set_content_fit(Gtk.ContentFit.COVER)
-        self._cover.add_css_class("card")
-        self._cover.add_css_class("dim-label")
-        self.add_prefix(self._cover)
+        self._cover_widget, self._cover = build_cover_widget()
+        self.add_prefix(self._cover_widget)
 
         menu_button = Gtk.MenuButton()
         menu_button.set_icon_name("view-more-symbolic")
@@ -57,15 +97,14 @@ class GameRow(Adw.ActionRow):
         return menu
 
     def load_cover_async(self):
-        """Descarga (o toma de caché) la carátula en un hilo aparte y la
-        aplica en el hilo principal de GTK cuando termina."""
-        import threading
+        """Descarga (o toma de caché) la carátula usando el pool compartido
+        de workers y la aplica en el hilo principal de GTK cuando termina."""
 
         def worker():
             path = gametdb.get_cover_path(self.game.game_id, self.cover_region)
             GLib.idle_add(self._apply_cover, str(path) if path else None)
 
-        threading.Thread(target=worker, daemon=True).start()
+        _cover_executor.submit(worker)
 
     def _apply_cover(self, path: str | None):
         if path:

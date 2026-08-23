@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -132,3 +133,26 @@ def rename_to_standard(game: Game, dry_run: bool = False) -> Path:
         game.path.rename(new_path)
         game.path = new_path
     return new_path
+
+
+def send_to_wbfs_drive(game: Game, drive_root: Path, wit_binary: str = "wit") -> Path:
+    """Copia `game` a la estructura estándar 'wbfs/<ID6>/<ID6>.wbfs' que
+    reconocen los USB Loaders de Wii (USB Loader GX, CFG USB Loader, etc.)
+    dentro de `drive_root`. Si el origen ya es WBFS se copia tal cual; para
+    cualquier otro formato (ISO/CISO/WDF) se delega la conversión en `wit`,
+    que es quien sabe empaquetar el WBFS correctamente."""
+    dest_dir = Path(drive_root) / "wbfs" / game.game_id
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"{game.game_id}.wbfs"
+
+    if game.fmt.upper() == "WBFS":
+        shutil.copy2(game.path, dest)
+        return dest
+
+    if not wit_wrapper.is_available(wit_binary):
+        raise wit_wrapper.WitNotFoundError(wit_binary)
+
+    result = wit_wrapper.convert(game.path, dest, "WBFS", wit_binary)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "Error desconocido al convertir con wit")
+    return dest
