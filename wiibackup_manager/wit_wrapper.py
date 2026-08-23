@@ -161,14 +161,33 @@ class CancellationToken:
 FAT32_SPLIT_SIZE_BYTES = 4_000_000_000
 _SPLIT_SIZE_ARG = f"{FAT32_SPLIT_SIZE_BYTES}c"
 
-# Tiempo máximo (segundos) que esperamos a `wit` antes de darlo por
-# colgado. Generoso a propósito: copiar o verificar varios GB sobre una SD
-# lenta por USB puede legítimamente tardar minutos y no queremos abortar
-# una transferencia real que sigue progresando. Es una red de seguridad
-# para el caso "wit dejó de progresar del todo" (visto en la práctica:
-# proceso en estado D, ~0% CPU acumulado, el archivo destino dejó de
-# crecer por completo), no un límite de velocidad.
+# Tiempo máximo (segundos) que esperamos a `wit` en las operaciones que NO
+# escriben un destino que podamos medir (LIST/identificar/VERIFY): ahí no
+# hay forma de distinguir "lento" de "colgado", así que queda un límite
+# absoluto, generoso, como única red de seguridad.
 DEFAULT_WIT_TIMEOUT = 1800.0
+
+# Para copiar/convertir sí podemos medir el progreso real (cuánto creció
+# el archivo temporal, ver `estimate_bytes_written`), así que el límite es
+# POR INACTIVIDAD, no absoluto: se reinicia cada vez que el destino crece.
+#
+# Un límite absoluto castigaba a la transferencia lenta pero sana, que es
+# el caso normal de esta app: 7 GB a 5 MB/s sobre USB 2.0 o una SD lenta
+# son ~25 minutos, y con un tope absoluto de 30 min se cortaba sola una
+# copia que venía progresando perfecto. Lo que sí es señal real de cuelgue
+# (visto en la práctica: proceso en estado D, ~0% CPU, el archivo destino
+# dejó de crecer del todo) es que no avance NADA durante un buen rato.
+#
+# 10 minutos sin escribir un solo byte: bien por encima de cualquier pausa
+# legítima (flush grande, medio con errores reintentando) y muy por debajo
+# de lo que tardaría alguien en darse cuenta solo.
+WIT_INACTIVITY_TIMEOUT = 600.0
+
+# Red de seguridad final por si algo "progresa" para siempre sin terminar
+# nunca (p. ej. un destino que crece de a poquito por un bug del medio).
+# 4 horas: mucho más que la transferencia legítima más lenta imaginable
+# (una unidad a 1 MB/s copiando un dual-layer de 8 GB serían ~2h15m).
+WIT_ABSOLUTE_TIMEOUT = 4 * 60 * 60.0
 
 
 def _strip_ansi(text: str) -> str:
@@ -306,9 +325,10 @@ def estimate_bytes_written(dest: Path) -> int:
 def _run_with_progress(
     args: list[str],
     dest: Path,
-    timeout: Optional[float],
     bytes_progress_cb: Callable[[int], None],
     cancel: Optional[CancellationToken] = None,
+    inactivity_timeout: Optional[float] = WIT_INACTIVITY_TIMEOUT,
+    absolute_timeout: Optional[float] = WIT_ABSOLUTE_TIMEOUT,
 ) -> subprocess.CompletedProcess:
     """Como `subprocess.run`, pero con `Popen` en vez de `.run()` para
     poder sondear cada 1s cuánto lleva escrito hacia `dest`
@@ -323,7 +343,13 @@ def _run_with_progress(
     `start_new_session=True` pone a `wit` en su propio grupo de procesos
     para que `cancel.cancel()` (desde el botón "Cancelar", en el hilo de
     GTK) pueda matarlo de verdad en el acto, en vez de que la cancelación
-    recién surta efecto cuando el archivo grande en curso termine solo."""
+    recién surta efecto cuando el archivo grande en curso termine solo.
+
+    El mismo sondeo que reporta progreso sirve para detectar un cuelgue:
+    `inactivity_timeout` se reinicia cada vez que el destino crece, así
+    que una transferencia lenta pero sana nunca se corta sola (ver el
+    comentario de `WIT_INACTIVITY_TIMEOUT`); `absolute_timeout` queda
+    detrás como última red de seguridad."""
     # Lo que ya existía antes de arrancar: si hay que limpiar por una
     # cancelación, se borra solo lo que agregó ESTA operación.
     outputs_before = _output_files(dest)
@@ -333,16 +359,39 @@ def _run_with_progress(
         # `attach` lo mata en el acto y devuelve False.
         running = cancel.attach(proc) if cancel is not None else True
         start = time.monotonic()
-        timed_out = False
+        # Último avance real: arranca en lo que ya había escrito (el
+        # destino puede existir de antes) y se actualiza solo cuando crece.
+        last_bytes = estimate_bytes_written(dest)
+        last_progress_at = start
+        timeout_reason: Optional[str] = None
         try:
             while running:
                 try:
                     proc.wait(timeout=1.0)
                     break
                 except subprocess.TimeoutExpired:
-                    bytes_progress_cb(estimate_bytes_written(dest))
-                    if timeout is not None and (time.monotonic() - start) >= timeout:
-                        timed_out = True
+                    written = estimate_bytes_written(dest)
+                    bytes_progress_cb(written)
+                    now = time.monotonic()
+                    if written > last_bytes:
+                        # Sigue escribiendo: el reloj del cuelgue vuelve a cero
+                        # por lento que vaya.
+                        last_bytes = written
+                        last_progress_at = now
+                    if (inactivity_timeout is not None
+                            and (now - last_progress_at) >= inactivity_timeout):
+                        timeout_reason = (
+                            f"`wit` no escribió un solo byte en "
+                            f"{inactivity_timeout / 60:.0f} minutos: se lo dio por "
+                            "colgado y se canceló la operación."
+                        )
+                    elif (absolute_timeout is not None
+                            and (now - start) >= absolute_timeout):
+                        timeout_reason = (
+                            f"`wit` lleva más de {absolute_timeout / 3600:.0f} horas "
+                            "sin terminar: se canceló la operación."
+                        )
+                    if timeout_reason is not None:
                         _terminate_process_group(proc)
                         break
             if not running:
@@ -356,7 +405,7 @@ def _run_with_progress(
                 cancel.detach(proc)
 
         cancelled = cancel is not None and cancel.cancelled
-        if cancelled or timed_out:
+        if cancelled or timeout_reason is not None:
             # El proceso murió a mitad de una escritura: los temporales que
             # dejó no los va a renombrar ni limpiar nadie.
             _cleanup_new_output_files(dest, outputs_before)
@@ -365,12 +414,11 @@ def _run_with_progress(
         err_f.seek(0)
         stdout = out_f.read().decode("utf-8", "replace")
         stderr = err_f.read().decode("utf-8", "replace")
-        if timed_out:
-            stderr += (f"\n`wit` no respondió en {timeout:.0f}s: se lo dio por "
-                       "colgado y se canceló la operación.")
+        if timeout_reason is not None:
+            stderr += "\n" + timeout_reason
         return subprocess.CompletedProcess(
             args=args,
-            returncode=1 if (timed_out or cancelled) else proc.returncode,
+            returncode=1 if (timeout_reason is not None or cancelled) else proc.returncode,
             stdout=stdout,
             stderr=stderr,
         )
@@ -432,9 +480,10 @@ def convert(
     binary: str = "wit",
     progress_cb: Optional[Callable[[str], None]] = None,
     split: bool = False,
-    timeout: Optional[float] = DEFAULT_WIT_TIMEOUT,
     bytes_progress_cb: Optional[Callable[[int], None]] = None,
     cancel: Optional[CancellationToken] = None,
+    inactivity_timeout: Optional[float] = WIT_INACTIVITY_TIMEOUT,
+    absolute_timeout: Optional[float] = WIT_ABSOLUTE_TIMEOUT,
 ) -> subprocess.CompletedProcess:
     """Convierte src -> dest. target_format: 'WBFS' o 'ISO'.
 
@@ -460,7 +509,12 @@ def convert(
     `cancel`, si se pasa, permite matar el `wit` en curso desde otro hilo
     (el botón "Cancelar" de la interfaz): en ese caso se levanta
     `OperationCancelled` y se limpian los temporales que quedaron a medio
-    escribir, en vez de devolver un resultado con error."""
+    escribir, en vez de devolver un resultado con error.
+
+    Se da por colgado a `wit` cuando pasa `inactivity_timeout` sin que el
+    destino crezca ni un byte, no por tardar mucho: una copia lenta pero
+    sana sigue adelante (ver `WIT_INACTIVITY_TIMEOUT`). `absolute_timeout`
+    queda como última red de seguridad."""
     if not find_wit(binary):
         raise WitNotFoundError(binary)
 
@@ -478,20 +532,24 @@ def convert(
     # progreso: es el único que puede registrar el proceso para matarlo.
     if bytes_progress_cb is not None or cancel is not None:
         result = _run_with_progress(
-            args, dest, timeout, bytes_progress_cb or (lambda _n: None), cancel
+            args, dest, bytes_progress_cb or (lambda _n: None), cancel,
+            inactivity_timeout=inactivity_timeout,
+            absolute_timeout=absolute_timeout,
         )
     else:
+        # Sin sondeo de progreso no hay forma de medir inactividad, así que
+        # acá solo aplica el límite absoluto.
         try:
             result = subprocess.run(
                 args,
                 capture_output=True,
                 text=True,
                 check=False,
-                timeout=timeout,
+                timeout=absolute_timeout,
                 start_new_session=True,
             )
         except subprocess.TimeoutExpired as exc:
-            result = _timeout_result(args, exc, timeout)
+            result = _timeout_result(args, exc, absolute_timeout)
 
     if cancel is not None and cancel.cancelled:
         raise OperationCancelled("Transferencia cancelada por el usuario.")
