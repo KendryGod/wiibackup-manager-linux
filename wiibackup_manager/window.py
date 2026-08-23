@@ -10,6 +10,27 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk, GLib, Gio  # noqa: E402
 
 from . import config, library, wit_wrapper
+
+# (etiqueta, función de orden, invertir) para el desplegable de orden de la
+# Biblioteca. La fecha de agregado usa st_ctime (no st_mtime): _start_import
+# copia con shutil.copy2, que preserva la fecha de modificación original del
+# archivo fuente, así que mtime no sirve para saber cuándo se agregó acá;
+# ctime sí, porque el sistema de archivos la fija solo al crear/copiar el
+# archivo en destino y no se puede heredar del origen.
+def _game_ctime(game: "Game") -> float:
+    try:
+        return game.path.stat().st_ctime
+    except OSError:
+        return 0.0
+
+
+SORT_OPTIONS = [
+    ("Título (A-Z)", lambda g: g.title.lower(), False),
+    ("Tamaño (mayor a menor)", lambda g: g.size_bytes, True),
+    ("Tamaño (menor a mayor)", lambda g: g.size_bytes, False),
+    ("Fecha de agregado (más nuevo primero)", _game_ctime, True),
+    ("Formato (A-Z)", lambda g: (g.fmt, g.title.lower()), False),
+]
 from .library import Game
 from .widgets.game_row import GameRow
 from .widgets.preferences_dialog import PreferencesDialog
@@ -96,6 +117,13 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                                   margin_end=12, margin_top=8, margin_bottom=8)
         search_bar_box.append(self.search_entry)
         self.search_entry.set_hexpand(True)
+
+        self.sort_dropdown = Gtk.DropDown.new_from_strings(
+            [label for label, _fn, _rev in SORT_OPTIONS]
+        )
+        self.sort_dropdown.set_tooltip_text("Ordenar por")
+        self.sort_dropdown.connect("notify::selected", self._on_sort_changed)
+        search_bar_box.append(self.sort_dropdown)
 
         self.progress_bar = Gtk.ProgressBar(visible=False)
 
@@ -366,6 +394,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
     def _on_scan_done(self, games: list[Game]):
         self._games = games
+        self._apply_sort()
         self.progress_bar.set_visible(False)
         self.set_title(f"WiiBackup Manager — {len(games)} juegos")
         self._populate_list()
@@ -392,6 +421,18 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             self.list_box.append(row)
             self._rows[str(game.path)] = row
             row.load_cover_async()
+
+    # ------------------------------------------------------------ Orden --
+    def _apply_sort(self):
+        idx = self.sort_dropdown.get_selected()
+        if idx < 0 or idx >= len(SORT_OPTIONS):
+            idx = 0
+        _label, key_fn, reverse = SORT_OPTIONS[idx]
+        self._games.sort(key=key_fn, reverse=reverse)
+
+    def _on_sort_changed(self, *_):
+        self._apply_sort()
+        self._populate_list()
 
     # ---------------------------------------------------------- Filter --
     def _on_search_changed(self, entry):
