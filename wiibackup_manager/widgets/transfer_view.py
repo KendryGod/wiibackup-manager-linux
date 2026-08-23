@@ -390,6 +390,29 @@ class TransferView(Gtk.Box):
             return
 
         dest_root = self._dest_path
+
+        # Con un solo juego (flujo individual) se pregunta antes de pisar
+        # un destino que ya existe, igual que al convertir. En lote no
+        # tiene sentido preguntar por cada uno: el worker los omite y los
+        # informa aparte en el resumen final.
+        if len(selected) == 1:
+            try:
+                dest = library.wbfs_dest_path(selected[0], dest_root)
+            except ValueError:
+                dest = None
+            if dest is not None and dest.exists():
+                gtk_helpers.confirm_overwrite(
+                    self.get_root(),
+                    f"Ya existe un archivo en:\n{dest}\n\n"
+                    f"Enviar '{selected[0].title}' lo va a reemplazar. "
+                    "Esta acción no se puede deshacer.",
+                    lambda: self._start_transfer(selected, dest_root, overwrite=True),
+                )
+                return
+
+        self._start_transfer(selected, dest_root)
+
+    def _start_transfer(self, selected: list[Game], dest_root: Path, overwrite: bool = False):
         wit_binary = self.settings.wit_binary
         self._transfer_cancelled = False
         self.transfer_button.set_sensitive(False)
@@ -405,6 +428,7 @@ class TransferView(Gtk.Box):
         def worker():
             ok_count = 0
             err_count = 0
+            skipped_count = 0
             bytes_done = 0
             start_time = time.monotonic()
             cancelled = False
@@ -429,14 +453,20 @@ class TransferView(Gtk.Box):
                               bytes_done, total_bytes, start_time)
                 try:
                     library.send_to_wbfs_drive(game, dest_root, wit_binary,
-                                                bytes_progress_cb=on_game_progress)
+                                                bytes_progress_cb=on_game_progress,
+                                                overwrite=overwrite)
                     ok_count += 1
+                except library.DestinationExistsError:
+                    # El juego ya está en la unidad: ni éxito ni error, se
+                    # cuenta aparte y se informa en el resumen final.
+                    skipped_count += 1
                 except Exception:
                     # Un juego que falla no frena el resto: se cuenta como
                     # error y se sigue con el siguiente de la selección.
                     err_count += 1
                 bytes_done += game.size_bytes
-            GLib.idle_add(self._on_transfer_done, ok_count, err_count, cancelled)
+            GLib.idle_add(self._on_transfer_done, ok_count, err_count, cancelled,
+                          skipped_count)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -468,15 +498,18 @@ class TransferView(Gtk.Box):
         self.transfer_progress.set_text(f"{done}/{total} · {title}{eta_text}")
         return False
 
-    def _on_transfer_done(self, ok_count: int, err_count: int, cancelled: bool = False):
+    def _on_transfer_done(self, ok_count: int, err_count: int, cancelled: bool = False,
+                           skipped_count: int = 0):
         self.transfer_button.set_sensitive(True)
         self.cancel_button.set_visible(False)
         self.transfer_progress.set_visible(False)
         self._update_dest_space_label()
+        skipped_text = f", {skipped_count} ya estaban en el destino" if skipped_count else ""
         if cancelled:
-            msg = f"Transferencia cancelada: {ok_count} ok, {err_count} con error antes de cancelar."
-        elif err_count:
-            msg = f"Transferencia terminada: {ok_count} ok, {err_count} con error."
+            msg = (f"Transferencia cancelada: {ok_count} ok, {err_count} con error"
+                   f"{skipped_text} antes de cancelar.")
+        elif err_count or skipped_count:
+            msg = f"Transferencia terminada: {ok_count} ok, {err_count} con error{skipped_text}."
         else:
             msg = f"Transferencia terminada: {ok_count} juego(s) copiados ✓"
         self._show_toast(msg)

@@ -346,6 +346,28 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             )
             return
 
+        # Con un solo juego (flujo individual) se pregunta antes de pisar
+        # un destino que ya existe, igual que al convertir. En lote no
+        # tiene sentido preguntar por cada uno: el worker los omite y los
+        # informa aparte en el resumen final.
+        if len(games) == 1:
+            try:
+                dest = library.wbfs_dest_path(games[0], dest_root)
+            except ValueError:
+                dest = None
+            if dest is not None and dest.exists():
+                gtk_helpers.confirm_overwrite(
+                    self,
+                    f"Ya existe un archivo en:\n{dest}\n\n"
+                    f"Enviar '{games[0].title}' lo va a reemplazar. "
+                    "Esta acción no se puede deshacer.",
+                    lambda: self._start_send(games, dest_root, overwrite=True),
+                )
+                return
+
+        self._start_send(games, dest_root)
+
+    def _start_send(self, games: list[Game], dest_root: Path, overwrite: bool = False):
         # Worker dedicado (no _run_batch genérico) porque acá sí tiene
         # sentido mostrar tiempo estimado y permitir cancelar: es la
         # operación de transferencia real hacia una unidad WBFS, con
@@ -364,6 +386,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         def worker():
             ok = 0
             errors: list[str] = []
+            skipped: list[str] = []
             bytes_done = 0
             start_time = time.monotonic()
             cancelled = False
@@ -385,14 +408,19 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                               bytes_done, total_bytes, start_time)
                 try:
                     library.send_to_wbfs_drive(game, dest_root, wit_binary,
-                                                bytes_progress_cb=on_game_progress)
+                                                bytes_progress_cb=on_game_progress,
+                                                overwrite=overwrite)
                     ok += 1
+                except library.DestinationExistsError:
+                    # El juego ya está en la unidad: no es un error ni un
+                    # éxito, se informa aparte en el resumen final.
+                    skipped.append(game.title)
                 except Exception as e:
                     # No frena el resto de la selección: se cuenta como
                     # error y se sigue con el siguiente juego.
                     errors.append(f"{game.title}: {e}")
                 bytes_done += game.size_bytes
-            GLib.idle_add(self._on_send_done, ok, errors, cancelled)
+            GLib.idle_add(self._on_send_done, ok, errors, cancelled, skipped)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -418,7 +446,9 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self.progress_bar.set_text(f"{done}/{total} · {title}{eta_text}")
         return False
 
-    def _on_send_done(self, ok: int, errors: list[str], cancelled: bool):
+    def _on_send_done(self, ok: int, errors: list[str], cancelled: bool,
+                       skipped: list[str] | None = None):
+        skipped = skipped or []
         self.progress_bar.set_visible(False)
         # Volver a None (no "") es lo que hace que el ProgressBar caiga de
         # nuevo a mostrar el porcentaje en las demás operaciones (rescan,
@@ -428,12 +458,21 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self.progress_cancel_btn.set_visible(False)
         if cancelled:
             self._show_toast(
-                f"Envío a unidad WBFS cancelado: {ok} ok, {len(errors)} con error antes de cancelar."
+                f"Envío a unidad WBFS cancelado: {ok} ok, {len(errors)} con error"
+                + (f", {len(skipped)} omitido(s)" if skipped else "")
+                + " antes de cancelar."
             )
-        elif errors:
-            preview = "; ".join(errors[:3])
-            more = f" (+{len(errors) - 3} más)" if len(errors) > 3 else ""
-            self._show_toast(f"Enviando a unidad WBFS: {ok} ok, {len(errors)} con error: {preview}{more}")
+        elif errors or skipped:
+            parts = [f"{ok} ok"]
+            if skipped:
+                preview = "; ".join(skipped[:3])
+                more = f" (+{len(skipped) - 3} más)" if len(skipped) > 3 else ""
+                parts.append(f"{len(skipped)} ya estaban en el destino: {preview}{more}")
+            if errors:
+                preview = "; ".join(errors[:3])
+                more = f" (+{len(errors) - 3} más)" if len(errors) > 3 else ""
+                parts.append(f"{len(errors)} con error: {preview}{more}")
+            self._show_toast("Enviando a unidad WBFS: " + " · ".join(parts))
         else:
             self._show_toast(f"Enviando a unidad WBFS: {ok} completado(s) ✓")
         self.rescan_library()
@@ -799,24 +838,16 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             # Ya hay un archivo con ese nombre de destino (no necesariamente
             # el mismo juego): confirmar antes de pisarlo, en vez de dejar
             # que --overwrite lo reemplace en silencio.
-            dialog = Adw.AlertDialog(
-                heading="¿Sobrescribir el archivo existente?",
-                body=f"Ya existe un archivo en:\n{dest.name}\n\n"
-                     f"Convertir '{game.title}' lo va a reemplazar. "
-                     "Esta acción no se puede deshacer.",
+            gtk_helpers.confirm_overwrite(
+                self,
+                f"Ya existe un archivo en:\n{dest.name}\n\n"
+                f"Convertir '{game.title}' lo va a reemplazar. "
+                "Esta acción no se puede deshacer.",
+                lambda: self._start_convert(game, dest, target_ext),
             )
-            dialog.add_response("cancel", "Cancelar")
-            dialog.add_response("overwrite", "Sobrescribir")
-            dialog.set_response_appearance("overwrite", Adw.ResponseAppearance.DESTRUCTIVE)
-            dialog.connect("response", self._on_convert_overwrite_response, game, dest, target_ext)
-            dialog.present(self)
             return
 
         self._start_convert(game, dest, target_ext)
-
-    def _on_convert_overwrite_response(self, dialog, response, game: Game, dest: Path, target_ext: str):
-        if response == "overwrite":
-            self._start_convert(game, dest, target_ext)
 
     def _start_convert(self, game: Game, dest: Path, target_ext: str):
         # Muestra progreso real por bytes: antes esta conversión individual

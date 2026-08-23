@@ -211,11 +211,38 @@ def _copy_with_progress(src: Path, dest: Path, progress_cb: Callable[[int], None
     shutil.copystat(src, dest)
 
 
+class DestinationExistsError(FileExistsError):
+    """El archivo destino en la unidad WBFS ya existe y no se pidió
+    sobrescribirlo. Es una condición esperable (el juego ya está en la
+    unidad), no un error de la operación: quien llama decide si preguntar
+    (flujo individual) o contarlo como omitido (flujo en lote)."""
+
+    def __init__(self, dest: Path):
+        super().__init__(f"Ya existe un archivo en {dest}")
+        self.dest = dest
+
+
+def wbfs_dest_path(game: Game, drive_root: Path) -> Path:
+    """Ruta final que va a ocupar `game` dentro de `drive_root`, en la
+    estructura 'wbfs/<ID6>/<ID6>.wbfs' que reconocen los USB Loaders.
+
+    Se expone aparte de `send_to_wbfs_drive` para que la interfaz pueda
+    chequear de antemano si ese destino ya existe (y preguntar antes de
+    pisarlo) sin duplicar cómo se arma la ruta."""
+    # Validar ANTES de armar la ruta (no solo al mostrar el ID en la
+    # interfaz): el game_id sale del header del archivo, que la app no
+    # controla, y acá se convierte en un componente de ruta real. Ver
+    # `disc_header.validate_game_id`.
+    game_id = validate_game_id(game.game_id)
+    return Path(drive_root) / "wbfs" / game_id / f"{game_id}.wbfs"
+
+
 def send_to_wbfs_drive(
     game: Game,
     drive_root: Path,
     wit_binary: str = "wit",
     bytes_progress_cb: Optional[Callable[[int], None]] = None,
+    overwrite: bool = False,
 ) -> Path:
     """Copia `game` a la estructura estándar 'wbfs/<ID6>/<ID6>.wbfs' que
     reconocen los USB Loaders de Wii (USB Loader GX, CFG USB Loader, etc.)
@@ -232,16 +259,21 @@ def send_to_wbfs_drive(
     `bytes_progress_cb`, si se pasa, se llama periódicamente con los bytes
     escritos hasta el momento hacia `dest` (copia directa o vía `wit`, ver
     `wit_wrapper.convert`), para poder mostrar progreso real dentro de la
-    copia/conversión de un solo juego grande."""
-    # Validar ANTES de armar la ruta (no solo al mostrar el ID en la
-    # interfaz): el game_id sale del header del archivo, que la app no
-    # controla, y acá se convierte en un componente de ruta real. Ver
-    # `disc_header.validate_game_id`.
-    game_id = validate_game_id(game.game_id)
+    copia/conversión de un solo juego grande.
 
-    dest_dir = Path(drive_root) / "wbfs" / game_id
+    Si el destino ya existe y no se pasa `overwrite=True`, levanta
+    `DestinationExistsError` sin tocar nada: los dos caminos (copia
+    directa con open("wb"), que trunca al instante, y `wit COPY
+    --overwrite`) reemplazan el archivo sin vuelta atrás, así que la
+    decisión de pisarlo es de quien llama, igual que ya pasaba al
+    convertir."""
+    dest = wbfs_dest_path(game, drive_root)
+    dest_dir = dest.parent
+
+    if not overwrite and dest.exists():
+        raise DestinationExistsError(dest)
+
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / f"{game_id}.wbfs"
 
     split = drives.needs_wbfs_split(dest_dir)
 
