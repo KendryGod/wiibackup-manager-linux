@@ -2,6 +2,7 @@
 juegos seleccionados de la biblioteca hacia allí en formato WBFS."""
 from __future__ import annotations
 
+import shutil
 import threading
 from pathlib import Path
 
@@ -14,6 +15,15 @@ from gi.repository import Adw, Gtk, GLib  # noqa: E402
 from .. import drives, gametdb, library
 from ..library import Game
 from .game_row import build_cover_widget
+
+
+def _format_bytes(n: int) -> str:
+    """GB con un decimal, o MB si es menos de 1 GB (evita mostrar '0.0 GB'
+    para transferencias chicas)."""
+    gb = n / (1024 ** 3)
+    if gb >= 1:
+        return f"{gb:.1f} GB"
+    return f"{n / (1024 ** 2):.1f} MB"
 
 
 class TransferGameRow(Adw.ActionRow):
@@ -98,8 +108,17 @@ class TransferView(Gtk.Box):
         dest_buttons.append(refresh_drives_btn)
         dest_buttons.append(add_folder_btn)
 
+        self.dest_space_label = Gtk.Label(
+            label="Elegí un destino para ver el espacio disponible.", xalign=0
+        )
+        self.dest_space_label.add_css_class("dim-label")
+        self.dest_space_label.set_margin_start(12)
+        self.dest_space_label.set_margin_end(12)
+        self.dest_space_label.set_margin_bottom(8)
+
         self.append(dest_group)
         self.append(dest_buttons)
+        self.append(self.dest_space_label)
         self.append(Gtk.Separator(margin_top=4, margin_bottom=4))
 
         # --- Sección de juegos ---
@@ -186,6 +205,22 @@ class TransferView(Gtk.Box):
 
     def _on_dest_row_selected(self, listbox, row):
         self._dest_path = getattr(row, "dest_path", None) if row else None
+        self._update_dest_space_label()
+
+    def _update_dest_space_label(self):
+        if self._dest_path is None:
+            self.dest_space_label.set_label("Elegí un destino para ver el espacio disponible.")
+            return
+        try:
+            usage = shutil.disk_usage(self._dest_path)
+        except OSError:
+            self.dest_space_label.set_label("No se pudo leer el espacio disponible en el destino.")
+            return
+        free_gb = usage.free / (1024 ** 3)
+        total_gb = usage.total / (1024 ** 3)
+        self.dest_space_label.set_label(
+            f"Espacio en destino: {free_gb:.1f} GB libres de {total_gb:.1f} GB"
+        )
 
     def _on_add_folder(self, *_):
         dialog = Gtk.FileDialog(title="Elegí la carpeta destino")
@@ -240,6 +275,25 @@ class TransferView(Gtk.Box):
             self._show_toast("No hay juegos seleccionados.")
             return
 
+        # Chequeo de espacio ANTES de arrancar: el tamaño de origen es una
+        # cota superior razonable del tamaño final en WBFS (la conversión
+        # solo achica al descartar padding, nunca agranda), así que sirve
+        # para avisar de antemano sin tener que copiar/convertir primero.
+        total_bytes = sum(g.size_bytes for g in selected)
+        try:
+            free_bytes = shutil.disk_usage(self._dest_path).free
+        except OSError:
+            free_bytes = None
+
+        if free_bytes is not None and total_bytes > free_bytes:
+            self._show_toast(
+                f"No hay espacio suficiente en el destino: se necesitan "
+                f"{_format_bytes(total_bytes)} y hay {_format_bytes(free_bytes)} libres "
+                f"(faltan {_format_bytes(total_bytes - free_bytes)}). "
+                "Liberá espacio o elegí menos juegos."
+            )
+            return
+
         dest_root = self._dest_path
         wit_binary = self.settings.wit_binary
         self.transfer_button.set_sensitive(False)
@@ -270,6 +324,7 @@ class TransferView(Gtk.Box):
     def _on_transfer_done(self, ok_count: int, err_count: int):
         self.transfer_button.set_sensitive(True)
         self.transfer_progress.set_visible(False)
+        self._update_dest_space_label()
         if err_count:
             msg = f"Transferencia terminada: {ok_count} ok, {err_count} con error."
         else:
