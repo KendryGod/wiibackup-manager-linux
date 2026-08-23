@@ -46,15 +46,17 @@ class TransferGameRow(Adw.ActionRow):
         self.add_prefix(self._cover_widget)
 
     def load_cover_async(self):
-        """Igual que en GameRow: la carátula se busca (o se toma de caché)
-        en un hilo aparte para no trabar la interfaz, y se aplica en el
-        hilo principal de GTK vía GLib.idle_add."""
+        """Igual que en GameRow: la carátula se pide al pool compartido de
+        `gametdb` (nunca más de 6 descargas simultáneas en toda la app) y se
+        aplica en el hilo principal de GTK vía GLib.idle_add.
 
-        def worker():
-            path = gametdb.get_cover_path(self.game.game_id, self._cover_region)
-            GLib.idle_add(self._apply_cover, str(path) if path else None)
-
-        threading.Thread(target=worker, daemon=True).start()
+        Antes esta vista lanzaba un `threading.Thread` por fila: con 300
+        juegos eran 300 descargas de golpe contra GameTDB, mientras la
+        Biblioteca hacía como mucho 6."""
+        gametdb.fetch_cover_async(
+            self.game.game_id, self._cover_region,
+            lambda path: GLib.idle_add(self._apply_cover, str(path) if path else None),
+        )
 
     def _apply_cover(self, path: str | None):
         if path:

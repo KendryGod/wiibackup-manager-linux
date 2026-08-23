@@ -15,9 +15,10 @@ import threading
 import urllib.request
 import urllib.error
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from . import config
 from .disc_header import is_valid_game_id, validate_game_id
@@ -97,6 +98,97 @@ def get_cover_path(game_id: str, region: str = "EN", force: bool = False) -> Opt
             continue
 
     return None
+
+
+# --- Descarga de carátulas en segundo plano (pool compartido) ---
+#
+# Todas las vistas que muestran carátulas (Biblioteca, Transferir, panel de
+# detalle) pasan por acá. Antes cada una tenía su propia estrategia: la
+# Biblioteca usaba un pool acotado y Transferir lanzaba un
+# `threading.Thread` por fila, así que con 300 juegos podía disparar 300
+# descargas simultáneas contra GameTDB (saturando la conexión y haciendo
+# que el servidor rechace pedidos), mientras la Biblioteca hacía 6.
+#
+# Con un solo pool compartido el límite es global de verdad: no importa
+# cuántas vistas pidan carátulas al mismo tiempo, nunca hay más de
+# `_COVER_DOWNLOAD_WORKERS` descargas en vuelo. Y una carátula lenta o
+# colgada ocupa como mucho un worker; el resto sigue.
+_COVER_DOWNLOAD_WORKERS = 6
+_cover_executor = ThreadPoolExecutor(
+    max_workers=_COVER_DOWNLOAD_WORKERS, thread_name_prefix="cover-dl"
+)
+
+# Descargas en vuelo, por (game_id, región). Un rescan reconstruye todas
+# las filas y vuelve a pedir las mismas carátulas: sin esto, cada rescan
+# encolaría de nuevo descargas que ya están corriendo. En vez de eso, el
+# pedido nuevo se cuelga del que ya está en curso y recibe el mismo
+# resultado cuando termina.
+_inflight: dict = {}
+_inflight_lock = threading.Lock()
+
+CoverCallback = Callable[[Optional[Path]], None]
+
+
+def fetch_cover_async(game_id: str, region: str = "EN",
+                      on_done: Optional[CoverCallback] = None) -> None:
+    """Pide la carátula de `game_id` y llama a `on_done(path_o_None)` al
+    terminar.
+
+    Ojo: `on_done` se llama desde un hilo del pool (o desde el hilo que
+    llama, si la carátula ya estaba en caché), así que quien toque widgets
+    de GTK adentro tiene que reenviarlo con `GLib.idle_add`.
+
+    Dos atajos evitan trabajo al pedo: un juego sin identificar no tiene
+    carátula que pedir, y una carátula ya cacheada se resuelve en el acto
+    sin ocupar un worker (importante en un rescan, donde se repiden todas
+    las carátulas de la biblioteca de una)."""
+    if on_done is None:
+        return
+
+    if not is_valid_game_id(game_id):
+        on_done(None)
+        return
+
+    game_id = validate_game_id(game_id)
+    cached = cover_cache_path(game_id)
+    if _is_valid_cached_cover(cached):
+        on_done(cached)
+        return
+
+    key = (game_id, region)
+    with _inflight_lock:
+        waiting = _inflight.get(key)
+        if waiting is not None:
+            # Ya hay una descarga en curso para esta carátula: colgarse de
+            # ella en vez de encolar otra igual.
+            waiting.append(on_done)
+            return
+        _inflight[key] = [on_done]
+
+    _cover_executor.submit(_run_cover_job, key)
+
+
+def _run_cover_job(key: tuple) -> None:
+    game_id, region = key
+    try:
+        path = get_cover_path(game_id, region)
+    except Exception:
+        path = None
+    with _inflight_lock:
+        callbacks = _inflight.pop(key, [])
+    for cb in callbacks:
+        try:
+            cb(path)
+        except Exception:
+            # Un callback que falla (p. ej. una fila que ya no existe) no
+            # puede llevarse puestos a los demás ni al worker del pool.
+            pass
+
+
+def covers_in_flight() -> int:
+    """Cuántas carátulas distintas se están descargando ahora mismo."""
+    with _inflight_lock:
+        return len(_inflight)
 
 
 # --- Metadata extendida (género, jugadores, fecha, publisher, developer) ---

@@ -73,11 +73,13 @@ class GameDetailDialog(Adw.Dialog):
 
     # ------------------------------------------------------------ Carátula --
     def _load_cover_async(self, cover_region: str):
-        def worker():
-            path = gametdb.get_cover_path(self.game.game_id, cover_region)
-            GLib.idle_add(self._apply_cover, str(path) if path else None)
-
-        threading.Thread(target=worker, daemon=True).start()
+        # Mismo pool compartido que la Biblioteca y Transferir: si la
+        # carátula de este juego ya se está descargando para una fila, este
+        # panel se cuelga de esa descarga en vez de pedirla de nuevo.
+        gametdb.fetch_cover_async(
+            self.game.game_id, cover_region,
+            lambda path: GLib.idle_add(self._apply_cover, str(path) if path else None),
+        )
 
     def _apply_cover(self, path: str | None):
         if path:

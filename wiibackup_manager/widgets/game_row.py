@@ -1,8 +1,6 @@
 """Fila de la lista de juegos: carátula + info + botón de acciones."""
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
-
 import gi
 
 gi.require_version("Gtk", "4.0")
@@ -44,18 +42,6 @@ def build_cover_widget(width: int = COVER_WIDTH, height: int = COVER_HEIGHT):
     overlay.add_overlay(picture)
 
     return overlay, picture
-
-
-# Pool compartido por todas las filas: antes cada GameRow disparaba su propio
-# threading.Thread sin límite, así que una biblioteca de 50 juegos lanzaba 50
-# descargas simultáneas contra GameTDB (saturando la conexión y haciendo que
-# el servidor cuelgue/rechace pedidos). Con un pool acotado, una carátula
-# lenta o colgada no bloquea a las demás: como mucho ocupa uno de los
-# workers, y el resto sigue descargando en paralelo.
-_COVER_DOWNLOAD_WORKERS = 6
-_cover_executor = ThreadPoolExecutor(
-    max_workers=_COVER_DOWNLOAD_WORKERS, thread_name_prefix="cover-dl"
-)
 
 
 class GameRow(Adw.ActionRow):
@@ -133,13 +119,16 @@ class GameRow(Adw.ActionRow):
 
     def load_cover_async(self):
         """Descarga (o toma de caché) la carátula usando el pool compartido
-        de workers y la aplica en el hilo principal de GTK cuando termina."""
+        de `gametdb` y la aplica en el hilo principal de GTK cuando termina.
 
-        def worker():
-            path = gametdb.get_cover_path(self.game.game_id, self.cover_region)
-            GLib.idle_add(self._apply_cover, str(path) if path else None)
-
-        _cover_executor.submit(worker)
+        El pool vive en gametdb y no acá para que TODAS las vistas que
+        muestran carátulas compartan el mismo límite de descargas
+        simultáneas, y para que un rescan no vuelva a encolar carátulas que
+        ya se están descargando."""
+        gametdb.fetch_cover_async(
+            self.game.game_id, self.cover_region,
+            lambda path: GLib.idle_add(self._apply_cover, str(path) if path else None),
+        )
 
     def _apply_cover(self, path: str | None):
         if path:
