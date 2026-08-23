@@ -47,6 +47,21 @@ class Settings:
 
 
 def ensure_dirs(settings: Settings) -> None:
-    Path(settings.library_path).mkdir(parents=True, exist_ok=True)
+    try:
+        Path(settings.library_path).mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # library_path puede apuntar a un punto de montaje externo que no
+        # está conectado en este momento (ej. /run/media/usuario/DISCO/...).
+        # En ese caso mkdir(parents=True) fallaría al intentar crear
+        # directorios padre donde el usuario no tiene permiso de escritura
+        # (/run/media/usuario). No hay nada que crear ahí: la app debe
+        # abrir igual con la biblioteca vacía y esperar a que el usuario
+        # conecte la unidad.
+        pass
     COVERS_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def library_path_available(settings: Settings) -> bool:
+    """True si library_path existe como carpeta accesible ahora mismo."""
+    return Path(settings.library_path).is_dir()

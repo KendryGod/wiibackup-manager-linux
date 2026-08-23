@@ -27,11 +27,14 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
         self._games: list[Game] = []
         self._rows: dict[str, GameRow] = {}
+        self._library_available = config.library_path_available(self.settings)
 
         self._build_ui()
 
         if self.settings.auto_scan_on_start:
             GLib.idle_add(self.rescan_library)
+
+        GLib.timeout_add_seconds(3, self._poll_library_availability)
 
     # ---------------------------------------------------------------- UI --
     def _build_ui(self):
@@ -136,10 +139,34 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             )
             toolbar_view.add_top_bar(banner)
 
+        self._library_banner = Adw.Banner(button_label="Reintentar")
+        self._library_banner.connect("button-clicked", lambda *_: self.rescan_library())
+        toolbar_view.add_top_bar(self._library_banner)
+        self._update_library_banner()
+
     def _add_action(self, name: str, callback):
         action = Gio.SimpleAction.new(name, None)
         action.connect("activate", lambda *_: callback())
         self.add_action(action)
+
+    # -------------------------------------------------------- Library --
+    def _update_library_banner(self):
+        if self._library_available:
+            self._library_banner.set_revealed(False)
+        else:
+            self._library_banner.set_title(
+                f"Unidad no disponible: {self.settings.library_path} no está "
+                "conectada. Conectala y se detectará automáticamente."
+            )
+            self._library_banner.set_revealed(True)
+
+    def _poll_library_availability(self):
+        available = config.library_path_available(self.settings)
+        if available != self._library_available:
+            self._library_available = available
+            self._update_library_banner()
+            self.rescan_library()
+        return True  # seguir sondeando
 
     # ------------------------------------------------------------ Scan --
     def rescan_library(self):
@@ -247,7 +274,11 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         import shutil as _shutil
 
         dest_dir = Path(self.settings.library_path)
-        dest_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            self._show_toast(f"No se pudo escribir en la carpeta de biblioteca: {e}")
+            return
 
         known_ids = {g.game_id for g in self._games if g.game_id != "??????"}
 
@@ -371,6 +402,9 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
     def _on_settings_saved(self, settings: config.Settings):
         settings.save()
+        config.ensure_dirs(settings)
+        self._library_available = config.library_path_available(settings)
+        self._update_library_banner()
         self.rescan_library()
 
     def _on_about(self):
