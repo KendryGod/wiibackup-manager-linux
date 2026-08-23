@@ -132,17 +132,40 @@ class TransferView(Gtk.Box):
         self.eject_button.connect("clicked", self._on_eject_clicked)
         dest_buttons.append(self.eject_button)
 
+        # Espacio del destino: texto + barra de color. La barra es un
+        # agregado al texto, no un reemplazo: el número exacto ("12.3 GB
+        # libres de 465.8 GB") es el dato que sirve para decidir si entran
+        # los juegos elegidos, y la barra es la lectura de un vistazo de
+        # cuán llena está la unidad.
         self.dest_space_label = Gtk.Label(
             label="Elegí un destino para ver el espacio disponible.", xalign=0
         )
         self.dest_space_label.add_css_class("dim-label")
-        self.dest_space_label.set_margin_start(12)
-        self.dest_space_label.set_margin_end(12)
-        self.dest_space_label.set_margin_bottom(8)
+
+        self.dest_space_bar = Gtk.LevelBar()
+        self.dest_space_bar.set_mode(Gtk.LevelBarMode.CONTINUOUS)
+        self.dest_space_bar.set_min_value(0.0)
+        self.dest_space_bar.set_max_value(1.0)
+        self.dest_space_bar.add_css_class("disk-usage")
+        # GTK trae de fábrica los cortes "low"/"high"/"full", que le ponen
+        # sus propias clases al bloque lleno y lo pintan según el tema. Acá
+        # el color lo decide `_usage_css_class` con los umbrales de disco
+        # que nos interesan (70% / 90%), así que se sacan para que no haya
+        # dos reglas peleando por el mismo bloque.
+        for offset in ("low", "high", "full"):
+            self.dest_space_bar.remove_offset_value(offset)
+        self.dest_space_bar.set_visible(False)
+
+        dest_space_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        dest_space_box.set_margin_start(12)
+        dest_space_box.set_margin_end(12)
+        dest_space_box.set_margin_bottom(8)
+        dest_space_box.append(self.dest_space_label)
+        dest_space_box.append(self.dest_space_bar)
 
         self.append(dest_group)
         self.append(dest_buttons)
-        self.append(self.dest_space_label)
+        self.append(dest_space_box)
         self.append(Gtk.Separator(margin_top=4, margin_bottom=4))
 
         # --- Sección de juegos ---
@@ -291,20 +314,62 @@ class TransferView(Gtk.Box):
         self._update_dest_space_label()
         self._update_eject_button()
 
+    # Umbrales de la barra de uso de disco del destino. Debajo de WARN la
+    # barra va verde, entre WARN y FULL amarilla, y de FULL para arriba
+    # roja: con un disco Wii de doble capa pesando ~8 GB, un 90% ocupado en
+    # una unidad chica ya significa que probablemente no entre el próximo
+    # juego.
+    _USAGE_WARN = 0.70
+    _USAGE_FULL = 0.90
+
+    @classmethod
+    def _usage_css_class(cls, ratio: float) -> str:
+        if ratio >= cls._USAGE_FULL:
+            return "usage-full"
+        if ratio >= cls._USAGE_WARN:
+            return "usage-warn"
+        return "usage-ok"
+
+    def _set_usage_bar(self, ratio: float | None):
+        """Actualiza la barra de uso, o la esconde si no hay un destino
+        legible del que sacar el dato (`ratio is None`). Esconderla es a
+        propósito: una barra en cero se leería como "el disco está vacío",
+        que es justo lo contrario de "no sé cuánto hay"."""
+        for css_class in ("usage-ok", "usage-warn", "usage-full"):
+            self.dest_space_bar.remove_css_class(css_class)
+        if ratio is None:
+            self.dest_space_bar.set_visible(False)
+            return
+        ratio = min(max(ratio, 0.0), 1.0)
+        self.dest_space_bar.add_css_class(self._usage_css_class(ratio))
+        self.dest_space_bar.set_value(ratio)
+        self.dest_space_bar.set_tooltip_text(f"{ratio * 100:.0f}% del destino ocupado")
+        self.dest_space_bar.set_visible(True)
+
     def _update_dest_space_label(self):
         if self._dest_path is None:
             self.dest_space_label.set_label("Elegí un destino para ver el espacio disponible.")
+            self._set_usage_bar(None)
             return
         try:
             usage = shutil.disk_usage(self._dest_path)
         except OSError:
             self.dest_space_label.set_label("No se pudo leer el espacio disponible en el destino.")
+            self._set_usage_bar(None)
             return
         free_gb = usage.free / (1024 ** 3)
         total_gb = usage.total / (1024 ** 3)
+        # `usage.used + usage.free` no da `usage.total`: en ext4 y familia
+        # hay bloques reservados para root que están en total y no en
+        # ninguno de los otros dos. El porcentaje que le importa al usuario
+        # es "cuánto del disco no puedo usar", así que se calcula sobre lo
+        # que NO está libre y no sobre `usage.used`.
+        ratio = (usage.total - usage.free) / usage.total if usage.total else None
+        percent_text = f" · {ratio * 100:.0f}% usado" if ratio is not None else ""
         self.dest_space_label.set_label(
-            f"Espacio en destino: {free_gb:.1f} GB libres de {total_gb:.1f} GB"
+            f"Espacio en destino: {free_gb:.1f} GB libres de {total_gb:.1f} GB{percent_text}"
         )
+        self._set_usage_bar(ratio)
 
     def _update_eject_button(self):
         if self._dest_path is not None and drives.is_mount_point(self._dest_path):
