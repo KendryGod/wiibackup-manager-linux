@@ -166,6 +166,15 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         content_box.append(self.stack)
         self.stack.set_vexpand(True)
 
+        self.library_status_label = Gtk.Label(xalign=0)
+        self.library_status_label.add_css_class("dim-label")
+        self.library_status_label.set_margin_start(12)
+        self.library_status_label.set_margin_end(12)
+        self.library_status_label.set_margin_top(4)
+        self.library_status_label.set_margin_bottom(8)
+        content_box.append(self.library_status_label)
+        self._update_library_status_bar()
+
         # Arrastrar y soltar archivos/carpetas desde el gestor de archivos
         # del sistema directo sobre la Biblioteca (lista o estado vacío).
         drop_target = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
@@ -496,7 +505,14 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self._populate_list()
         self.stack.set_visible_child_name("list" if games else "empty")
         self.transfer_view.set_games(games)
+        self._update_library_status_bar()
         return False
+
+    def _update_library_status_bar(self):
+        count = len(self._games)
+        total_size = library.format_size(sum(g.size_bytes for g in self._games))
+        noun = "juego" if count == 1 else "juegos"
+        self.library_status_label.set_label(f"{count} {noun} · {total_size}")
 
     def _populate_list(self):
         child = self.list_box.get_first_child()
