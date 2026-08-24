@@ -49,11 +49,29 @@ class OperationKind(Enum):
         self.mutates = mutates
 
 
-# Operaciones de las que solo puede haber UNA a la vez, aunque toquen
-# archivos distintos: comparten una única barra de progreso en la ventana y,
-# en el caso del escaneo, dos en paralelo se pisan el resultado entre sí.
+# Operaciones de las que solo puede haber UNA a la vez de su mismo tipo,
+# aunque toquen archivos distintos: dos escaneos en paralelo se pisan el
+# resultado entre sí, y las demás comparten la barra de progreso de la
+# ventana, así que dos iguales mezclan el progreso.
 _EXCLUSIVE_KINDS = frozenset(
-    {OperationKind.SCANNING, OperationKind.IMPORTING, OperationKind.TRANSFERRING}
+    {OperationKind.SCANNING, OperationKind.IMPORTING,
+     OperationKind.TRANSFERRING, OperationKind.CONVERTING}
+)
+
+# Operaciones que además no conviven ENTRE SÍ, no solo con otra igual.
+# Todas actualizan la MISMA barra de progreso de la ventana principal:
+# corriendo dos a la vez el progreso salta de una a la otra y la primera
+# que termina esconde la barra mientras la otra sigue trabajando.
+#
+# El escaneo queda afuera a propósito: no es una acción que el usuario
+# pida (corre solo, después de cada operación y cuando la unidad de la
+# biblioteca aparece), la regla 2 de abajo ya lo separa de todo lo que
+# escribe archivos, y bloquearlo acá haría que un escaneo automático
+# quedara postergado detrás de cada transferencia de la pestaña
+# Transferir, que ni siquiera usa esta barra sino la suya.
+_SHARED_PROGRESS_KINDS = frozenset(
+    {OperationKind.IMPORTING, OperationKind.TRANSFERRING,
+     OperationKind.CONVERTING}
 )
 
 
@@ -158,8 +176,10 @@ class OperationManager:
         """Devuelve (operación_que_bloquea, motivo) o None si se puede
         arrancar. Las reglas, en orden:
 
-        1. De las operaciones "exclusivas" (escanear, importar, transferir)
-           puede haber solo una a la vez.
+        1. De las operaciones "exclusivas" (escanear, importar, transferir,
+           convertir) puede haber solo una a la vez de cada tipo.
+        1b. Las que comparten la barra de progreso de la ventana
+           (importar, transferir, convertir) tampoco conviven entre sí.
         2. Escanear no convive con nada que escriba archivos: el escaneo
            llegaría a ver archivos a medio escribir y los identificaría mal.
         3. Dos operaciones que tocan el mismo archivo solo conviven si
@@ -167,6 +187,12 @@ class OperationManager:
         for op in self._active.values():
             if kind in _EXCLUSIVE_KINDS and op.kind is kind:
                 return op, f"ya hay una operación de este tipo en curso ({op.label})"
+
+            if kind in _SHARED_PROGRESS_KINDS and op.kind in _SHARED_PROGRESS_KINDS:
+                return op, (
+                    "hay otra operación larga en curso y las dos comparten la "
+                    f"misma barra de progreso ({op.label})"
+                )
 
             if ((kind is OperationKind.SCANNING and op.kind.mutates)
                     or (op.kind is OperationKind.SCANNING and kind.mutates)):
