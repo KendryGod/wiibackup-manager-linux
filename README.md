@@ -71,11 +71,31 @@ pip install --user -r requirements.txt
 python3 -m wiibackup_manager
 ```
 
-### 4. Integración con el menú de aplicaciones (opcional)
+### 4. Integración con el menú de aplicaciones e ícono (opcional)
+
+Si instalaste con `pip install --user .` (sin `-e`), el `.desktop` y los
+íconos ya se copiaron solos a `~/.local/share/applications` y
+`~/.local/share/icons/hicolor/*/apps`. Solo falta refrescar la caché:
+
+```bash
+gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor
+```
+
+Si instalaste en modo editable (`pip install -e .`), `data_files` no se
+copia (limitación de los installs editables), así que hacelo a mano:
 
 ```bash
 mkdir -p ~/.local/share/applications
 cp data/com.gamefixsps.WiiBackupManager.desktop ~/.local/share/applications/
+
+APP_ID="com.gamefixsps.WiiBackupManager"
+for size in 16 32 48 64 128 256 512; do
+  mkdir -p ~/.local/share/icons/hicolor/${size}x${size}/apps
+  cp "data/icons/hicolor/${size}x${size}/apps/${APP_ID}.png" \
+     ~/.local/share/icons/hicolor/${size}x${size}/apps/
+done
+
+gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor
 ```
 
 ## Uso
