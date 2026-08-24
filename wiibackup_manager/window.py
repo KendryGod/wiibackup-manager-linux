@@ -477,14 +477,20 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
     # ------------------------------------------------------ Acciones en lote --
     def _run_batch(self, games: list[Game], title: str, action_fn,
-                    kind: OperationKind):
-        """Corre `action_fn(game)` para cada juego en un hilo aparte,
-        mostrando progreso y un resumen final de éxitos/omitidos/errores. Se
-        reusa para enviar a WBFS, convertir, verificar y eliminar en lote.
+                    kind: OperationKind, cancel_message: str = "Cancelando…"):
+        """Corre `action_fn(game, cancel)` para cada juego en un hilo
+        aparte, mostrando progreso, botón de cancelar y un resumen final de
+        éxitos/omitidos/errores. Se reusa para verificar y eliminar en lote.
 
         `action_fn` puede levantar `BatchSkip` para señalar que ese juego se
         salteó a propósito (no es un error ni un éxito, p. ej. porque ya
         existe el destino): se cuenta y se muestra aparte en el resumen.
+
+        `cancel` es el token de esta corrida: el worker lo mira entre
+        juegos y `action_fn` lo puede pasar hacia abajo (lo hace la
+        verificación, para que matar el `wit` en curso no espere a que
+        termine con el juego que está leyendo). Cancelar deja lo ya
+        procesado como está y no toca lo que faltaba.
 
         `kind` es el tipo de operación con el que se registra el lote
         entero en el OperationManager, para que nada más toque esos
@@ -502,26 +508,38 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             self._show_toast(f"No se puede ahora: {e.detail}.")
             return
 
-        self.progress_bar.set_visible(True)
-        self.progress_bar.set_fraction(0)
-        self.set_title(f"WiiBackup Manager — {title}…")
+        cancel = self._begin_cancellable_progress(title, cancel_message)
         total = len(games)
 
         def worker():
             ok = 0
             errors: list[str] = []
             skipped: list[str] = []
+            cancelled = False
             for i, game in enumerate(games, start=1):
+                if cancel.cancelled:
+                    cancelled = True
+                    break
                 try:
-                    action_fn(game)
+                    action_fn(game, cancel)
                     ok += 1
+                except wit_wrapper.OperationCancelled:
+                    # Cancelado a mitad de ESTE juego: no es un error, y lo
+                    # que faltaba queda sin tocar.
+                    cancelled = True
+                    break
                 except BatchSkip as e:
                     skipped.append(f"{game.title}: {e}" if str(e) else game.title)
                 except Exception as e:
+                    if cancel.cancelled:
+                        # El fallo es consecuencia de haber matado el
+                        # proceso al cancelar, no un error real.
+                        cancelled = True
+                        break
                     errors.append(f"{game.title}: {e}")
                 GLib.idle_add(self.progress_bar.set_fraction, i / max(total, 1))
             GLib.idle_add(self._on_batch_done, title, ok, errors, skipped, op,
-                          self._describe_target(games))
+                          self._describe_target(games), cancelled)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -825,12 +843,14 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             self._show_toast("No se encontró 'wit'. Instalalo para poder verificar (ver README).")
             return
 
-        def verify_one(g: Game):
-            ok, _output = wit_wrapper.verify(g.path, self.settings.wit_binary)
+        def verify_one(g: Game, cancel):
+            ok, _output = wit_wrapper.verify(g.path, self.settings.wit_binary,
+                                              cancel=cancel)
             if not ok:
                 raise RuntimeError("verificación con errores")
 
-        self._run_batch(games, "Verificando", verify_one, OperationKind.VERIFYING)
+        self._run_batch(games, "Verificando", verify_one, OperationKind.VERIFYING,
+                         cancel_message="Cancelando la verificación…")
 
     def _on_batch_delete(self):
         games = self._selected_games()
@@ -864,10 +884,14 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                                  uses_progress_bar=True):
             return
 
-        def delete_one(g: Game):
+        def delete_one(g: Game, _cancel):
+            # Borrar un archivo es instantáneo: no hay nada que cortar a
+            # mitad, cancelar solo evita que se sigan borrando los que
+            # faltaban.
             g.path.unlink()
 
-        self._run_batch(games, "Eliminando", delete_one, OperationKind.DELETING)
+        self._run_batch(games, "Eliminando", delete_one, OperationKind.DELETING,
+                         cancel_message="Cancelando el borrado…")
 
     # -------------------------------------------------------- Library --
     @staticmethod

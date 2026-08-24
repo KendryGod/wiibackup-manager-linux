@@ -559,13 +559,65 @@ def convert(
     return result
 
 
+def _run_cancellable(
+    binary: str, *args: str, timeout: Optional[float] = DEFAULT_WIT_TIMEOUT,
+    cancel: Optional[CancellationToken] = None,
+) -> subprocess.CompletedProcess:
+    """Como `_run`, pero registrando el proceso en el token para poder
+    matarlo desde el botón "Cancelar".
+
+    `_run` usa subprocess.run, que no da manera de llegar al proceso
+    mientras corre: sin esto, cancelar un lote de verificación tenía que
+    esperar a que `wit` terminara con el juego en curso, que en un
+    dual-layer son varios minutos."""
+    if cancel is None:
+        return _run(binary, *args, timeout=timeout)
+
+    if cancel.cancelled:
+        raise OperationCancelled("Operación cancelada antes de arrancar `wit`.")
+
+    proc = subprocess.Popen(
+        [binary, *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    if not cancel.attach(proc):
+        # La cancelación llegó entre el chequeo y el Popen: `attach` ya lo
+        # mató, solo queda recogerlo para no dejar un zombi.
+        proc.wait()
+        raise OperationCancelled("Operación cancelada por el usuario.")
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        _terminate_process_group(proc)
+        proc.wait()
+        return _timeout_result([binary, *args], exc, timeout)
+    finally:
+        cancel.detach(proc)
+
+    if cancel.cancelled:
+        raise OperationCancelled("Operación cancelada por el usuario.")
+    return subprocess.CompletedProcess(
+        args=[binary, *args], returncode=proc.returncode,
+        stdout=stdout, stderr=stderr,
+    )
+
+
 def verify(
-    path: Path, binary: str = "wit", timeout: Optional[float] = DEFAULT_WIT_TIMEOUT
+    path: Path, binary: str = "wit", timeout: Optional[float] = DEFAULT_WIT_TIMEOUT,
+    cancel: Optional[CancellationToken] = None,
 ) -> tuple[bool, str]:
-    """Verifica la integridad de una imagen con `wit VERIFY`."""
+    """Verifica la integridad de una imagen con `wit VERIFY`.
+
+    `cancel`, si se pasa, permite matar el `wit` en curso desde el hilo de
+    GTK: en ese caso levanta `OperationCancelled` en vez de devolver un
+    resultado."""
     if not find_wit(binary):
         raise WitNotFoundError(binary)
-    result = _run(binary, "VERIFY", "--long", str(path), timeout=timeout)
+    result = _run_cancellable(binary, "VERIFY", "--long", str(path),
+                               timeout=timeout, cancel=cancel)
     ok = result.returncode == 0
     output = (result.stdout + result.stderr).strip()
     return ok, output
