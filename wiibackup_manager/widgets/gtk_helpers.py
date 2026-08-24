@@ -53,3 +53,28 @@ def confirm_overwrite(parent, body: str, on_overwrite: Callable[[], None]) -> No
         lambda _d, response: on_overwrite() if response == "overwrite" else None,
     )
     dialog.present(parent)
+
+
+def widget_is_alive(widget) -> bool:
+    """True si `widget` sigue montado en una jerarquía con ventana.
+
+    Sirve para los callbacks que llegan de un hilo de fondo (carátulas y
+    metadata de GameTDB, que se reenvían al hilo de GTK con
+    `GLib.idle_add`): entre que la descarga arranca y termina, la fila
+    puede haber desaparecido de la lista -por un reordenamiento, un
+    filtro, un rescan- o el panel de detalle puede haberse cerrado. Tocar
+    las propiedades de un widget ya sacado de la jerarquía (y, en el caso
+    de un Adw.Dialog cerrado, ya dispuesto por GTK) va desde "no se ve
+    nada" hasta tirar la app entera con un error fatal de GTK.
+
+    Un widget que todavía no se agregó a ninguna ventana también da
+    False, que es lo correcto acá: todos los callbacks que usan esto
+    corren por `GLib.idle_add`, o sea después de que la fila ya se agregó
+    a la lista (o el diálogo ya se presentó), nunca antes.
+    """
+    try:
+        return widget.get_root() is not None
+    except Exception:
+        # El objeto de C ya no está: PyGObject puede levantar cualquier
+        # cosa al tocarlo. Sea lo que sea, el widget no está vivo.
+        return False

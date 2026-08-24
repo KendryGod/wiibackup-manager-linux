@@ -15,6 +15,7 @@ from gi.repository import Adw, Gtk, GLib  # noqa: E402
 
 from .. import gametdb
 from ..library import Game
+from . import gtk_helpers
 from .game_row import build_cover_widget
 
 COVER_WIDTH = 220
@@ -121,6 +122,11 @@ class GameDetailDialog(Adw.Dialog):
         )
 
     def _apply_cover(self, path: str | None):
+        # El panel se puede cerrar antes de que termine la descarga: un
+        # Adw.Dialog cerrado ya no está en la jerarquía de la ventana y
+        # tocarlo es justamente lo que puede tirar la app.
+        if not gtk_helpers.widget_is_alive(self):
+            return False
         if path:
             try:
                 self._cover.set_filename(path)
@@ -140,6 +146,12 @@ class GameDetailDialog(Adw.Dialog):
         )
 
     def _apply_extra_info(self, info: gametdb.GameExtraInfo | None):
+        # Armar el índice de wiitdb.xml puede tardar bastante la primera
+        # vez (bajar y parsear 30+ MB): lo normal es que el usuario cierre
+        # el panel antes de que termine, y entonces todas las filas que
+        # arma este método irían a parar a un diálogo ya cerrado.
+        if not gtk_helpers.widget_is_alive(self):
+            return False
         self.info_group.remove(self._extra_status_row)
 
         if info is None:

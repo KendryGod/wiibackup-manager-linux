@@ -9,6 +9,7 @@ from gi.repository import Adw, Gtk, GdkPixbuf, GLib, GObject  # noqa: E402
 
 from .. import gametdb
 from ..library import Game
+from . import gtk_helpers
 
 COVER_WIDTH = 120
 COVER_HEIGHT = 168  # proporción típica de carátula frontal de Wii (~0.71)
@@ -136,6 +137,12 @@ class GameRow(Adw.ActionRow):
         )
 
     def _apply_cover(self, path: str | None):
+        # La descarga pudo terminar después de que esta fila dejara de
+        # existir (cambio de orden, rescan, biblioteca recargada): las
+        # filas se reconstruyen enteras y la que pidió la carátula ya no
+        # está en la lista. Ver `gtk_helpers.widget_is_alive`.
+        if not gtk_helpers.widget_is_alive(self):
+            return False
         if path:
             try:
                 self._cover.set_filename(path)
@@ -164,6 +171,12 @@ class GameRow(Adw.ActionRow):
         es el mismo que la fila ya muestra (comparando sin mayúsculas ni
         puntuación), que es el caso más común: ahí la fila queda tal cual,
         sin una línea repetida."""
+        if not gtk_helpers.widget_is_alive(self):
+            # Misma carrera que en `_apply_cover`, pero más probable: armar
+            # el índice de wiitdb.xml la primera vez tarda decenas de
+            # segundos, tiempo de sobra para que el usuario reordene la
+            # lista o dispare un rescan.
+            return False
         if info is None:
             return False
         extra = info.title_to_show_next_to(self.game.title)

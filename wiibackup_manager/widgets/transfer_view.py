@@ -59,6 +59,11 @@ class TransferGameRow(Adw.ActionRow):
         )
 
     def _apply_cover(self, path: str | None):
+        # Igual que en GameRow: `set_games` reconstruye todas las filas
+        # después de cada escaneo, así que una carátula que estaba en
+        # vuelo puede llegar cuando esta fila ya no está en la lista.
+        if not gtk_helpers.widget_is_alive(self):
+            return False
         if path:
             try:
                 self._cover.set_filename(path)
