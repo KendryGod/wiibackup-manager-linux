@@ -15,10 +15,13 @@ Este módulo es a propósito independiente de GTK: no importa nada de la
 interfaz, se puede probar sin levantar una ventana, y la interfaz se
 entera de los cambios registrando un listener.
 
-No es un candado global: dos operaciones que no se pisan (verificar un
-juego mientras se transfiere otro) siguen pudiendo correr juntas, y las
-descargas de carátulas ni pasan por acá. Lo que se bloquea son las
-combinaciones peligrosas, definidas en `_find_conflict`.
+No es un candado global: dos operaciones que no se pisan (renombrar un
+juego mientras se escanea, o dos verificaciones de archivos distintos si
+ninguna otra cosa larga está en curso) siguen pudiendo correr juntas, y
+las descargas de carátulas ni pasan por acá: van por su propio pool en
+`gametdb` y siguen bajando aunque haya una operación en curso. Lo que se
+bloquea son las combinaciones peligrosas y las que se pelean por la barra
+de progreso, definidas en `_find_conflict`.
 """
 from __future__ import annotations
 
@@ -63,6 +66,15 @@ _EXCLUSIVE_KINDS = frozenset(
 # corriendo dos a la vez el progreso salta de una a la otra y la primera
 # que termina esconde la barra mientras la otra sigue trabajando.
 #
+# Verificar y eliminar entran acá por sus versiones en lote, que sí usan
+# esa barra (van por `_run_batch`). Sueltas, sobre un solo juego, no la
+# tocan: el precio de meterlas igual es que tampoco se pueda verificar o
+# borrar un juego suelto mientras se convierte o se transfiere otro. Se
+# eligió eso, y no distinguir "en lote" de "suelta" con una bandera
+# aparte, porque la regla queda entendible de una sola lectura y porque
+# las dos son operaciones pesadas sobre el mismo disco: serializarlas no
+# le hace mal a nadie.
+#
 # El escaneo queda afuera a propósito: no es una acción que el usuario
 # pida (corre solo, después de cada operación y cuando la unidad de la
 # biblioteca aparece), la regla 2 de abajo ya lo separa de todo lo que
@@ -71,7 +83,8 @@ _EXCLUSIVE_KINDS = frozenset(
 # Transferir, que ni siquiera usa esta barra sino la suya.
 _SHARED_PROGRESS_KINDS = frozenset(
     {OperationKind.IMPORTING, OperationKind.TRANSFERRING,
-     OperationKind.CONVERTING}
+     OperationKind.CONVERTING, OperationKind.VERIFYING,
+     OperationKind.DELETING}
 )
 
 
@@ -179,7 +192,8 @@ class OperationManager:
         1. De las operaciones "exclusivas" (escanear, importar, transferir,
            convertir) puede haber solo una a la vez de cada tipo.
         1b. Las que comparten la barra de progreso de la ventana
-           (importar, transferir, convertir) tampoco conviven entre sí.
+           (importar, transferir, convertir, verificar, eliminar) tampoco
+           conviven entre sí.
         2. Escanear no convive con nada que escriba archivos: el escaneo
            llegaría a ver archivos a medio escribir y los identificaría mal.
         3. Dos operaciones que tocan el mismo archivo solo conviven si
