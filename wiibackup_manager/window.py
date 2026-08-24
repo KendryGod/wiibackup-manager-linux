@@ -952,10 +952,41 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self._start_import(paths)
         return True
 
-    def _start_import(self, src_paths: list[Path]):
+    @staticmethod
+    def _is_same_file(a: Path, b: Path) -> bool:
+        """True si las dos rutas apuntan al mismo archivo (agregar un juego
+        que ya está en la carpeta de biblioteca no es una colisión: no hay
+        nada que copiar)."""
+        try:
+            return a.resolve() == b.resolve()
+        except OSError:
+            return a.absolute() == b.absolute()
+
+    @staticmethod
+    def _free_import_dest(dest: Path) -> Path:
+        """Variante libre de `dest` agregándole un sufijo: 'Título.wbfs' ->
+        'Título (2).wbfs'. Se usa en el flujo en lote, donde parar a
+        preguntar por cada colisión no tiene sentido y pisar el archivo
+        existente sería perder un juego que el usuario ya tenía."""
+        n = 2
+        candidate = dest
+        while candidate.exists():
+            candidate = dest.with_name(f"{dest.stem} ({n}){dest.suffix}")
+            n += 1
+        return candidate
+
+    def _start_import(self, src_paths: list[Path], overwrite: bool = False):
         """Copia `src_paths` a la biblioteca en background, identificando
         cada archivo primero para no duplicar juegos que ya están en el
-        último escaneo (self._games), comparando por game_id."""
+        último escaneo (self._games), comparando por game_id.
+
+        Ojo: esa comparación es por game_id, así que no dice nada de un
+        archivo distinto que casualmente se llame igual que uno que ya
+        está en la biblioteca (otro juego, o el mismo con otro parche).
+        Copiarlo tal cual lo pisaría sin aviso, así que las colisiones de
+        nombre se resuelven acá antes de tocar el disco: preguntando si es
+        un solo archivo, y con un nombre alternativo si es un lote.
+        `overwrite=True` es la respuesta afirmativa de esa pregunta."""
         import shutil as _shutil
 
         dest_dir = Path(self.settings.library_path)
@@ -967,12 +998,34 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
         known_ids = {g.game_id for g in self._games if g.game_id != UNKNOWN_GAME_ID}
 
+        # Adónde va a parar cada archivo, resuelto ANTES de arrancar el
+        # worker: así el OperationManager registra los archivos que se van
+        # a escribir de verdad (no los que se hubieran escrito pisando) y
+        # la pregunta de sobrescritura se hace en el hilo de GTK.
+        plan: list[tuple[Path, Path]] = []
+        renamed: list[str] = []
+        for src in src_paths:
+            dest = dest_dir / src.name
+            if not self._is_same_file(src, dest) and dest.exists() and not overwrite:
+                if len(src_paths) == 1:
+                    gtk_helpers.confirm_overwrite(
+                        self,
+                        f"Ya existe un archivo en la biblioteca con ese nombre:\n"
+                        f"{dest.name}\n\nAgregar '{src.name}' lo va a reemplazar. "
+                        "Esta acción no se puede deshacer.",
+                        lambda: self._start_import(src_paths, overwrite=True),
+                    )
+                    return
+                dest = self._free_import_dest(dest)
+                renamed.append(dest.name)
+            plan.append((src, dest))
+
         # Origen y destino: mientras se copia, nadie puede borrar ni
         # convertir ninguno de los dos.
         try:
             op = self.ops.start(
                 OperationKind.IMPORTING,
-                list(src_paths) + [dest_dir / p.name for p in src_paths],
+                [src for src, _dest in plan] + [dest for _src, dest in plan],
             )
         except OperationBusy as e:
             self._show_toast(f"No se puede ahora: {e.detail}.")
@@ -985,9 +1038,9 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         def worker():
             added: list[str] = []
             skipped: list[str] = []
-            total = len(src_paths)
+            total = len(plan)
 
-            for i, src in enumerate(src_paths, start=1):
+            for i, (src, dest) in enumerate(plan, start=1):
                 GLib.idle_add(self.progress_bar.set_fraction, i / max(total, 1))
 
                 game = library.identify_file(src, self.settings.wit_binary)
@@ -998,8 +1051,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                     skipped.append(game.title)
                     continue
 
-                dest = dest_dir / src.name
-                if src.resolve() != dest.resolve():
+                if not self._is_same_file(src, dest):
                     try:
                         _shutil.copy2(src, dest)
                     except OSError:
@@ -1009,17 +1061,21 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                     known_ids.add(game.game_id)
                 added.append(game.title)
 
-            GLib.idle_add(self._on_import_done, added, skipped, op)
+            GLib.idle_add(self._on_import_done, added, skipped, renamed, op)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_import_done(self, added: list[str], skipped: list[str], op=None):
+    def _on_import_done(self, added: list[str], skipped: list[str],
+                         renamed: list[str] | None = None, op=None):
         # Importar no tiene "errores" que contar (un archivo que no se
         # pudo copiar se saltea en el worker), así que el resultado es
         # siempre ok: lo que interesa registrar es cuántos entraron.
+        renamed = renamed or []
         detail_parts = [f"{len(added)} agregado(s)"]
         if skipped:
             detail_parts.append(f"{len(skipped)} ya estaban en la biblioteca")
+        if renamed:
+            detail_parts.append(f"{len(renamed)} renombrado(s) para no pisar otro archivo")
         self.ops.finish(op, OperationOutcome(
             status=oplog.STATUS_OK,
             target=(added[0] if len(added) == 1 else f"{len(added)} juegos"),
@@ -1033,6 +1089,15 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 parts.append(f"{len(skipped)} omitido(s) por ya existir: " + ", ".join(skipped))
             else:
                 parts.append(f"{len(skipped)} omitido(s) por ya existir en la biblioteca")
+        if renamed:
+            # Se informa aparte: el archivo entró, pero con otro nombre que
+            # el que tenía, y sin eso el usuario no tendría cómo saberlo.
+            if len(renamed) <= 3:
+                parts.append("Ya había un archivo con el mismo nombre, se guardó como: "
+                             + ", ".join(renamed))
+            else:
+                parts.append(f"{len(renamed)} se guardaron con otro nombre para no pisar "
+                             "archivos que ya estaban")
         if not parts:
             parts.append("No se agregó ningún juego nuevo")
         self._show_toast(". ".join(parts) + ".")
