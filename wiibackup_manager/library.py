@@ -337,6 +337,22 @@ def wbfs_dest_path(game: Game, drive_root: Path) -> Path:
     return Path(drive_root) / "wbfs" / game_id / f"{game_id}.wbfs"
 
 
+def wbfs_dest_paths(games, drive_root: Path) -> list:
+    """Las rutas que van a ocupar `games` dentro de `drive_root`.
+
+    Se saltean los juegos cuyo Game ID no sea válido: para esos no hay
+    ruta que calcular (los rechaza `wbfs_dest_path`) y la transferencia
+    los va a reportar como error igual. Se usa para declararle al
+    OperationManager qué archivos va a escribir la transferencia."""
+    destinos = []
+    for game in games:
+        try:
+            destinos.append(wbfs_dest_path(game, drive_root))
+        except ValueError:
+            continue
+    return destinos
+
+
 def send_to_wbfs_drive(
     game: Game,
     drive_root: Path,

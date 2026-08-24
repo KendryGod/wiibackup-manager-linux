@@ -9,7 +9,22 @@ información falsa:
 - dos escaneos en paralelo, donde el que termina último pisa al otro y la
   lista queda mostrando el resultado más viejo;
 - escanear mientras se copia/convierte dentro de la biblioteca, con lo que
-  el escaneo llega a ver archivos a medio escribir y los identifica mal.
+  el escaneo llega a ver archivos a medio escribir y los identifica mal;
+- expulsar el USB mientras se le está copiando un juego encima.
+
+Cada operación declara TRES cosas, y de ahí salen todos los conflictos:
+
+- `read_paths`: los archivos que va a leer;
+- `write_paths`: los archivos que va a escribir, borrar o renombrar;
+- `resources`: los "lugares" que ocupa mientras dura -la carpeta de la
+  biblioteca durante un escaneo, el punto de montaje del USB durante una
+  transferencia-. Un recurso ocupado no se puede desmontar ni recibir
+  escrituras de otra operación.
+
+Esa última categoría es la que faltaba: la transferencia registraba los
+archivos de ORIGEN (los de la biblioteca) y nadie sabía que el DESTINO
+-un pendrive de un cliente- estaba en pleno uso, así que el botón
+"Expulsar unidad" lo desmontaba a mitad de la escritura.
 
 Este módulo es a propósito independiente de GTK: no importa nada de la
 interfaz, se puede probar sin levantar una ventana, y la interfaz se
@@ -17,11 +32,9 @@ entera de los cambios registrando un listener.
 
 No es un candado global: dos operaciones que no se pisan (verificar o
 borrar un juego mientras se convierte o se transfiere OTRO) siguen
-pudiendo correr juntas, y las descargas de carátulas ni pasan por acá:
-van por su propio pool en `gametdb` y siguen bajando aunque haya una
-operación en curso. Lo que se bloquea son las combinaciones peligrosas y
-las que se pelean por la barra de progreso, definidas en
-`_find_conflict`.
+pudiendo correr juntas, y las descargas de carátulas ni pasan por acá.
+Lo que se bloquea son las combinaciones peligrosas y las que se pelean
+por la barra de progreso, definidas en `_find_conflict`.
 """
 from __future__ import annotations
 
@@ -33,23 +46,25 @@ from typing import Callable, Iterable, Optional
 
 
 class OperationKind(Enum):
-    """Tipo de operación y si modifica los archivos que toca.
+    """Tipo de operación, con el texto que se le muestra al usuario.
 
-    `mutates` es lo que decide si dos operaciones sobre el mismo archivo se
-    pueden solapar: dos lecturas (verificar y transferir) conviven sin
-    problema; en cuanto una escribe, no."""
+    Ya no lleva una bandera `mutates`: qué se lee y qué se escribe lo
+    declara cada operación al arrancar (`read_paths` / `write_paths`), que
+    es información concreta y no una propiedad del tipo. La transferencia
+    era el ejemplo de por qué: "no modifica la biblioteca" es cierto, pero
+    escribe -y mucho- en la unidad de destino."""
 
-    SCANNING = ("Escaneando la biblioteca", False)
-    IMPORTING = ("Agregando juegos", True)
-    CONVERTING = ("Convirtiendo", True)
-    VERIFYING = ("Verificando", False)
-    TRANSFERRING = ("Enviando a la unidad", False)
-    DELETING = ("Eliminando", True)
-    RENAMING = ("Renombrando", True)
+    SCANNING = "Escaneando la biblioteca"
+    IMPORTING = "Agregando juegos"
+    CONVERTING = "Convirtiendo"
+    VERIFYING = "Verificando"
+    TRANSFERRING = "Enviando a la unidad"
+    DELETING = "Eliminando"
+    RENAMING = "Renombrando"
 
-    def __init__(self, label: str, mutates: bool):
-        self.label = label
-        self.mutates = mutates
+    @property
+    def label(self) -> str:
+        return self.value
 
 
 # Operaciones de las que solo puede haber UNA a la vez de su mismo tipo,
@@ -97,12 +112,17 @@ def _uses_progress_bar(kind: OperationKind, declared: bool) -> bool:
 
 @dataclass(frozen=True)
 class Operation:
-    """Una operación en curso. `paths` son los archivos concretos que toca
-    (vacío = no se puede acotar a archivos puntuales, como el escaneo)."""
+    """Una operación en curso y qué está usando mientras dura."""
 
     id: int
     kind: OperationKind
-    paths: frozenset
+    # Archivos concretos que lee y que escribe (o borra, o renombra).
+    read_paths: frozenset = frozenset()
+    write_paths: frozenset = frozenset()
+    # Lugares ocupados: la carpeta de la biblioteca mientras se la escanea,
+    # el punto de montaje del USB mientras se le copia. Ver el docstring
+    # del módulo.
+    resources: frozenset = frozenset()
     # Si esta operación está ocupando la barra de progreso de la ventana.
     # Ver `_uses_progress_bar` y la regla 1b de `_find_conflict`.
     uses_progress_bar: bool = False
@@ -110,6 +130,11 @@ class Operation:
     @property
     def label(self) -> str:
         return self.kind.label
+
+    @property
+    def paths(self) -> frozenset:
+        """Todos los archivos que toca, sin distinguir cómo."""
+        return self.read_paths | self.write_paths
 
 
 @dataclass(frozen=True)
@@ -146,6 +171,38 @@ def _normalize(paths: Iterable) -> frozenset:
         except OSError:
             normalized.add(path.absolute())
     return frozenset(normalized)
+
+
+def _is_within(child: Path, parent: Path) -> bool:
+    """True si `child` está dentro del árbol de `parent` (o es `parent`)."""
+    try:
+        return child == parent or child.is_relative_to(parent)
+    except (OSError, ValueError):
+        return False
+
+
+def _touching(paths: frozenset, resources: frozenset) -> Optional[Path]:
+    """Primera ruta de `paths` que cae dentro de alguno de `resources`.
+
+    Los recursos son pocos (uno o dos: una carpeta, un punto de montaje),
+    así que este recorrido es barato aunque `paths` traiga cientos de
+    archivos de una selección grande."""
+    for resource in resources:
+        for path in paths:
+            if _is_within(path, resource):
+                return path
+    return None
+
+
+def _resources_overlap(a: frozenset, b: frozenset) -> Optional[Path]:
+    """Primer recurso compartido entre dos operaciones: el mismo lugar, o
+    uno adentro del otro (la biblioteca guardada dentro del USB que se
+    está por escribir, por ejemplo)."""
+    for ra in a:
+        for rb in b:
+            if _is_within(ra, rb) or _is_within(rb, ra):
+                return ra
+    return None
 
 
 class OperationManager:
@@ -189,13 +246,32 @@ class OperationManager:
         return " · ".join(labels)
 
     def is_path_busy(self, path) -> bool:
-        """True si algún archivo pasado está tomado por una operación."""
+        """True si ese archivo está tomado por alguna operación."""
         target = _normalize([path])
         with self._lock:
             return any(op.paths & target for op in self._active.values())
 
+    def is_resource_busy(self, path) -> Optional[Operation]:
+        """La operación que está ocupando ese lugar, o None.
+
+        Un lugar está ocupado si alguna operación lo declaró como recurso
+        (o declaró uno que lo contiene, o uno adentro), o si está
+        escribiendo un archivo ahí adentro. Con esto el botón "Expulsar
+        unidad" puede negarse mientras se le está copiando algo a ese
+        pendrive, que era la forma más fácil de corromper el disco de un
+        cliente."""
+        target = _normalize([path])
+        with self._lock:
+            for op in self._active.values():
+                if _resources_overlap(target, op.resources) is not None:
+                    return op
+                if _touching(op.write_paths, target) is not None:
+                    return op
+        return None
+
     # --------------------------------------------------------- Conflictos --
-    def _find_conflict(self, kind: OperationKind, paths: frozenset,
+    def _find_conflict(self, kind: OperationKind, read_paths: frozenset,
+                        write_paths: frozenset, resources: frozenset,
                         uses_progress_bar: bool = False):
         """Devuelve (operación_que_bloquea, motivo) o None si se puede
         arrancar. Las reglas, en orden:
@@ -204,13 +280,17 @@ class OperationManager:
            convertir) puede haber solo una a la vez de cada tipo.
         1b. Dos operaciones que ocupan la barra de progreso no conviven
            (ver `_uses_progress_bar`). Verificar o borrar un juego suelto
-           no ocupa la barra, así que no entra por acá: para esas dos
-           manda la regla 3, o sea el archivo concreto.
-        2. Escanear no convive con nada que escriba archivos: el escaneo
-           llegaría a ver archivos a medio escribir y los identificaría mal.
-        3. Dos operaciones que tocan el mismo archivo solo conviven si
-           ninguna de las dos lo modifica."""
+           no ocupa la barra, así que no entra por acá.
+        2. Dos operaciones no pueden ocupar el mismo lugar: la misma
+           unidad, la misma carpeta, o una dentro de la otra.
+        3. Nadie escribe archivos dentro de un lugar que otra operación
+           está ocupando (ni al revés). Acá es donde el escaneo de la
+           biblioteca queda separado de todo lo que escriba EN la
+           biblioteca, sin bloquear lo que escribe en otro lado.
+        4. Dos operaciones que tocan el mismo archivo solo conviven si
+           ninguna de las dos lo escribe."""
         wants_bar = _uses_progress_bar(kind, uses_progress_bar)
+        all_paths = read_paths | write_paths
         for op in self._active.values():
             if kind in _EXCLUSIVE_KINDS and op.kind is kind:
                 return op, f"ya hay una operación de este tipo en curso ({op.label})"
@@ -221,75 +301,113 @@ class OperationManager:
                     f"misma barra de progreso ({op.label})"
                 )
 
-            if ((kind is OperationKind.SCANNING and op.kind.mutates)
-                    or (op.kind is OperationKind.SCANNING and kind.mutates)):
+            shared_resource = _resources_overlap(resources, op.resources)
+            if shared_resource is not None:
                 return op, (
-                    "no se puede escanear la biblioteca mientras se escriben "
-                    f"archivos en ella ({op.label})"
+                    f"'{shared_resource.name or shared_resource}' ya está en uso "
+                    f"por otra operación ({op.label})"
                 )
 
-            shared = op.paths & paths
-            if shared and (kind.mutates or op.kind.mutates):
+            invading = (_touching(write_paths, op.resources)
+                        or _touching(op.write_paths, resources))
+            if invading is not None:
+                return op, (
+                    f"otra operación está usando esa ubicación ({op.label}): "
+                    f"no se puede escribir '{invading.name}' mientras tanto"
+                )
+
+            shared = (op.write_paths & all_paths) | (write_paths & op.paths)
+            if shared:
                 name = sorted(shared)[0].name
                 return op, f"'{name}' ya está en uso por otra operación ({op.label})"
 
         return None
 
-    def conflict_for(self, kind: OperationKind, paths: Iterable = (),
-                      uses_progress_bar: bool = False):
+    def conflict_for(self, kind: OperationKind, read=(), write=(),
+                      resources=(), uses_progress_bar: bool = False):
         """Como `_find_conflict` pero pública y con las rutas sin
         normalizar: devuelve la operación que bloquea, o None."""
-        return self.conflicts_for([kind], paths, uses_progress_bar)[kind]
+        found = self.conflicts_for([(kind, kind)], read, write, resources,
+                                    uses_progress_bar)
+        return found[kind]
 
-    def conflicts_for(self, kinds: Iterable, paths: Iterable = (),
+    def conflicts_for(self, specs, read=(), write=(), resources=(),
                        uses_progress_bar: bool = False) -> dict:
-        """Lo mismo pero para varios tipos de una sola vez: {tipo: op_que_
-        bloquea_o_None}.
+        """Conflictos de varias operaciones que tocarían las MISMAS rutas,
+        resolviéndolas una sola vez.
+
+        `specs` es una lista de `(clave, tipo)` o de `(clave, tipo, rol)`,
+        donde el rol ("read" o "write") dice si ese tipo escribiría esas
+        rutas o solo las leería; por defecto se usan `read`/`write` tal
+        como vienen. Devuelve {clave: operación_que_bloquea_o_None}.
 
         Existe por el costo de `_normalize`, que resuelve cada ruta contra
         el filesystem: la barra de selección pregunta por los cuatro
         botones en cada click de una casilla, y con una biblioteca grande
         seleccionada entera resolver las rutas cuatro veces en vez de una
         se nota como un tironeo en la interfaz."""
-        normalized = _normalize(paths)
+        base_read = _normalize(read)
+        base_write = _normalize(write)
+        norm_resources = _normalize(resources)
+        todos = base_read | base_write
+
         result = {}
         with self._lock:
-            for kind in kinds:
-                found = self._find_conflict(kind, normalized, uses_progress_bar)
-                result[kind] = found[0] if found is not None else None
+            for spec in specs:
+                if len(spec) == 3:
+                    key, kind, role = spec
+                    r = frozenset() if role == "write" else todos
+                    w = todos if role == "write" else frozenset()
+                else:
+                    key, kind = spec
+                    r, w = base_read, base_write
+                found = self._find_conflict(kind, r, w, norm_resources,
+                                             uses_progress_bar)
+                result[key] = found[0] if found is not None else None
         return result
 
-    def check(self, kind: OperationKind, paths: Iterable = (),
+    def check(self, kind: OperationKind, read=(), write=(), resources=(),
                uses_progress_bar: bool = False) -> None:
-        """Levanta `OperationBusy` si `kind` sobre `paths` no puede
-        arrancar ahora. Sirve para revalidar justo antes de tocar el disco
-        en un flujo con diálogo de por medio, donde entre que el usuario
-        confirma y se ejecuta pudo arrancar otra cosa.
+        """Levanta `OperationBusy` si la operación no puede arrancar ahora.
+        Sirve para revalidar justo antes de tocar el disco en un flujo con
+        diálogo de por medio, donde entre que el usuario confirma y se
+        ejecuta pudo arrancar otra cosa.
 
-        `uses_progress_bar` tiene que valer lo mismo que en el `start` que
+        Los argumentos tienen que ser los mismos que en el `start` que
         venga después: si no, se chequea una cosa y se arranca otra."""
-        normalized = _normalize(paths)
         with self._lock:
-            found = self._find_conflict(kind, normalized, uses_progress_bar)
+            found = self._find_conflict(kind, _normalize(read), _normalize(write),
+                                         _normalize(resources), uses_progress_bar)
         if found is not None:
             raise OperationBusy(found[0], found[1])
 
     # ------------------------------------------------------ Ciclo de vida --
-    def start(self, kind: OperationKind, paths: Iterable = (),
+    def start(self, kind: OperationKind, read=(), write=(), resources=(),
                uses_progress_bar: bool = False) -> Operation:
         """Registra una operación nueva y la devuelve. Levanta
         `OperationBusy` si choca con algo en curso.
 
-        `uses_progress_bar=True` lo pasan las operaciones que muestran
-        progreso en la ventana principal y que no son de un tipo que
-        siempre lo haga: en la práctica, los lotes de verificar y
-        eliminar. Ver `_uses_progress_bar`."""
-        normalized = _normalize(paths)
+        - `read`: archivos que va a leer.
+        - `write`: archivos que va a escribir, borrar o renombrar.
+        - `resources`: lugares que ocupa mientras dura (la carpeta de la
+          biblioteca, el punto de montaje del destino). Lo que declare acá
+          es lo que va a impedir que se expulse la unidad o que otra
+          operación escriba ahí adentro.
+        - `uses_progress_bar=True` lo pasan las operaciones que muestran
+          progreso en la ventana principal y que no son de un tipo que
+          siempre lo haga: en la práctica, los lotes de verificar y
+          eliminar. Ver `_uses_progress_bar`."""
+        norm_read = _normalize(read)
+        norm_write = _normalize(write)
+        norm_resources = _normalize(resources)
         with self._lock:
-            found = self._find_conflict(kind, normalized, uses_progress_bar)
+            found = self._find_conflict(kind, norm_read, norm_write,
+                                         norm_resources, uses_progress_bar)
             if found is not None:
                 raise OperationBusy(found[0], found[1])
-            op = Operation(id=self._next_id, kind=kind, paths=normalized,
+            op = Operation(id=self._next_id, kind=kind,
+                           read_paths=norm_read, write_paths=norm_write,
+                           resources=norm_resources,
                            uses_progress_bar=_uses_progress_bar(kind, uses_progress_bar))
             self._next_id += 1
             self._active[op.id] = op

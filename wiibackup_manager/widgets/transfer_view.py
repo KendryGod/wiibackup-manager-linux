@@ -264,7 +264,8 @@ class TransferView(Gtk.Box):
         if self.ops.is_busy():
             blocker = self.ops.conflict_for(
                 OperationKind.TRANSFERRING,
-                [game.path for game in self._selected_games()],
+                read=[game.path for game in self._selected_games()],
+                resources=[self._dest_path] if self._dest_path is not None else [],
             )
         self.transfer_button.set_sensitive(blocker is None)
         self.transfer_button.set_tooltip_text(
@@ -544,6 +545,18 @@ class TransferView(Gtk.Box):
         if self._dest_path is None or not drives.is_mount_point(self._dest_path):
             return
         dest_path = self._dest_path
+
+        # Desmontar una unidad a la que se le está escribiendo deja el
+        # archivo cortado por la mitad y puede romper el filesystem del
+        # pendrive. El gestor sabe qué unidades están ocupadas porque cada
+        # transferencia declara su destino como recurso.
+        ocupada = self.ops.is_resource_busy(dest_path)
+        if ocupada is not None:
+            self._show_toast(
+                f"No se puede expulsar ahora: hay una operación en curso sobre "
+                f"esa unidad ({ocupada.label}). Esperá a que termine o cancelala."
+            )
+            return
         self.eject_button.set_sensitive(False)
 
         def worker():
@@ -669,8 +682,17 @@ class TransferView(Gtk.Box):
         self._start_transfer(selected, dest_root)
 
     def _start_transfer(self, selected: list[Game], dest_root: Path, overwrite: bool = False):
+        # Se declara el destino, no solo el origen: los archivos que se van
+        # a escribir y la unidad entera como recurso ocupado. Eso es lo que
+        # hace que "Expulsar unidad" se niegue mientras dure la copia, en
+        # vez de desmontar el pendrive abajo de `wit`.
         try:
-            op = self.ops.start(OperationKind.TRANSFERRING, [g.path for g in selected])
+            op = self.ops.start(
+                OperationKind.TRANSFERRING,
+                read=[g.path for g in selected],
+                write=library.wbfs_dest_paths(selected, dest_root),
+                resources=[dest_root],
+            )
         except OperationBusy as e:
             self._show_toast(f"No se puede ahora: {e.detail}.")
             return
