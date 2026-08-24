@@ -682,25 +682,32 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             ok = 0
             errors: list[str] = []
             skipped: list[str] = []
-            bytes_done = 0
+            # Ver el worker de la pestaña Transferir: `bytes_written` es lo
+            # único que se escribió de verdad y da la velocidad; la barra
+            # avanza con todo lo ya resuelto (escrito + fallado + omitido).
+            bytes_written = 0
+            bytes_failed = 0
+            bytes_skipped = 0
             start_time = time.monotonic()
             cancelled = False
             for i, game in enumerate(games, start=1):
                 if cancel.cancelled:
                     cancelled = True
                     break
-                base_bytes_done = bytes_done
+                base_bytes_done = bytes_written + bytes_failed + bytes_skipped
 
-                def on_game_progress(current: int, _base=base_bytes_done, _game=game):
+                def on_game_progress(current: int, _base=base_bytes_done, _game=game,
+                                      _written=bytes_written):
                     # Tope al 97%: es una estimación por tamaño de archivo,
                     # y wit puede seguir cerrando/renombrando un instante
                     # más después de escribir el último byte.
                     est = min(current, int(_game.size_bytes * 0.97))
                     GLib.idle_add(self._update_send_progress, i, total, _game.title,
-                                  _base + est, total_bytes, start_time)
+                                  _base + est, _written + est, total_bytes, start_time)
 
                 GLib.idle_add(self._update_send_progress, i, total, game.title,
-                              bytes_done, total_bytes, start_time)
+                              bytes_written + bytes_failed + bytes_skipped,
+                              bytes_written, total_bytes, start_time)
 
                 # Igual que en la pestaña Transferir: el espacio libre se
                 # revisa antes de cada juego, no una sola vez al principio.
@@ -712,6 +719,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                         f"(necesita {library.format_size(necesario)}, "
                         f"quedan {library.format_size(libres)})"
                     )
+                    bytes_failed += game.size_bytes
                     continue
 
                 try:
@@ -719,6 +727,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                                                 bytes_progress_cb=on_game_progress,
                                                 overwrite=overwrite, cancel=cancel)
                     ok += 1
+                    bytes_written += game.size_bytes
                 except wit_wrapper.OperationCancelled:
                     # Cancelado a mitad de ESTE juego: no es un error, y no
                     # se sigue con los que faltaban.
@@ -728,6 +737,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                     # El juego ya está en la unidad: no es un error ni un
                     # éxito, se informa aparte en el resumen final.
                     skipped.append(game.title)
+                    bytes_skipped += game.size_bytes
                 except Exception as e:
                     if cancel.cancelled:
                         # El fallo es consecuencia de haber matado a `wit`
@@ -737,14 +747,15 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                     # No frena el resto de la selección: se cuenta como
                     # error y se sigue con el siguiente juego.
                     errors.append(f"{game.title}: {e}")
-                bytes_done += game.size_bytes
+                    bytes_failed += game.size_bytes
             GLib.idle_add(self._on_send_done, ok, errors, cancelled, skipped, op,
                           self._describe_target(games))
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _update_send_progress(self, done: int, total: int, title: str,
-                               bytes_done: int, total_bytes: int, start_time: float):
+                               bytes_done: int, bytes_written: int,
+                               total_bytes: int, start_time: float):
         # Fracción por bytes reales, no por "juegos completados": con un
         # solo juego grande `done` no cambia hasta que termina, así que
         # basarse solo en eso deja la barra clavada en 0% toda la copia.
@@ -754,8 +765,12 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             fraction = (done - 1) / max(total, 1)
         self.progress_bar.set_fraction(fraction)
         elapsed = time.monotonic() - start_time
-        if bytes_done > 0 and elapsed > 1:
-            speed = bytes_done / elapsed
+        # La velocidad sale SOLO de lo que se escribió de verdad: contar
+        # los bytes de un juego que falló, o de uno que ya estaba en el
+        # destino y se saltó en un instante, daba una velocidad inventada
+        # y un tiempo restante demasiado optimista.
+        if bytes_written > 0 and elapsed > 1:
+            speed = bytes_written / elapsed
             remaining = max(total_bytes - bytes_done, 0)
             eta_text = f" · ~{library.format_eta(remaining / speed)} restantes" if speed > 0 else ""
         elif total > 1:
@@ -840,7 +855,11 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             ok = 0
             errors: list[str] = []
             skipped: list[str] = []
-            bytes_done = 0
+            # Igual que en la transferencia: lo omitido y lo fallado no se
+            # cuenta como convertido, pero sí como resuelto, para que la
+            # barra refleje cuánto falta del lote.
+            bytes_written = 0
+            bytes_other = 0
             cancelled = False
             for game in games:
                 if cancel.cancelled:
@@ -848,7 +867,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                     break
                 target_ext = ".wbfs" if game.fmt.upper() != "WBFS" else ".iso"
                 dest = game.path.with_suffix(target_ext)
-                base_bytes_done = bytes_done
+                base_bytes_done = bytes_written + bytes_other
 
                 def on_progress(current: int, _base=base_bytes_done, _game=game):
                     est = min(current, int(_game.size_bytes * 0.97))
@@ -856,12 +875,13 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                     GLib.idle_add(self.progress_bar.set_fraction, frac)
 
                 GLib.idle_add(self.progress_bar.set_fraction,
-                              min(bytes_done / max(total_bytes, 1), 0.99))
+                              min(base_bytes_done / max(total_bytes, 1), 0.99))
                 if dest.exists():
                     # En lote no tiene sentido preguntar por cada uno: se
                     # saltea y se informa aparte en el resumen final, en
                     # vez de pisar en silencio o frenar todo el lote.
                     skipped.append(game.title)
+                    bytes_other += game.size_bytes
                 else:
                     try:
                         result = wit_wrapper.convert(game.path, dest, target_ext.strip("."),
@@ -870,6 +890,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                         if result.returncode != 0:
                             raise RuntimeError(result.stderr.strip()[:200] or "error de wit")
                         ok += 1
+                        bytes_written += game.size_bytes
                     except wit_wrapper.OperationCancelled:
                         # Cancelado a mitad de ESTE juego: no es un error, y
                         # no se sigue con los que faltaban.
@@ -882,7 +903,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                             cancelled = True
                             break
                         errors.append(f"{game.title}: {e}")
-                bytes_done += game.size_bytes
+                        bytes_other += game.size_bytes
             GLib.idle_add(self._on_batch_done, "Convirtiendo", ok, errors, skipped, op,
                           self._describe_target(games), cancelled)
 

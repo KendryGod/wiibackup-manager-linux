@@ -724,16 +724,27 @@ class TransferView(Gtk.Box):
             # Motivos concretos, no solo la cuenta: "1 con error" no le
             # dice a nadie qué pasó ni con cuál juego.
             error_msgs: list[str] = []
-            bytes_done = 0
+            # Tres contadores en vez de uno: antes se sumaba el tamaño del
+            # juego al progreso pasara lo que pasara, así que un juego que
+            # fallaba o que ya estaba en el destino contaba como copiado y
+            # la velocidad (y con ella el tiempo restante) salía inflada.
+            # `bytes_written` es lo único que se escribió de verdad y es lo
+            # que se usa para medir velocidad; la barra avanza con todo lo
+            # ya resuelto, que es lo que el usuario entiende por "cuánto
+            # falta del lote".
+            bytes_written = 0
+            bytes_failed = 0
+            bytes_skipped = 0
             start_time = time.monotonic()
             cancelled = False
             for i, game in enumerate(selected, start=1):
                 if cancel.cancelled:
                     cancelled = True
                     break
-                base_bytes_done = bytes_done
+                base_bytes_done = bytes_written + bytes_failed + bytes_skipped
 
-                def on_game_progress(current: int, _base=base_bytes_done, _game=game):
+                def on_game_progress(current: int, _base=base_bytes_done, _game=game,
+                                      _written=bytes_written):
                     # Tope al 97% del tamaño esperado de ESTE juego: es una
                     # estimación por tamaño de archivo, y wit puede seguir
                     # cerrando/renombrando un instante más después de
@@ -742,10 +753,11 @@ class TransferView(Gtk.Box):
                     # antes de que el juego realmente termine.
                     est = min(current, int(_game.size_bytes * 0.97))
                     GLib.idle_add(self._update_progress, i, total, _game.title,
-                                  _base + est, total_bytes, start_time)
+                                  _base + est, _written + est, total_bytes, start_time)
 
                 GLib.idle_add(self._update_progress, i, total, game.title,
-                              bytes_done, total_bytes, start_time)
+                              bytes_written + bytes_failed + bytes_skipped,
+                              bytes_written, total_bytes, start_time)
                 # El espacio libre cambia a medida que se copia: revisar
                 # antes de CADA juego evita quedarse sin lugar a mitad de
                 # la escritura y dejar un archivo cortado en la unidad.
@@ -753,6 +765,7 @@ class TransferView(Gtk.Box):
                 libres = library.free_space(dest_root)
                 if libres is not None and necesario > libres:
                     err_count += 1
+                    bytes_failed += game.size_bytes
                     error_msgs.append(
                         f"{game.title}: no entra en el destino "
                         f"(necesita {library.format_size(necesario)}, "
@@ -765,6 +778,7 @@ class TransferView(Gtk.Box):
                                                 bytes_progress_cb=on_game_progress,
                                                 overwrite=overwrite, cancel=cancel)
                     ok_count += 1
+                    bytes_written += game.size_bytes
                 except wit_wrapper.OperationCancelled:
                     # Cancelado a mitad de ESTE juego: no es un error, y no
                     # se sigue con los que faltaban.
@@ -774,6 +788,7 @@ class TransferView(Gtk.Box):
                     # El juego ya está en la unidad: ni éxito ni error, se
                     # cuenta aparte y se informa en el resumen final.
                     skipped_count += 1
+                    bytes_skipped += game.size_bytes
                 except Exception as e:
                     if cancel.cancelled:
                         # El fallo es consecuencia de haber matado a `wit`
@@ -783,8 +798,8 @@ class TransferView(Gtk.Box):
                     # Un juego que falla no frena el resto: se cuenta como
                     # error y se sigue con el siguiente de la selección.
                     err_count += 1
+                    bytes_failed += game.size_bytes
                     error_msgs.append(f"{game.title}: {e}")
-                bytes_done += game.size_bytes
             GLib.idle_add(self._on_transfer_done, ok_count, err_count, cancelled,
                           skipped_count, op, target, error_msgs)
 
@@ -798,7 +813,8 @@ class TransferView(Gtk.Box):
         self._show_toast("Cancelando la transferencia…")
 
     def _update_progress(self, done: int, total: int, title: str,
-                          bytes_done: int, total_bytes: int, start_time: float):
+                          bytes_done: int, bytes_written: int,
+                          total_bytes: int, start_time: float):
         # Fracción por bytes reales (no por "juegos completados"): con un
         # solo juego grande, `done` no cambia hasta que termina, así que
         # basarse solo en eso deja la barra clavada en 0% durante toda la
@@ -810,8 +826,12 @@ class TransferView(Gtk.Box):
             fraction = (done - 1) / max(total, 1)
         self.transfer_progress.set_fraction(fraction)
         elapsed = time.monotonic() - start_time
-        if bytes_done > 0 and elapsed > 1:
-            speed = bytes_done / elapsed
+        # La velocidad sale SOLO de lo que se escribió de verdad: contar
+        # los bytes de un juego que falló, o de uno que ya estaba en el
+        # destino y se saltó en un instante, daba una velocidad inventada
+        # y un tiempo restante demasiado optimista.
+        if bytes_written > 0 and elapsed > 1:
+            speed = bytes_written / elapsed
             remaining = max(total_bytes - bytes_done, 0)
             eta_text = f" · ~{library.format_eta(remaining / speed)} restantes" if speed > 0 else ""
         elif total > 1:
