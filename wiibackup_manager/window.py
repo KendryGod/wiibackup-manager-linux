@@ -151,6 +151,9 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
         menu_button = Gtk.MenuButton(icon_name="open-menu-symbolic")
         menu = Gio.Menu()
+        tools_section = Gio.Menu()
+        tools_section.append("Renombrar todo a estándar…", "win.rename-all")
+        menu.append_section(None, tools_section)
         export_section = Gio.Menu()
         export_section.append("Exportar lista a CSV…", "win.export-csv")
         export_section.append("Exportar lista como texto…", "win.export-text")
@@ -164,6 +167,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self._add_action("about", self._on_about)
         self._add_action("add-files", self._on_add_files)
         self._add_action("add-folder", self._on_add_folder)
+        self._add_action("rename-all", self._on_rename_all)
         self._add_action("export-csv", lambda: self._on_export(library.EXPORT_CSV))
         self._add_action("export-text", lambda: self._on_export(library.EXPORT_TEXT))
 
@@ -278,6 +282,13 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self._batch_convert_btn.connect("clicked", lambda *_: self._on_batch_convert())
         self._selection_bar.pack_start(self._batch_convert_btn)
 
+        self._batch_rename_btn = Gtk.Button(label="Renombrar")
+        self._batch_rename_btn.set_tooltip_text(
+            "Renombrar los archivos elegidos a 'Título [ID].ext'"
+        )
+        self._batch_rename_btn.connect("clicked", lambda *_: self._on_batch_rename())
+        self._selection_bar.pack_start(self._batch_rename_btn)
+
         self._batch_verify_btn = Gtk.Button(label="Verificar")
         self._batch_verify_btn.connect("clicked", lambda *_: self._on_batch_verify())
         self._selection_bar.pack_start(self._batch_verify_btn)
@@ -327,6 +338,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
     _BATCH_BUTTONS = (
         ("_batch_send_btn", OperationKind.TRANSFERRING),
         ("_batch_convert_btn", OperationKind.CONVERTING),
+        ("_batch_rename_btn", OperationKind.RENAMING),
         ("_batch_verify_btn", OperationKind.VERIFYING),
         ("_batch_delete_btn", OperationKind.DELETING),
     )
@@ -838,6 +850,85 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                           self._describe_target(games), cancelled)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _on_batch_rename(self):
+        games = self._selected_games()
+        if games:
+            self._start_batch_rename(games)
+
+    def _on_rename_all(self):
+        """Renombrar toda la biblioteca desde el menú, sin tener que
+        tildar nada. Se toma lo que se está viendo (o sea, lo que el
+        buscador haya dejado): renombrar en silencio juegos que el usuario
+        no tiene en pantalla sería una sorpresa desagradable."""
+        games = self._selected_games() or self._visible_games()
+        if not games:
+            self._show_toast("No hay juegos para renombrar.")
+            return
+        self._start_batch_rename(games)
+
+    def _start_batch_rename(self, games: list[Game]):
+        # Los que ya están con el nombre estándar no se tocan: no hay nada
+        # que hacerles y meterlos en el lote solo alarga la lista de la
+        # confirmación.
+        pendientes = [g for g in games if library.needs_rename(g)]
+        if not pendientes:
+            self._show_toast("Todos esos juegos ya tienen el nombre estándar ✓")
+            return
+
+        if self._reject_if_busy(OperationKind.RENAMING,
+                                 [g.path for g in pendientes],
+                                 uses_progress_bar=True):
+            return
+
+        # Se muestran algunos ejemplos concretos: "renombrar 47 archivos"
+        # no dice nada si el usuario no ve cómo van a quedar.
+        ejemplos = "\n".join(
+            f"{g.path.name}  →  {library.standard_filename(g)}"
+            for g in pendientes[:6]
+        )
+        if len(pendientes) > 6:
+            ejemplos += f"\n… y {len(pendientes) - 6} más"
+        archivos = "archivo" if len(pendientes) == 1 else "archivos"
+
+        dialog = Adw.AlertDialog(
+            heading=f"¿Renombrar {len(pendientes)} {archivos}?",
+            body=f"Se van a renombrar los archivos en el disco:\n\n{ejemplos}\n\n"
+                 "Si el nombre que corresponde ya está ocupado por otro juego, "
+                 "el archivo se guarda con un sufijo (2) en vez de pisarlo.",
+        )
+        dialog.add_response("cancel", "Cancelar")
+        dialog.add_response("rename", "Renombrar")
+        dialog.set_response_appearance("rename", Adw.ResponseAppearance.SUGGESTED)
+        dialog.connect("response", self._on_batch_rename_confirmed, pendientes)
+        dialog.present(self)
+
+    def _on_batch_rename_confirmed(self, dialog, response, games: list[Game]):
+        if response != "rename":
+            return
+        # Revalidar después del diálogo, igual que en borrar y convertir.
+        if self._reject_if_busy(OperationKind.RENAMING, [g.path for g in games],
+                                 uses_progress_bar=True):
+            return
+
+        def rename_one(g: Game, _cancel):
+            # `on_collision="suffix"`: en lote no se puede frenar a
+            # preguntar por cada choque, y pisar el archivo que ya está
+            # sería perder un juego.
+            esperado = library.standard_filename(g)
+            nuevo = library.rename_to_standard(g, on_collision="suffix")
+            if nuevo.name != esperado:
+                # Se renombró igual (cuenta como hecho), pero con otro
+                # nombre del esperado: eso no puede quedar solo en el
+                # resumen, que dice cuántos y no cuáles. Va al historial,
+                # que es donde se mira qué pasó con cada juego.
+                self.op_log.record(
+                    OperationKind.RENAMING.label, g.title, oplog.STATUS_PARTIAL,
+                    f"guardado como {nuevo.name}: '{esperado}' ya estaba ocupado",
+                )
+
+        self._run_batch(games, "Renombrando", rename_one, OperationKind.RENAMING,
+                         cancel_message="Cancelando el renombrado…")
 
     def _on_batch_verify(self):
         games = self._selected_games()

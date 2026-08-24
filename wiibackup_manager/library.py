@@ -205,19 +205,49 @@ def standard_filename(game: Game) -> str:
     return f"{safe_title} [{validate_game_id(game.game_id)}]{ext}"
 
 
-def rename_to_standard(game: Game, dry_run: bool = False) -> Path:
+def free_variant(path: Path) -> Path:
+    """Variante libre de `path` agregando un sufijo: 'Juego.wbfs' ->
+    'Juego (2).wbfs'. Se usa cuando el nombre que corresponde ya está
+    ocupado por OTRO archivo y pisarlo perdería un juego."""
+    n = 2
+    candidate = path
+    while candidate.exists():
+        candidate = path.with_name(f"{path.stem} ({n}){path.suffix}")
+        n += 1
+    return candidate
+
+
+def rename_to_standard(game: Game, dry_run: bool = False,
+                        on_collision: str = "error") -> Path:
     """Renombra el archivo del juego a la convención 'Título [ID].ext'
-    dentro de la misma carpeta. Devuelve la nueva ruta."""
+    dentro de la misma carpeta. Devuelve la nueva ruta.
+
+    `on_collision` decide qué pasa si ese nombre ya está tomado por otro
+    archivo: "error" levanta `FileExistsError` (flujo de un juego suelto,
+    donde el usuario ve el aviso y decide) y "suffix" busca una variante
+    libre con sufijo (flujo en lote, donde frenar por cada choque no
+    tendría sentido). En ninguno de los dos casos se pisa nada.
+
+    Dos juegos con el mismo título y sin ID identificado dan el mismo
+    nombre estándar: ese es el caso real de colisión, y en lote termina
+    como 'Título.iso' y 'Título (2).iso'."""
     new_name = standard_filename(game)
     new_path = game.path.with_name(new_name)
     if new_path == game.path:
         return game.path
     if new_path.exists():
-        raise FileExistsError(f"Ya existe un archivo en {new_path}")
+        if on_collision != "suffix":
+            raise FileExistsError(f"Ya existe un archivo en {new_path}")
+        new_path = free_variant(new_path)
     if not dry_run:
         game.path.rename(new_path)
         game.path = new_path
     return new_path
+
+
+def needs_rename(game: Game) -> bool:
+    """True si el archivo no está ya con el nombre estándar."""
+    return game.path.name != standard_filename(game)
 
 
 # Tamaño de bloque para la copia manual con progreso (_copy_with_progress).
