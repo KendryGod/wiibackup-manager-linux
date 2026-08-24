@@ -12,6 +12,7 @@ art.gametdb.com y son de uso libre para proyectos como este.
 from __future__ import annotations
 
 import io
+import os
 import threading
 import time
 import urllib.request
@@ -56,20 +57,74 @@ def cover_cache_path(game_id: str, region: str = "EN") -> Path:
     return config.COVERS_DIR / f"{validate_game_id(game_id)}.{safe_region}.png"
 
 
+# Último bloque de todo PNG bien formado (longitud 0 + "IEND" + su CRC,
+# que es fijo). Si el archivo no termina con esto, está cortado.
+_PNG_IEND = b"\x00\x00\x00\x00IEND\xaeB`\x82"
+
+
+def _decodes_as_image(path: Path) -> bool:
+    """True si el archivo se puede decodificar entero como imagen.
+
+    Es la validación fuerte, y por eso se usa al GUARDAR una carátula
+    recién bajada y no al leerla de la caché: decodificar 300 PNG en cada
+    escaneo sería trabajo al pedo. Se usa GdkPixbuf, que es el mismo
+    decodificador que después va a tener que mostrar la imagen: si él la
+    puede abrir, la fila la va a poder mostrar."""
+    try:
+        import gi
+        gi.require_version("GdkPixbuf", "2.0")
+        from gi.repository import GdkPixbuf
+        GdkPixbuf.Pixbuf.new_from_file(str(path))
+        return True
+    except Exception:
+        return False
+
+
 def _is_valid_cached_cover(path: Path) -> bool:
-    """True si el archivo cacheado es un PNG con contenido real.
+    """True si el archivo cacheado es un PNG completo.
 
     Una descarga interrumpida a medias (proceso matado, conexión cortada)
-    puede dejar un archivo de 0 bytes o con datos truncados/no-PNG. Sin esta
-    validación, get_cover_path lo trataría como "ya existe" para siempre y
-    jamás reintentaría la descarga.
-    """
+    puede dejar un archivo de 0 bytes, o -peor- uno con la cabecera PNG
+    correcta y el contenido cortado, que pasaba la validación vieja y
+    quedaba cacheado como bueno para siempre.
+
+    Se mira la cabecera Y el bloque final IEND, que es lo que distingue a
+    un PNG entero de uno truncado, y cuesta dos lecturas de 8 bytes."""
     try:
-        if path.stat().st_size == 0:
+        if path.stat().st_size < len(PNG_MAGIC) + len(_PNG_IEND):
             return False
         with path.open("rb") as f:
-            return f.read(8) == PNG_MAGIC
+            if f.read(len(PNG_MAGIC)) != PNG_MAGIC:
+                return False
+            f.seek(-len(_PNG_IEND), os.SEEK_END)
+            return f.read(len(_PNG_IEND)) == _PNG_IEND
     except OSError:
+        return False
+
+
+def _store_cover(cache_path: Path, data: bytes) -> bool:
+    """Guarda la carátula en la caché, de forma atómica y validada.
+
+    Se escribe primero a un temporal, se comprueba que la imagen se pueda
+    decodificar ENTERA y recién entonces se la mueve al nombre definitivo.
+    Así la caché nunca tiene un archivo a medias: o está la carátula
+    completa o no está, y el próximo intento la vuelve a pedir.
+
+    Devuelve False si la imagen no sirve (descarga cortada, el servidor
+    devolvió cualquier cosa), sin dejar nada en la caché."""
+    tmp = cache_path.with_name(f".{cache_path.name}.parcial-{os.getpid()}")
+    try:
+        tmp.write_bytes(data)
+        if not _decodes_as_image(tmp):
+            tmp.unlink(missing_ok=True)
+            return False
+        os.replace(tmp, cache_path)
+        return True
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
         return False
 
 
@@ -107,8 +162,7 @@ def get_cover_path(game_id: str, region: str = "EN", force: bool = False) -> Opt
             with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
                 if resp.status == 200:
                     data = resp.read()
-                    if data.startswith(PNG_MAGIC):
-                        cache_path.write_bytes(data)
+                    if data.startswith(PNG_MAGIC) and _store_cover(cache_path, data):
                         return cache_path
         except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError):
             continue
