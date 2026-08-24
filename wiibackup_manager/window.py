@@ -1137,9 +1137,19 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             detail_parts.append(f"{len(skipped)} ya estaban en la biblioteca")
         if renamed:
             detail_parts.append(f"{len(renamed)} renombrado(s) para no pisar otro archivo")
+        # "ningún juego" y no "0 juegos": cuando todos los archivos ya
+        # estaban en la biblioteca (o ninguno se pudo identificar) la
+        # entrada del historial quedaba como "Agregando juegos · 0 juegos",
+        # que se lee como si se hubiera roto algo.
+        if not added:
+            target = "ningún juego"
+        elif len(added) == 1:
+            target = added[0]
+        else:
+            target = f"{len(added)} juegos"
         self.ops.finish(op, OperationOutcome(
             status=oplog.STATUS_OK,
-            target=(added[0] if len(added) == 1 else f"{len(added)} juegos"),
+            target=target,
             detail=" · ".join(detail_parts),
         ))
         parts = []
