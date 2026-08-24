@@ -182,17 +182,35 @@ class GameRow(Adw.ActionRow):
         muestran carátulas compartan el mismo límite de descargas
         simultáneas, y para que un rescan no vuelva a encolar carátulas que
         ya se están descargando."""
+        # El juego y la región con los que se PIDE viajan hasta el
+        # callback: la fila se reusa entre escaneos, y para cuando llega la
+        # respuesta puede estar mostrando otro juego. Ver `_is_stale`.
+        game_id, region = self.game.game_id, self.cover_region
         gametdb.fetch_cover_async(
-            self.game.game_id, self.cover_region,
-            lambda path: GLib.idle_add(self._apply_cover, str(path) if path else None),
+            game_id, region,
+            lambda path: GLib.idle_add(self._apply_cover,
+                                        str(path) if path else None, game_id, region),
         )
 
-    def _apply_cover(self, path: str | None):
+    def _is_stale(self, game_id: str | None, region: str | None) -> bool:
+        """True si la respuesta que llegó es de un pedido viejo.
+
+        Las filas se reusan (ver `update_game`): si el archivo pasó a ser
+        otro juego -o cambió la región de carátulas en Preferencias- entre
+        que se pidió el dato y llegó, aplicarlo mostraría la carátula o el
+        título del juego anterior encima del nuevo. El pedido correcto ya
+        está en vuelo, así que este se descarta y listo."""
+        if game_id is None:
+            return False
+        return game_id != self.game.game_id or region != self.cover_region
+
+    def _apply_cover(self, path: str | None, game_id: str | None = None,
+                      region: str | None = None):
         # La descarga pudo terminar después de que esta fila dejara de
         # existir (cambio de orden, rescan, biblioteca recargada): las
         # filas se reconstruyen enteras y la que pidió la carátula ya no
         # está en la lista. Ver `gtk_helpers.widget_is_alive`.
-        if not gtk_helpers.widget_is_alive(self):
+        if not gtk_helpers.widget_is_alive(self) or self._is_stale(game_id, region):
             return False
         if path:
             try:
@@ -210,23 +228,26 @@ class GameRow(Adw.ActionRow):
         hilo de GTK: armar el índice de wiitdb.xml la primera vez implica
         bajar y parsear decenas de MB, que en el hilo principal congelaría
         la ventana entera."""
+        game_id, region = self.game.game_id, self.cover_region
         gametdb.fetch_extra_info_async(
-            self.game.game_id, self.cover_region,
-            lambda info: GLib.idle_add(self._apply_extra_title, info),
+            game_id, region,
+            lambda info: GLib.idle_add(self._apply_extra_title, info, game_id, region),
         )
 
-    def _apply_extra_title(self, info):
+    def _apply_extra_title(self, info, game_id: str | None = None,
+                            region: str | None = None):
         """Agrega la línea del título de GameTDB si aporta algo.
 
         `title_to_show_next_to` devuelve None cuando el título de GameTDB
         es el mismo que la fila ya muestra (comparando sin mayúsculas ni
         puntuación), que es el caso más común: ahí la fila queda tal cual,
         sin una línea repetida."""
-        if not gtk_helpers.widget_is_alive(self):
+        if not gtk_helpers.widget_is_alive(self) or self._is_stale(game_id, region):
             # Misma carrera que en `_apply_cover`, pero más probable: armar
             # el índice de wiitdb.xml la primera vez tarda decenas de
             # segundos, tiempo de sobra para que el usuario reordene la
-            # lista o dispare un rescan.
+            # lista, dispare un rescan, o reemplace un archivo por otro
+            # juego con el mismo nombre.
             return False
         if info is None:
             return False

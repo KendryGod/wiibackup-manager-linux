@@ -53,16 +53,26 @@ class TransferGameRow(Adw.ActionRow):
         Antes esta vista lanzaba un `threading.Thread` por fila: con 300
         juegos eran 300 descargas de golpe contra GameTDB, mientras la
         Biblioteca hacía como mucho 6."""
+        game_id, region = self.game.game_id, self._cover_region
         gametdb.fetch_cover_async(
-            self.game.game_id, self._cover_region,
-            lambda path: GLib.idle_add(self._apply_cover, str(path) if path else None),
+            game_id, region,
+            lambda path: GLib.idle_add(self._apply_cover,
+                                        str(path) if path else None, game_id, region),
         )
 
-    def _apply_cover(self, path: str | None):
+    def _apply_cover(self, path: str | None, game_id: str | None = None,
+                      region: str | None = None):
         # Igual que en GameRow: `set_games` reconstruye todas las filas
         # después de cada escaneo, así que una carátula que estaba en
         # vuelo puede llegar cuando esta fila ya no está en la lista.
         if not gtk_helpers.widget_is_alive(self):
+            return False
+        # Estas filas hoy se recrean (no se reusan como las de la
+        # Biblioteca), así que el juego de la fila no cambia nunca; el
+        # chequeo va igual para que el día que se reusen no aparezca acá
+        # el mismo bug sutil que en GameRow.
+        if game_id is not None and (game_id != self.game.game_id
+                                     or region != self._cover_region):
             return False
         if path:
             try:
