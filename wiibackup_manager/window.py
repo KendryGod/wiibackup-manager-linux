@@ -419,7 +419,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
     @staticmethod
     def _batch_outcome(target: str, ok: int, errors: list[str],
                         skipped: list[str] | None = None,
-                        cancelled: bool = False) -> OperationOutcome:
+                        cancelled: bool = False,
+                        notes: list[str] | None = None) -> OperationOutcome:
         """Traduce el recuento de un lote al resultado que va al historial.
 
         Cancelado gana sobre todo lo demás (lo pidió el usuario, no es un
@@ -427,9 +428,18 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         "parcial" y no "error", que es la diferencia entre "no se copió
         nada" y "se copiaron 18 de 20"."""
         skipped = skipped or []
+        # `notes` son cosas que salieron bien pero no exactamente como se
+        # pidió (un archivo renombrado con sufijo porque el nombre estaba
+        # ocupado). Van al MISMO resumen y no a entradas sueltas: una
+        # acción del usuario, una entrada de historial.
+        notes = notes or []
         detail_parts = [f"{ok} ok"]
         if skipped:
             detail_parts.append(f"{len(skipped)} omitido(s)")
+        if notes:
+            detail_parts.append("; ".join(notes[:3]))
+            if len(notes) > 3:
+                detail_parts.append(f"(+{len(notes) - 3} más)")
         if errors:
             detail_parts.append(f"{len(errors)} con error")
             # Los primeros motivos concretos: son el dato por el que
@@ -438,12 +448,13 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
         if cancelled:
             status = oplog.STATUS_CANCELLED
-        elif not errors:
-            status = oplog.STATUS_OK
-        elif ok:
+        elif errors:
+            status = oplog.STATUS_PARTIAL if ok else oplog.STATUS_ERROR
+        elif notes:
+            # Se hizo todo, pero no todo salió como se pidió.
             status = oplog.STATUS_PARTIAL
         else:
-            status = oplog.STATUS_ERROR
+            status = oplog.STATUS_OK
         return OperationOutcome(status=status, target=target,
                                  detail=" · ".join(detail_parts))
 
@@ -517,6 +528,12 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         termine con el juego que está leyendo). Cancelar deja lo ya
         procesado como está y no toca lo que faltaba.
 
+        Si `action_fn` devuelve un texto, es una NOTA sobre ese juego:
+        salió bien, pero no exactamente como se pidió (por ejemplo, se
+        renombró con un sufijo porque el nombre estaba ocupado). Las notas
+        entran al resumen final, que es la ÚNICA entrada de historial que
+        genera el lote.
+
         `kind` es el tipo de operación con el que se registra el lote
         entero en el OperationManager, para que nada más toque esos
         archivos mientras dure.
@@ -546,14 +563,17 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             ok = 0
             errors: list[str] = []
             skipped: list[str] = []
+            notes: list[str] = []
             cancelled = False
             for i, game in enumerate(games, start=1):
                 if cancel.cancelled:
                     cancelled = True
                     break
                 try:
-                    action_fn(game, cancel)
+                    nota = action_fn(game, cancel)
                     ok += 1
+                    if nota:
+                        notes.append(f"{game.title}: {nota}")
                 except wit_wrapper.OperationCancelled:
                     # Cancelado a mitad de ESTE juego: no es un error, y lo
                     # que faltaba queda sin tocar.
@@ -570,18 +590,21 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                     errors.append(f"{game.title}: {e}")
                 GLib.idle_add(self.progress_bar.set_fraction, i / max(total, 1))
             GLib.idle_add(self._on_batch_done, title, ok, errors, skipped, op,
-                          self._describe_target(games), cancelled)
+                          self._describe_target(games), cancelled, notes)
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_batch_done(self, title: str, ok: int, errors: list[str],
                         skipped: list[str] | None = None, op=None,
-                        target: str = "", cancelled: bool = False):
+                        target: str = "", cancelled: bool = False,
+                        notes: list[str] | None = None):
         # Terminar la operación ANTES del rescan de abajo: si no, el escaneo
         # chocaría con ella y quedaría postergado. El resultado que se le
         # pasa acá es lo que queda anotado en la pestaña Log.
-        self.ops.finish(op, self._batch_outcome(target, ok, errors, skipped, cancelled))
+        self.ops.finish(op, self._batch_outcome(target, ok, errors, skipped,
+                                                 cancelled, notes))
         skipped = skipped or []
+        notes = notes or []
         self._hide_progress()
         if cancelled:
             self._show_toast(
@@ -597,6 +620,10 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             preview = "; ".join(skipped[:3])
             more = f" (+{len(skipped) - 3} más)" if len(skipped) > 3 else ""
             parts.append(f"{len(skipped)} omitido(s): {preview}{more}")
+        if notes:
+            preview = "; ".join(notes[:2])
+            more = f" (+{len(notes) - 2} más, ver el Log)" if len(notes) > 2 else ""
+            parts.append(preview + more)
         if errors:
             preview = "; ".join(errors[:3])
             more = f" (+{len(errors) - 3} más)" if len(errors) > 3 else ""
@@ -1010,14 +1037,13 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             esperado = library.standard_filename(g)
             nuevo = library.rename_to_standard(g, on_collision="suffix")
             if nuevo.name != esperado:
-                # Se renombró igual (cuenta como hecho), pero con otro
-                # nombre del esperado: eso no puede quedar solo en el
-                # resumen, que dice cuántos y no cuáles. Va al historial,
-                # que es donde se mira qué pasó con cada juego.
-                self.op_log.record(
-                    OperationKind.RENAMING.label, g.title, oplog.STATUS_PARTIAL,
-                    f"guardado como {nuevo.name}: '{esperado}' ya estaba ocupado",
-                )
+                # Se renombró igual (cuenta como hecho) pero con otro
+                # nombre. Se DEVUELVE como nota para que entre en el
+                # resumen del lote: escribir acá una entrada de historial
+                # aparte rompía el patrón de "una acción del usuario, una
+                # entrada de historial" que sigue el resto de la app.
+                return f"guardado como {nuevo.name} ('{esperado}' estaba ocupado)"
+            return None
 
         self._run_batch(games, "Renombrando", rename_one, OperationKind.RENAMING,
                          cancel_message="Cancelando el renombrado…")
