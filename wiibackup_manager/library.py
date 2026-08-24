@@ -217,6 +217,40 @@ def free_variant(path: Path) -> Path:
     return candidate
 
 
+# Cuántos nombres alternativos se prueban antes de darse por vencido.
+_MAX_RENAME_ATTEMPTS = 100
+
+
+def rename_no_replace(src: Path, dest: Path) -> None:
+    """Renombra `src` a `dest` sin pisar `dest` NUNCA.
+
+    `Path.rename` en Linux reemplaza el destino en silencio, así que el
+    patrón "si no existe, renombrar" tiene una ventana entre las dos
+    cosas: si en ese intervalo aparece un archivo ahí -el gestor de
+    archivos, un script, otra copia de esta app- se lo borra sin aviso.
+
+    Acá el nombre se reserva primero con O_CREAT|O_EXCL, que es atómico y
+    falla con FileExistsError si alguien llegó antes, y recién después se
+    mueve el archivo encima de esa reserva propia. Se hace así y no con
+    renameat2(RENAME_NOREPLACE) porque esto anda en cualquier filesystem
+    (los pendrives suelen ser FAT32/exFAT) y sin ctypes.
+
+    Si el proceso se muere justo entre la reserva y el movimiento queda un
+    archivo de 0 bytes con el nombre nuevo: es lo peor que puede pasar, y
+    es preferible a perder un juego."""
+    fd = os.open(dest, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    os.close(fd)
+    try:
+        os.replace(src, dest)
+    except OSError:
+        # El movimiento falló: sacar la reserva para no dejar basura.
+        try:
+            os.unlink(dest)
+        except OSError:
+            pass
+        raise
+
+
 def rename_to_standard(game: Game, dry_run: bool = False,
                         on_collision: str = "error") -> Path:
     """Renombra el archivo del juego a la convención 'Título [ID].ext'
@@ -235,13 +269,38 @@ def rename_to_standard(game: Game, dry_run: bool = False,
     new_path = game.path.with_name(new_name)
     if new_path == game.path:
         return game.path
-    if new_path.exists():
+
+    if dry_run:
+        if new_path.exists():
+            if on_collision != "suffix":
+                raise FileExistsError(f"Ya existe un archivo en {new_path}")
+            new_path = free_variant(new_path)
+        return new_path
+
+    # Sin chequear-y-después-renombrar: `rename_no_replace` reserva el
+    # nombre de forma atómica y avisa si estaba tomado, así que un archivo
+    # que aparezca justo en el medio no se pierde.
+    try:
+        rename_no_replace(game.path, new_path)
+    except FileExistsError:
         if on_collision != "suffix":
             raise FileExistsError(f"Ya existe un archivo en {new_path}")
-        new_path = free_variant(new_path)
-    if not dry_run:
-        game.path.rename(new_path)
-        game.path = new_path
+        # Buscar una variante libre reintentando: si otro proceso se queda
+        # con "Juego (2).wbfs" mientras tanto, se sigue con la siguiente.
+        base = new_path
+        for n in range(2, _MAX_RENAME_ATTEMPTS + 2):
+            candidate = base.with_name(f"{base.stem} ({n}){base.suffix}")
+            try:
+                rename_no_replace(game.path, candidate)
+            except FileExistsError:
+                continue
+            new_path = candidate
+            break
+        else:
+            raise FileExistsError(
+                f"No se encontró un nombre libre para {base.name}"
+            )
+    game.path = new_path
     return new_path
 
 
