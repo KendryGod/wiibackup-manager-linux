@@ -65,6 +65,9 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         # Ver TransferView: el token guarda el proceso de `wit` en curso
         # para poder matarlo al cancelar, no solo una bandera.
         self._cancel_token = wit_wrapper.CancellationToken()
+        # Qué se avisa al tocar "Cancelar": lo pone la operación que está
+        # usando la barra en ese momento (enviar o convertir).
+        self._cancel_message = "Cancelando…"
 
         # Historial persistente de operaciones (pestaña Log). Se le pasa al
         # OperationManager para que cada operación que termina informando
@@ -381,7 +384,36 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         # no solo evita que arranque el próximo juego.
         self._cancel_token.cancel()
         self.progress_cancel_btn.set_sensitive(False)
-        self._show_toast("Cancelando el envío…")
+        self._show_toast(self._cancel_message)
+
+    def _begin_cancellable_progress(self, title: str, cancel_message: str):
+        """Muestra la barra de progreso con botón de cancelar y devuelve el
+        token de cancelación de esta operación.
+
+        El token es nuevo por operación (no arrastra el estado de una
+        cancelación anterior) y queda en `self._cancel_token`, que es lo
+        que mira el botón. Las operaciones que llegan hasta acá -enviar a
+        una unidad WBFS y convertir- no pueden correr a la vez (ver
+        `_SHARED_PROGRESS_KINDS` en operations.py), así que no hay dos
+        peleándose por el mismo botón."""
+        cancel = wit_wrapper.CancellationToken()
+        self._cancel_token = cancel
+        self._cancel_message = cancel_message
+        self.progress_bar.set_visible(True)
+        self.progress_bar.set_fraction(0)
+        self.progress_cancel_btn.set_visible(True)
+        self.progress_cancel_btn.set_sensitive(True)
+        self.set_title(f"WiiBackup Manager — {title}…")
+        return cancel
+
+    def _hide_progress(self):
+        """Esconde la barra y el botón de cancelar al terminar. Se llama
+        también desde operaciones que no muestran el botón: esconder algo
+        que ya estaba escondido no molesta, y olvidárselo dejaría un
+        'Cancelar' muerto en pantalla."""
+        self.progress_bar.set_visible(False)
+        self.progress_cancel_btn.set_visible(False)
+        return False
 
     # ------------------------------------------------------ Acciones en lote --
     def _run_batch(self, games: list[Game], title: str, action_fn,
@@ -428,13 +460,22 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
     def _on_batch_done(self, title: str, ok: int, errors: list[str],
                         skipped: list[str] | None = None, op=None,
-                        target: str = ""):
+                        target: str = "", cancelled: bool = False):
         # Terminar la operación ANTES del rescan de abajo: si no, el escaneo
         # chocaría con ella y quedaría postergado. El resultado que se le
         # pasa acá es lo que queda anotado en la pestaña Log.
-        self.ops.finish(op, self._batch_outcome(target, ok, errors, skipped))
+        self.ops.finish(op, self._batch_outcome(target, ok, errors, skipped, cancelled))
         skipped = skipped or []
-        self.progress_bar.set_visible(False)
+        self._hide_progress()
+        if cancelled:
+            self._show_toast(
+                f"{title}: cancelado tras {ok} completado(s)"
+                + (f", {len(errors)} con error" if errors else "")
+                + (f", {len(skipped)} omitido(s)" if skipped else "")
+                + "."
+            )
+            self.rescan_library()
+            return False
         parts = [f"{ok} ok" if (errors or skipped) else f"{ok} completado(s) ✓"]
         if skipped:
             preview = "; ".join(skipped[:3])
@@ -505,15 +546,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             self._show_toast(f"No se puede ahora: {e.detail}.")
             return
 
-        # Token nuevo por envío: no arrastra el estado de una cancelación
-        # anterior.
-        cancel = wit_wrapper.CancellationToken()
-        self._cancel_token = cancel
-        self.progress_bar.set_visible(True)
-        self.progress_bar.set_fraction(0)
-        self.progress_cancel_btn.set_visible(True)
-        self.progress_cancel_btn.set_sensitive(True)
-        self.set_title("WiiBackup Manager — Enviando a unidad WBFS…")
+        cancel = self._begin_cancellable_progress(
+            "Enviando a unidad WBFS", "Cancelando el envío…")
 
         total = len(games)
         total_bytes = sum(g.size_bytes for g in games)
@@ -598,13 +632,12 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                        target: str = ""):
         self.ops.finish(op, self._batch_outcome(target, ok, errors, skipped, cancelled))
         skipped = skipped or []
-        self.progress_bar.set_visible(False)
+        self._hide_progress()
         # Volver a None (no "") es lo que hace que el ProgressBar caiga de
         # nuevo a mostrar el porcentaje en las demás operaciones (rescan,
         # importar, convertir/verificar/eliminar en lote) en vez de dejar
         # pegado el último "N/total · nombre del juego" de este envío.
         self.progress_bar.set_text(None)
-        self.progress_cancel_btn.set_visible(False)
         if cancelled:
             self._show_toast(
                 f"Envío a unidad WBFS cancelado: {ok} ok, {len(errors)} con error"
@@ -656,9 +689,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             self._show_toast(f"No se puede ahora: {e.detail}.")
             return
 
-        self.progress_bar.set_visible(True)
-        self.progress_bar.set_fraction(0)
-        self.set_title("WiiBackup Manager — Convirtiendo…")
+        cancel = self._begin_cancellable_progress(
+            "Convirtiendo", "Cancelando la conversión…")
 
         total_bytes = sum(g.size_bytes for g in games)
         wit_binary = self.settings.wit_binary
@@ -668,7 +700,11 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             errors: list[str] = []
             skipped: list[str] = []
             bytes_done = 0
+            cancelled = False
             for game in games:
+                if cancel.cancelled:
+                    cancelled = True
+                    break
                 target_ext = ".wbfs" if game.fmt.upper() != "WBFS" else ".iso"
                 dest = game.path.with_suffix(target_ext)
                 base_bytes_done = bytes_done
@@ -688,15 +724,26 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 else:
                     try:
                         result = wit_wrapper.convert(game.path, dest, target_ext.strip("."),
-                                                      wit_binary, bytes_progress_cb=on_progress)
+                                                      wit_binary, bytes_progress_cb=on_progress,
+                                                      cancel=cancel)
                         if result.returncode != 0:
                             raise RuntimeError(result.stderr.strip()[:200] or "error de wit")
                         ok += 1
+                    except wit_wrapper.OperationCancelled:
+                        # Cancelado a mitad de ESTE juego: no es un error, y
+                        # no se sigue con los que faltaban.
+                        cancelled = True
+                        break
                     except Exception as e:
+                        if cancel.cancelled:
+                            # El fallo es consecuencia de haber matado a
+                            # `wit`, no un error real de la conversión.
+                            cancelled = True
+                            break
                         errors.append(f"{game.title}: {e}")
                 bytes_done += game.size_bytes
             GLib.idle_add(self._on_batch_done, "Convirtiendo", ok, errors, skipped, op,
-                          self._describe_target(games))
+                          self._describe_target(games), cancelled)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1171,44 +1218,62 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             self._show_toast(f"No se puede ahora: {e.detail}.")
             return
 
-        self.progress_bar.set_visible(True)
-        self.progress_bar.set_fraction(0)
-        self.set_title("WiiBackup Manager — Convirtiendo…")
+        # Con botón de cancelar: convertir un dual-layer puede tardar
+        # varios minutos y hasta ahora la única salida era cerrar la app.
+        cancel = self._begin_cancellable_progress(
+            "Convirtiendo", "Cancelando la conversión…")
         total_bytes = max(game.size_bytes, 1)
-        # Se inicializa acá y no dentro del `try`: el `finally` lo lee para
-        # armar la entrada del historial, y si la excepción salta antes de
-        # la asignación tiene que encontrar algo.
+        # Se inicializan acá y no dentro del `try`: el `finally` los lee
+        # para armar la entrada del historial, y si la excepción salta
+        # antes de la asignación tiene que encontrar algo.
         ok = False
+        cancelled = False
 
         def on_progress(current: int):
             est = min(current, int(game.size_bytes * 0.97))
             GLib.idle_add(self.progress_bar.set_fraction, min(est / total_bytes, 0.99))
 
         def worker():
-            nonlocal ok
+            nonlocal ok, cancelled
             detail = ""
             try:
                 result = wit_wrapper.convert(game.path, dest, target_ext.strip("."),
                                               self.settings.wit_binary,
-                                              bytes_progress_cb=on_progress)
+                                              bytes_progress_cb=on_progress,
+                                              cancel=cancel)
                 ok = result.returncode == 0
                 detail = (f"a {dest.name}" if ok else result.stderr.strip()[:200])
                 msg = (f"Convertido a {dest.name}" if ok
                        else f"Error al convertir: {result.stderr.strip()[:200]}")
+            except wit_wrapper.OperationCancelled:
+                # `wit_wrapper` ya mató el proceso y limpió el destino a
+                # medio escribir: no es un error, no hay nada que reportar
+                # como fallo.
+                cancelled = True
+                detail = "cancelada por el usuario"
+                msg = f"Conversión de '{game.title}' cancelada."
             except Exception as e:
-                ok, msg = False, f"Error al convertir: {e}"
-                detail = str(e)
+                if cancel.cancelled:
+                    cancelled = True
+                    detail = "cancelada por el usuario"
+                    msg = f"Conversión de '{game.title}' cancelada."
+                else:
+                    ok, msg = False, f"Error al convertir: {e}"
+                    detail = str(e)
             finally:
                 # Liberar el archivo antes del rescan: si no, el escaneo
                 # chocaría con esta misma operación y quedaría postergado.
                 GLib.idle_add(self.ops.finish, op, OperationOutcome(
-                    status=oplog.STATUS_OK if ok else oplog.STATUS_ERROR,
+                    status=(oplog.STATUS_CANCELLED if cancelled
+                            else oplog.STATUS_OK if ok else oplog.STATUS_ERROR),
                     target=game.title,
                     detail=detail,
                 ))
-            GLib.idle_add(self.progress_bar.set_visible, False)
+            GLib.idle_add(self._hide_progress)
             GLib.idle_add(self._show_toast, msg)
-            if ok:
+            if ok or cancelled:
+                # También tras cancelar: el destino a medio escribir se
+                # borró, y la lista tiene que reflejar cómo quedó el disco.
                 GLib.idle_add(self.rescan_library)
 
         threading.Thread(target=worker, daemon=True).start()
