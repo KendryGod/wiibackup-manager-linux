@@ -14,7 +14,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk, GLib  # noqa: E402
 
-from .. import drives, gametdb, library, oplog, wit_wrapper
+from .. import config, drives, gametdb, library, oplog, wit_wrapper
 from ..operations import OperationBusy, OperationKind, OperationOutcome
 from ..library import Game
 from . import gtk_helpers
@@ -432,12 +432,11 @@ class TransferView(Gtk.Box):
         self._show_toast(f"Se quitó el acceso rápido '{preset.get('name', '')}'.")
 
     def _save_settings(self):
-        try:
-            self.settings.save()
-        except OSError as e:
+        error = config.try_save(self.settings)
+        if error:
             # No se pierde lo que ya está en pantalla: la lista en memoria
             # queda igual, solo no sobrevive al próximo arranque.
-            self._show_toast(f"No se pudo guardar la configuración: {e}")
+            self._show_toast(f"No se pudo guardar la configuración: {error}")
 
     def _poll_drives(self):
         """Sondeo periódico (mismo patrón que la detección de la Biblioteca

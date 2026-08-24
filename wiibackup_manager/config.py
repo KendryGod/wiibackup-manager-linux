@@ -12,6 +12,7 @@ import sys
 import tempfile
 from dataclasses import dataclass, asdict, field, fields
 from pathlib import Path
+from typing import Optional
 
 APP_ID = "com.gamefixsps.WiiBackupManager"
 
@@ -131,6 +132,21 @@ class Settings:
         """Guarda la configuración de forma atómica (ver
         `write_json_atomic`, compartida con el historial de operaciones)."""
         write_json_atomic(CONFIG_FILE, json.dumps(asdict(self), indent=2))
+
+
+def try_save(settings: Settings) -> Optional[str]:
+    """Guarda la configuración y devuelve el mensaje de error si no se
+    pudo, o None si salió bien.
+
+    Existe para que ningún callback de GTK llame a `settings.save()` a
+    pelo: guardar puede fallar de verdad (disco lleno, permisos, la
+    carpeta de configuración en un filesystem que se desconectó) y una
+    excepción saliendo de un handler de señal no la agarra nadie."""
+    try:
+        settings.save()
+        return None
+    except OSError as e:
+        return e.strerror or str(e)
 
 
 def clean_presets(raw) -> list:

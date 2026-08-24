@@ -1800,7 +1800,12 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         dialog.present(self)
 
     def _on_settings_saved(self, settings: config.Settings):
-        settings.save()
+        error = config.try_save(settings)
+        if error:
+            self._show_toast(
+                f"No se pudo guardar la configuración: {error}. "
+                "Los cambios valen para esta sesión."
+            )
         config.ensure_dirs(settings)
         styles.apply_color_scheme(settings.color_scheme)
         self._library_available = config.library_path_available(settings)
