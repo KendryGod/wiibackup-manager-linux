@@ -19,3 +19,17 @@ wiibackup-manager = "wiibackup_manager.app:main"
 
 [tool.setuptools.packages.find]
 include = ["wiibackup_manager*"]
+
+# El .desktop y los iconos se instalan en el sistema (o en ~/.local
+# con --user). Van acá y no en un setup.py aparte para no tener la
+# configuracion de empaquetado repartida en dos archivos: los paquetes
+# ya se declaran arriba con packages.find.
+[tool.setuptools.data-files]
+"share/applications" = ["data/com.gamefixsps.WiiBackupManager.desktop"]
+"share/icons/hicolor/16x16/apps" = ["data/icons/hicolor/16x16/apps/com.gamefixsps.WiiBackupManager.png"]
+"share/icons/hicolor/32x32/apps" = ["data/icons/hicolor/32x32/apps/com.gamefixsps.WiiBackupManager.png"]
+"share/icons/hicolor/48x48/apps" = ["data/icons/hicolor/48x48/apps/com.gamefixsps.WiiBackupManager.png"]
+"share/icons/hicolor/64x64/apps" = ["data/icons/hicolor/64x64/apps/com.gamefixsps.WiiBackupManager.png"]
+"share/icons/hicolor/128x128/apps" = ["data/icons/hicolor/128x128/apps/com.gamefixsps.WiiBackupManager.png"]
+"share/icons/hicolor/256x256/apps" = ["data/icons/hicolor/256x256/apps/com.gamefixsps.WiiBackupManager.png"]
+"share/icons/hicolor/512x512/apps" = ["data/icons/hicolor/512x512/apps/com.gamefixsps.WiiBackupManager.png"]
