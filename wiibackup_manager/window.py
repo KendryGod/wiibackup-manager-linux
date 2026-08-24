@@ -1116,23 +1116,46 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 GLib.idle_add(self.progress_bar.set_fraction, done / max(total, 1))
 
             skipped: list = []
+            error = None
             try:
                 games = library.scan_library(root, self.settings.wit_binary, progress,
                                               skipped_dirs=skipped)
-            except Exception:
-                games = []
-            GLib.idle_add(self._on_scan_done, games, generation, op, skipped)
+            except Exception as e:
+                # `games = []` acá era una mentira peligrosa: "el escaneo
+                # falló" y "no hay juegos" se veían igual, y el usuario
+                # abría la app para encontrarse la biblioteca vacía sin
+                # saber que fue un error técnico.
+                games, error = None, f"{type(e).__name__}: {e}"
+            GLib.idle_add(self._on_scan_done, games, generation, op, skipped, error)
 
         threading.Thread(target=worker, daemon=True).start()
         return False  # para idle_add
 
-    def _on_scan_done(self, games: list[Game], generation: int, op=None,
-                       skipped: list | None = None):
+    def _on_scan_done(self, games: list[Game] | None, generation: int, op=None,
+                       skipped: list | None = None, error: str | None = None):
         self.ops.finish(op)
 
         # Resultado de un escaneo que ya quedó viejo (arrancó otro después):
         # se descarta en vez de pisar la lista con datos de antes.
         if generation != self._scan_generation:
+            return False
+
+        if error is not None:
+            # La lista que había se conserva: puede estar desactualizada,
+            # pero es mucho mejor que mostrar la biblioteca vacía y hacerle
+            # creer al usuario que perdió todo.
+            self.progress_bar.set_visible(False)
+            self.set_title(f"WiiBackup Manager — {len(self._games)} juegos")
+            self._show_toast(
+                f"No se pudo escanear la biblioteca ({error}). "
+                "Se sigue mostrando la última lista conocida."
+            )
+            self.op_log.record(OperationKind.SCANNING.label,
+                               str(self.settings.library_path),
+                               oplog.STATUS_ERROR, error)
+            if self._rescan_pending:
+                self._rescan_pending = False
+                self.rescan_library()
             return False
 
         # Carpetas que quedaron afuera por permisos. El escaneo corre solo
