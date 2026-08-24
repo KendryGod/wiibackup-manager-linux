@@ -66,8 +66,19 @@ class GameRow(Adw.ActionRow):
         # línea ARRIBA de esta, para que el dato del título quede pegado al
         # título principal y no perdido después de los números.
         self._base_subtitle = f"{game.game_id} · {game.fmt} · {game.size_mb:,.0f} MB"
+        # Línea de GameTDB ya aplicada, si llegó (ver `_apply_extra_title`).
+        # Se guarda aparte del subtítulo armado para poder rehacerlo cuando
+        # los datos del archivo cambian sin perderla. Ver `update_game`.
+        self._extra_line: str | None = None
         self.set_subtitle(self._base_subtitle)
         self.set_subtitle_lines(2)
+
+        # Clave con la que el ListBox ordena esta fila. La calcula la
+        # ventana (es la que sabe qué criterio eligió el usuario) y se
+        # guarda acá para no recalcularla en cada comparación: GTK llama a
+        # su función de orden O(n log n) veces, y uno de los criterios es
+        # la fecha del archivo, que implica un stat.
+        self.sort_key = None
 
         # Casilla de selección múltiple: oculta por defecto, se muestra al
         # activar el modo selección desde la ventana principal.
@@ -122,6 +133,46 @@ class GameRow(Adw.ActionRow):
 
     def is_selected(self) -> bool:
         return self.select_check.get_active()
+
+    def update_game(self, game: Game, cover_region: str | None = None) -> None:
+        """Reapunta la fila a un `Game` nuevo del mismo archivo, sin
+        reconstruir el widget.
+
+        Lo usa la ventana después de cada escaneo: el archivo es el mismo
+        pero los datos pueden haber cambiado (una conversión le cambia el
+        formato y el tamaño, un renombrado el título). Reusar la fila en
+        vez de tirarla y crear otra evita el parpadeo, conserva la casilla
+        de selección y la carátula ya cargada, y es la diferencia entre
+        que la lista se rehaga en un segundo o al instante.
+
+        La carátula y la metadata solo se vuelven a pedir si cambió el
+        juego (otro Game ID) o la región configurada: si no, lo que ya está
+        en pantalla sigue siendo correcto."""
+        region = cover_region or self.cover_region
+        reload_art = (game.game_id != self.game.game_id
+                      or region != self.cover_region)
+
+        self.game = game
+        self.cover_region = region
+        self.set_title(GLib.markup_escape_text(game.title))
+        self._base_subtitle = f"{game.game_id} · {game.fmt} · {game.size_mb:,.0f} MB"
+
+        if reload_art:
+            self._extra_line = None
+            # La carátula que se ve es la del juego anterior: se limpia y
+            # queda el placeholder hasta que llegue la nueva.
+            self._cover.set_filename(None)
+            self._refresh_subtitle()
+            self.load_cover_async()
+            self.load_extra_info_async()
+        else:
+            self._refresh_subtitle()
+
+    def _refresh_subtitle(self):
+        if self._extra_line:
+            self.set_subtitle(f"{self._extra_line}\n{self._base_subtitle}")
+        else:
+            self.set_subtitle(self._base_subtitle)
 
     def load_cover_async(self):
         """Descarga (o toma de caché) la carátula usando el pool compartido
@@ -183,9 +234,8 @@ class GameRow(Adw.ActionRow):
         if extra is None:
             return False
         label, title = extra
-        self.set_subtitle(
-            f"{label}: {GLib.markup_escape_text(title)}\n{self._base_subtitle}"
-        )
+        self._extra_line = f"{label}: {GLib.markup_escape_text(title)}"
+        self._refresh_subtitle()
         return False
 
 

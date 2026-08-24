@@ -189,6 +189,10 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self.list_box.set_selection_mode(Gtk.SelectionMode.NONE)
         self.list_box.add_css_class("boxed-list")
         self.list_box.set_filter_func(self._filter_row)
+        # El orden lo resuelve el propio ListBox reacomodando las filas que
+        # ya existen: cambiar el criterio no reconstruye nada. Ver
+        # `_on_sort_changed`.
+        self.list_box.set_sort_func(self._sort_rows)
 
         scroller = Gtk.ScrolledWindow()
         scroller.set_child(self.list_box)
@@ -296,7 +300,19 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self._update_selection_bar()
 
     def _selected_games(self) -> list[Game]:
-        return [row.game for row in self._rows.values() if row.is_selected()]
+        """Los juegos tildados, en el orden en que se ven en la lista.
+
+        Se recorre el ListBox y no `self._rows` porque ese diccionario está
+        en orden de aparición (una fila reusada de un escaneo anterior
+        queda donde estaba), mientras que lo que el usuario espera de una
+        acción en lote es que vaya de arriba hacia abajo de la pantalla."""
+        games = []
+        row = self.list_box.get_first_child()
+        while row is not None:
+            if isinstance(row, GameRow) and row.is_selected():
+                games.append(row.game)
+            row = row.get_next_sibling()
+        return games
 
     _BATCH_BUTTONS = (
         ("_batch_send_btn", OperationKind.TRANSFERRING),
@@ -931,57 +947,100 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         noun = "juego" if count == 1 else "juegos"
         self.library_status_label.set_label(f"{count} {noun} · {total_size}")
 
-    def _populate_list(self):
-        child = self.list_box.get_first_child()
-        while child is not None:
-            nxt = child.get_next_sibling()
-            self.list_box.remove(child)
-            child = nxt
-        self._rows.clear()
+    def _make_row(self, game: Game) -> GameRow:
+        row = GameRow(game, self.settings.cover_region)
+        row.connect("rename-requested", self._on_rename_requested)
+        row.connect("convert-requested", self._on_convert_requested)
+        row.connect("verify-requested", self._on_verify_requested)
+        row.connect("delete-requested", self._on_delete_requested)
+        row.connect("selection-toggled", lambda *_: self._update_selection_bar())
+        row.connect("detail-requested", self._on_game_detail_requested)
+        row.set_selection_mode(self.select_toggle.get_active())
+        row.load_cover_async()
+        row.load_extra_info_async()
+        return row
 
-        for game in self._games:
-            row = GameRow(game, self.settings.cover_region)
-            row.connect("rename-requested", self._on_rename_requested)
-            row.connect("convert-requested", self._on_convert_requested)
-            row.connect("verify-requested", self._on_verify_requested)
-            row.connect("delete-requested", self._on_delete_requested)
-            row.connect("selection-toggled", lambda *_: self._update_selection_bar())
-            row.connect("detail-requested", self._on_game_detail_requested)
-            row.set_selection_mode(self.select_toggle.get_active())
-            self.list_box.append(row)
-            self._rows[str(game.path)] = row
-            row.load_cover_async()
-            row.load_extra_info_async()
+    def _populate_list(self):
+        """Deja la lista mostrando exactamente `self._games`, reusando las
+        filas que ya están.
+
+        Un escaneo corre después de CADA operación, y antes esto tiraba las
+        300 filas y creaba 300 nuevas cada vez: casi un segundo de ventana
+        congelada, las carátulas volviendo a aparecer de a poco y la
+        selección en cero aunque los juegos fueran los mismos. Ahora se
+        borran solo las que ya no están, se actualizan las que siguen (una
+        conversión les cambia formato y tamaño) y se crean solo las nuevas.
+
+        No hace falta insertar en ninguna posición concreta: el orden lo
+        pone `_sort_rows` a través del ListBox."""
+        self._suspend_selection_updates = True
+        try:
+            wanted = {str(game.path): game for game in self._games}
+
+            for key in list(self._rows):
+                if key not in wanted:
+                    self.list_box.remove(self._rows.pop(key))
+
+            for key, game in wanted.items():
+                row = self._rows.get(key)
+                if row is None:
+                    row = self._make_row(game)
+                    self._rows[key] = row
+                    row.sort_key = self._sort_key(game)
+                    self.list_box.append(row)
+                else:
+                    row.update_game(game, self.settings.cover_region)
+                    row.sort_key = self._sort_key(game)
+        finally:
+            self._suspend_selection_updates = False
+        self.list_box.invalidate_sort()
+        self._update_selection_bar()
 
     # ------------------------------------------------------------ Orden --
-    def _apply_sort(self):
+    def _current_sort(self):
         idx = self.sort_dropdown.get_selected()
         if idx < 0 or idx >= len(SORT_OPTIONS):
             idx = 0
-        _label, key_fn, reverse = SORT_OPTIONS[idx]
+        return SORT_OPTIONS[idx]
+
+    def _sort_key(self, game: Game):
+        _label, key_fn, _reverse = self._current_sort()
+        return key_fn(game)
+
+    def _sort_rows(self, row_a, row_b) -> int:
+        """Comparador que usa el ListBox. Compara las claves ya calculadas
+        (`row.sort_key`) en vez de sacarlas del juego acá: GTK llama a esto
+        O(n log n) veces y uno de los criterios lee la fecha del archivo
+        del disco."""
+        _label, _key_fn, reverse = self._current_sort()
+        a, b = getattr(row_a, "sort_key", None), getattr(row_b, "sort_key", None)
+        if a == b:
+            return 0
+        if a is None or b is None:
+            # Fila todavía sin clave (no debería pasar: se asigna antes de
+            # insertarla). Se la deja donde está en vez de reventar el
+            # comparador y con él el orden de toda la lista.
+            return 0
+        order = -1 if a < b else 1
+        return -order if reverse else order
+
+    def _apply_sort(self):
+        """Ordena `self._games`, que es lo que se le pasa a la pestaña
+        Transferir y de donde salen las filas nuevas. Las filas ya
+        existentes las reordena el ListBox por su cuenta."""
+        _label, key_fn, reverse = self._current_sort()
         self._games.sort(key=key_fn, reverse=reverse)
 
     def _on_sort_changed(self, *_):
-        # Cambiar el criterio de orden reconstruye TODAS las filas, y con
-        # ellas sus casillas: sin esto, elegir doce juegos y después
-        # ordenar por tamaño para revisar la lista borraba la selección
-        # entera. Se guarda por ruta y no por game_id porque la ruta es lo
-        # que identifica a una fila: dos archivos del mismo juego (o varios
-        # sin identificar, todos con el mismo ID desconocido) no tienen que
-        # terminar seleccionados por haber elegido uno.
-        selected = {key for key, row in self._rows.items() if row.is_selected()}
-
+        # Sin reconstruir nada: se recalcula la clave de cada fila y el
+        # ListBox reacomoda los widgets que ya existen. Así el cambio de
+        # orden es instantáneo aunque haya cientos de juegos, y de paso no
+        # se pierden ni las casillas marcadas ni las carátulas ya cargadas,
+        # que era lo que pasaba cuando esto repoblaba la lista entera.
         self._apply_sort()
-        self._populate_list()
-
-        self._suspend_selection_updates = True
-        try:
-            for key, row in self._rows.items():
-                if key in selected:
-                    row.select_check.set_active(True)
-        finally:
-            self._suspend_selection_updates = False
-        self._update_selection_bar()
+        for row in self._rows.values():
+            row.sort_key = self._sort_key(row.game)
+        self.list_box.invalidate_sort()
 
     # ---------------------------------------------------------- Filter --
     def _on_search_changed(self, entry):
