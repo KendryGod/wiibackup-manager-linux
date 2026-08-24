@@ -184,10 +184,19 @@ def rename_to_standard(game: Game, dry_run: bool = False) -> Path:
 
 
 # Tamaño de bloque para la copia manual con progreso (_copy_with_progress).
-# 4 MiB: bastante grande para no perder tiempo en overhead de syscalls en
-# un archivo de varios GB, bastante chico para reportar progreso con
-# granularidad razonable.
-_COPY_CHUNK_BYTES = 4 * 1024 * 1024
+# 1 MiB: bastante grande para no perder tiempo en overhead de syscalls en
+# un archivo de varios GB, y bastante chico para que cancelar surta efecto
+# rápido, porque la cancelación se revisa una vez por bloque: con los
+# 4 MiB de antes, un USB lento (~10 MB/s) seguía escribiendo casi medio
+# segundo después de tocar "Cancelar", y en un pendrive malo varios
+# segundos.
+#
+# Medido con 1 GiB: entre 4 MiB y 256 KiB no hay diferencia de velocidad
+# fuera del ruido (~1.6 GB/s en las dos puntas), o sea que a estos tamaños
+# manda el disco, no la cantidad de syscalls. La granularidad del progreso
+# no depende de esto: `progress_cb` está limitado a una llamada por
+# segundo aparte.
+_COPY_CHUNK_BYTES = 1024 * 1024
 
 
 def _copy_with_progress(
