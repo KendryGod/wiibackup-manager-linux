@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 import threading
+import time
 import urllib.request
 import urllib.error
 import xml.etree.ElementTree as ET
@@ -494,15 +495,42 @@ def _load_wiitdb_index() -> dict[str, ET.Element]:
     return {}
 
 
+# Cuándo falló el último intento de armar el índice, y cuánto esperar
+# antes de reintentar. Sin esto, un arranque sin internet dejaba la app
+# entera sin metadata hasta cerrarla y volver a abrirla: el índice vacío
+# se memorizaba como resultado definitivo.
+_wiitdb_failed_at = 0.0
+_WIITDB_RETRY_SECONDS = 60.0
+
+
 def _ensure_wiitdb_index() -> dict[str, ET.Element]:
     """Descarga (si hace falta) y parsea wiitdb.xml una sola vez por
-    ejecución; llamadas siguientes reusan el índice ya armado en memoria."""
-    global _wiitdb_index
+    ejecución; llamadas siguientes reusan el índice ya armado en memoria.
+
+    Un intento que sale vacío (sin internet, servidor caído) NO se guarda
+    como resultado final: se reintenta pasado `_WIITDB_RETRY_SECONDS`, así
+    que si la conexión vuelve mientras la app está abierta, la metadata
+    aparece sola. El tiempo de espera está para no golpear al servidor una
+    vez por cada juego de la biblioteca."""
+    global _wiitdb_index, _wiitdb_failed_at
     with _wiitdb_lock:
-        if _wiitdb_index is not None:
+        if _wiitdb_index:
+            return _wiitdb_index
+        if (_wiitdb_index is not None
+                and time.monotonic() - _wiitdb_failed_at < _WIITDB_RETRY_SECONDS):
+            # Falló hace poco: no insistir todavía.
             return _wiitdb_index
         _wiitdb_index = _load_wiitdb_index()
+        if not _wiitdb_index:
+            _wiitdb_failed_at = time.monotonic()
         return _wiitdb_index
+
+
+def wiitdb_index_available() -> bool:
+    """True si el índice está armado y tiene juegos, o sea si una consulta
+    que devuelve None significa de verdad "GameTDB no lo tiene"."""
+    with _wiitdb_lock:
+        return bool(_wiitdb_index)
 
 
 def _locale_texts(game_el: ET.Element, tag: str) -> dict:
@@ -700,9 +728,16 @@ def _run_extra_info_job(key: tuple) -> None:
         info = get_game_extra_info(game_id, language)
     except Exception:
         info = None
+    # Un None puede significar dos cosas muy distintas: "GameTDB no tiene
+    # este juego" (definitivo, vale cachearlo) o "no se pudo bajar el
+    # volcado" (temporal: sin internet, servidor caído). Cachear el
+    # segundo como definitivo dejaba la biblioteca sin metadata para
+    # siempre aunque volviera la conexión.
+    definitivo = info is not None or wiitdb_index_available()
     with _extra_lock:
         callbacks = _extra_inflight.pop(key, [])
-        _extra_cache[key] = info
+        if definitivo:
+            _extra_cache[key] = info
     for cb in callbacks:
         try:
             cb(info)
