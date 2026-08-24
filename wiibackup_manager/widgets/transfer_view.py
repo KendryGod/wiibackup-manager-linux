@@ -639,15 +639,16 @@ class TransferView(Gtk.Box):
             self._show_toast("No hay juegos seleccionados.")
             return
 
-        # Chequeo de espacio ANTES de arrancar: el tamaño de origen es una
-        # cota superior razonable del tamaño final en WBFS (la conversión
-        # solo achica al descartar padding, nunca agranda), así que sirve
-        # para avisar de antemano sin tener que copiar/convertir primero.
-        total_bytes = sum(g.size_bytes for g in selected)
-        try:
-            free_bytes = shutil.disk_usage(self._dest_path).free
-        except OSError:
-            free_bytes = None
+        # Chequeo de espacio ANTES de arrancar, con lo que cada juego va a
+        # ocupar de verdad en el destino (ver `library.estimate_transfer_size`:
+        # para CISO/WDF el tamaño del archivo NO es una cota superior).
+        # Igual se vuelve a chequear antes de cada juego dentro del worker:
+        # el espacio libre va cambiando a medida que se copia.
+        total_bytes = sum(
+            library.estimate_transfer_size(g, self.settings.wit_binary)
+            for g in selected
+        )
+        free_bytes = library.free_space(self._dest_path)
 
         if free_bytes is not None and total_bytes > free_bytes:
             self._show_toast(
@@ -721,6 +722,9 @@ class TransferView(Gtk.Box):
             ok_count = 0
             err_count = 0
             skipped_count = 0
+            # Motivos concretos, no solo la cuenta: "1 con error" no le
+            # dice a nadie qué pasó ni con cuál juego.
+            error_msgs: list[str] = []
             bytes_done = 0
             start_time = time.monotonic()
             cancelled = False
@@ -743,6 +747,20 @@ class TransferView(Gtk.Box):
 
                 GLib.idle_add(self._update_progress, i, total, game.title,
                               bytes_done, total_bytes, start_time)
+                # El espacio libre cambia a medida que se copia: revisar
+                # antes de CADA juego evita quedarse sin lugar a mitad de
+                # la escritura y dejar un archivo cortado en la unidad.
+                necesario = library.estimate_transfer_size(game, wit_binary)
+                libres = library.free_space(dest_root)
+                if libres is not None and necesario > libres:
+                    err_count += 1
+                    error_msgs.append(
+                        f"{game.title}: no entra en el destino "
+                        f"(necesita {library.format_size(necesario)}, "
+                        f"quedan {library.format_size(libres)})"
+                    )
+                    continue
+
                 try:
                     library.send_to_wbfs_drive(game, dest_root, wit_binary,
                                                 bytes_progress_cb=on_game_progress,
@@ -757,7 +775,7 @@ class TransferView(Gtk.Box):
                     # El juego ya está en la unidad: ni éxito ni error, se
                     # cuenta aparte y se informa en el resumen final.
                     skipped_count += 1
-                except Exception:
+                except Exception as e:
                     if cancel.cancelled:
                         # El fallo es consecuencia de haber matado a `wit`
                         # al cancelar, no un error real de la copia.
@@ -766,9 +784,10 @@ class TransferView(Gtk.Box):
                     # Un juego que falla no frena el resto: se cuenta como
                     # error y se sigue con el siguiente de la selección.
                     err_count += 1
+                    error_msgs.append(f"{game.title}: {e}")
                 bytes_done += game.size_bytes
             GLib.idle_add(self._on_transfer_done, ok_count, err_count, cancelled,
-                          skipped_count, op, target)
+                          skipped_count, op, target, error_msgs)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -804,16 +823,21 @@ class TransferView(Gtk.Box):
         return False
 
     def _on_transfer_done(self, ok_count: int, err_count: int, cancelled: bool = False,
-                           skipped_count: int = 0, op=None, target: str = ""):
+                           skipped_count: int = 0, op=None, target: str = "",
+                           error_msgs: list | None = None):
         # El resultado que se le pasa a `finish` es lo que queda anotado en
         # la pestaña Log. Cancelado gana sobre el resto (lo pidió el
         # usuario); un lote con parte copiada y parte fallada queda como
         # "parcial", que no es lo mismo que no haber copiado nada.
+        error_msgs = error_msgs or []
         detail_parts = [f"{ok_count} ok"]
         if skipped_count:
             detail_parts.append(f"{skipped_count} ya estaban en el destino")
         if err_count:
-            detail_parts.append(f"{err_count} con error")
+            detalle = "; ".join(error_msgs[:3])
+            mas = f" (+{len(error_msgs) - 3} más)" if len(error_msgs) > 3 else ""
+            detail_parts.append(f"{err_count} con error: {detalle}{mas}"
+                                 if detalle else f"{err_count} con error")
         if cancelled:
             status = oplog.STATUS_CANCELLED
         elif not err_count:
@@ -833,7 +857,9 @@ class TransferView(Gtk.Box):
             msg = (f"Transferencia cancelada: {ok_count} ok, {err_count} con error"
                    f"{skipped_text} antes de cancelar.")
         elif err_count or skipped_count:
-            msg = f"Transferencia terminada: {ok_count} ok, {err_count} con error{skipped_text}."
+            motivo = f" ({'; '.join(error_msgs[:2])})" if error_msgs else ""
+            msg = (f"Transferencia terminada: {ok_count} ok, "
+                   f"{err_count} con error{skipped_text}.{motivo}")
         else:
             msg = f"Transferencia terminada: {ok_count} juego(s) copiados ✓"
         self._show_toast(msg)

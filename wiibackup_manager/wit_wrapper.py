@@ -662,6 +662,39 @@ def verify(
     return ok, output
 
 
+_ISOSIZE_LINE_RE = re.compile(r"^\s*(\d+)\s+(\d+)\s+\S")
+
+
+def iso_size_bytes(path: Path, binary: str = "wit") -> Optional[int]:
+    """Cuánto ocupa el juego de `path` como datos reales de disco, o None
+    si no se pudo averiguar.
+
+    Es la respuesta a "¿cuánto va a pesar esto una vez pasado a WBFS?",
+    que NO se puede deducir del tamaño del archivo cuando el origen es
+    CISO o WDF: esos formatos guardan el disco de forma compacta, así que
+    su tamaño en disco puede ser bastante menor que el WBFS resultante.
+
+    `wit ISOSIZE --long` lee la estructura del disco (no el archivo
+    entero): medido con juegos reales de 350 MB y 7.3 GB, tarda 0.02s.
+    La salida trae una línea por juego con bloques y MiB; se suman los
+    MiB, que cubre también el caso de un WBFS multi-juego."""
+    if not find_wit(binary):
+        return None
+    result = _run(binary, "ISOSIZE", "--long", str(path))
+    if result.returncode != 0:
+        return None
+    total_mib = 0
+    encontrado = False
+    for line in result.stdout.splitlines():
+        m = _ISOSIZE_LINE_RE.match(_strip_ansi(line))
+        if m:
+            total_mib += int(m.group(2))
+            encontrado = True
+    if not encontrado:
+        return None
+    return total_mib * 1024 * 1024
+
+
 def list_wbfs_container(path: Path, binary: str = "wit") -> list[DiscInfo]:
     """Lista todos los juegos dentro de un contenedor WBFS multi-juego."""
     if not find_wit(binary):

@@ -675,8 +675,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             "Enviando a unidad WBFS", "Cancelando el envío…")
 
         total = len(games)
-        total_bytes = sum(g.size_bytes for g in games)
         wit_binary = self.settings.wit_binary
+        total_bytes = sum(library.estimate_transfer_size(g, wit_binary) for g in games)
 
         def worker():
             ok = 0
@@ -701,6 +701,19 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
                 GLib.idle_add(self._update_send_progress, i, total, game.title,
                               bytes_done, total_bytes, start_time)
+
+                # Igual que en la pestaña Transferir: el espacio libre se
+                # revisa antes de cada juego, no una sola vez al principio.
+                necesario = library.estimate_transfer_size(game, wit_binary)
+                libres = library.free_space(dest_root)
+                if libres is not None and necesario > libres:
+                    errors.append(
+                        f"{game.title}: no entra en el destino "
+                        f"(necesita {library.format_size(necesario)}, "
+                        f"quedan {library.format_size(libres)})"
+                    )
+                    continue
+
                 try:
                     library.send_to_wbfs_drive(game, dest_root, wit_binary,
                                                 bytes_progress_cb=on_game_progress,

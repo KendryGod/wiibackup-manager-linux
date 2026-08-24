@@ -337,6 +337,51 @@ def wbfs_dest_path(game: Game, drive_root: Path) -> Path:
     return Path(drive_root) / "wbfs" / game_id / f"{game_id}.wbfs"
 
 
+# Un disco de Wii de una capa son 4.7 GB; los de doble capa, 8.5 GB. Se
+# usan como cota superior cuando no hay forma de saber el tamaño real.
+_WII_SINGLE_LAYER_BYTES = 4_699_979_776
+# Margen sobre el tamaño de datos que informa `wit`: el WBFS de destino
+# redondea a su tamaño de bloque y guarda su propia tabla, así que ocupa
+# un poco más que los datos puros (medido: ~1%).
+_WBFS_OVERHEAD = 1.05
+
+# Formatos cuyo tamaño de archivo NO es una cota superior del WBFS final:
+# guardan el disco de forma compacta y al pasarlos a WBFS pueden crecer.
+_COMPACT_FORMATS = {"CISO", "WDF"}
+
+
+def estimate_transfer_size(game: Game, wit_binary: str = "wit") -> int:
+    """Cuántos bytes va a ocupar `game` en la unidad de destino.
+
+    Antes se usaba directamente `game.size_bytes` con el argumento de que
+    "la conversión solo achica". Eso vale para un ISO plano (que trae todo
+    el padding del disco) pero NO para CISO ni WDF, que ya vienen
+    compactos: ahí el archivo puede pesar bastante menos que el WBFS que
+    va a generar, el chequeo previo de espacio pasaba igual y `wit`
+    fallaba a mitad de una transferencia larga con el disco lleno.
+
+    Se le pregunta a `wit` (barato: lee el header, no el archivo). Si no
+    se puede, se cae a la cota que corresponda: para ISO/WBFS el propio
+    tamaño del archivo sigue siendo una cota superior razonable; para los
+    formatos compactos, el tamaño de un disco de una capa, que es lo
+    mínimo honesto que se puede afirmar sin abrir el archivo."""
+    real = wit_wrapper.iso_size_bytes(game.path, wit_binary)
+    if real:
+        return int(real * _WBFS_OVERHEAD)
+    if game.fmt.upper() in _COMPACT_FORMATS:
+        return max(game.size_bytes, _WII_SINGLE_LAYER_BYTES)
+    return game.size_bytes
+
+
+def free_space(path: Path) -> Optional[int]:
+    """Bytes libres en el filesystem de `path`, o None si no se puede
+    saber (unidad desconectada a mitad de camino, por ejemplo)."""
+    try:
+        return shutil.disk_usage(path).free
+    except OSError:
+        return None
+
+
 def wbfs_dest_paths(games, drive_root: Path) -> list:
     """Las rutas que van a ocupar `games` dentro de `drive_root`.
 
