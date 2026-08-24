@@ -16,7 +16,8 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, Gtk  # noqa: E402
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gdk, Gtk  # noqa: E402
 
 # Estructura de nodos CSS de un Gtk.LevelBar continuo:
 #     levelbar > trough > block.filled  (+ block.empty)
@@ -75,3 +76,41 @@ def load_css() -> None:
     provider.load_from_data(APP_CSS)
     Gtk.StyleContext.add_provider_for_display(display, provider, _CSS_PRIORITY)
     _loaded = True
+
+
+# Apariencia elegida en Preferencias -> esquema de color de libadwaita.
+#
+# Se usa AdwStyleManager y no GtkSettings:gtk-application-prefer-dark-theme,
+# que es la propiedad vieja: libadwaita la ignora y avisa por consola
+# ("Using GtkSettings:gtk-application-prefer-dark-theme with libadwaita is
+# unsupported"). Ojo: ese aviso, si aparece, NO lo produce esta app sino la
+# configuración del escritorio (~/.config/gtk-4.0/settings.ini con
+# `gtk-application-prefer-dark-theme=1`), y libadwaita lo emite al
+# inicializarse, antes de que la app pueda ejecutar una sola línea: no hay
+# forma de silenciarlo desde acá, se saca borrando esa línea del
+# settings.ini.
+#
+# Por defecto va "system": una app no tiene por qué decidir el aspecto del
+# escritorio ajeno. Las otras dos opciones existen porque los temas GTK4 de
+# terceros reemplazan la hoja de estilos de libadwaita, y ahí el esquema
+# que libadwaita cree tener y lo que el tema realmente pinta pueden no
+# coincidir; poder forzarlo a mano es la salida cuando eso pasa.
+_COLOR_SCHEMES = {
+    "system": Adw.ColorScheme.DEFAULT,
+    "light": Adw.ColorScheme.FORCE_LIGHT,
+    "dark": Adw.ColorScheme.FORCE_DARK,
+}
+DEFAULT_COLOR_SCHEME = "system"
+
+COLOR_SCHEME_LABELS = [
+    ("system", "Sistema"),
+    ("light", "Claro"),
+    ("dark", "Oscuro"),
+]
+
+
+def apply_color_scheme(name: str) -> None:
+    """Aplica la apariencia elegida. Un valor desconocido (config.json
+    editado a mano) cae en la del sistema en vez de reventar."""
+    scheme = _COLOR_SCHEMES.get(name, _COLOR_SCHEMES[DEFAULT_COLOR_SCHEME])
+    Adw.StyleManager.get_default().set_color_scheme(scheme)

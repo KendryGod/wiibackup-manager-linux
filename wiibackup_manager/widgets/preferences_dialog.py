@@ -6,7 +6,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk  # noqa: E402
 
-from .. import config, wit_wrapper
+from .. import config, styles, wit_wrapper
 
 
 class PreferencesDialog(Adw.PreferencesDialog):
@@ -59,6 +59,24 @@ class PreferencesDialog(Adw.PreferencesDialog):
         self._regions = regions
         group3.add(region_row)
 
+        group4 = Adw.PreferencesGroup(title="Apariencia")
+        page.add(group4)
+        self._schemes = [key for key, _label in styles.COLOR_SCHEME_LABELS]
+        scheme_row = Adw.ComboRow(title="Tema")
+        scheme_row.set_subtitle(
+            "Solo tiene efecto con el tema estándar; un tema GTK de terceros "
+            "manda sobre esto."
+        )
+        scheme_row.set_model(
+            Gtk.StringList.new([label for _key, label in styles.COLOR_SCHEME_LABELS])
+        )
+        try:
+            scheme_row.set_selected(self._schemes.index(settings.color_scheme))
+        except ValueError:
+            scheme_row.set_selected(0)
+        scheme_row.connect("notify::selected", self._on_scheme_changed)
+        group4.add(scheme_row)
+
         self.connect("closed", lambda *_: self.on_saved(self.settings))
 
     def _pick_library_folder(self, *_):
@@ -93,3 +111,12 @@ class PreferencesDialog(Adw.PreferencesDialog):
         idx = row.get_selected()
         if 0 <= idx < len(self._regions):
             self.settings.cover_region = self._regions[idx]
+
+    def _on_scheme_changed(self, row, _param):
+        idx = row.get_selected()
+        if 0 <= idx < len(self._schemes):
+            self.settings.color_scheme = self._schemes[idx]
+            # Se aplica en el acto para que se vea el cambio mientras el
+            # diálogo sigue abierto; el guardado en disco lo hace la
+            # ventana al cerrarse (`on_saved`).
+            styles.apply_color_scheme(self.settings.color_scheme)

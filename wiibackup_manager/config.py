@@ -72,6 +72,9 @@ class Settings:
     cover_region: str = "EN"
     wit_binary: str = "wit"
     auto_scan_on_start: bool = True
+    # Apariencia: "system" (la del escritorio), "light" u "dark". Ver
+    # `styles.apply_color_scheme`.
+    color_scheme: str = "system"
 
     @classmethod
     def load(cls) -> "Settings":

@@ -11,7 +11,7 @@ gi.require_version("Adw", "1")
 gi.require_version("Gdk", "4.0")
 from gi.repository import Adw, Gtk, GLib, Gio, Gdk  # noqa: E402
 
-from . import __version__, config, library, operations, oplog, wit_wrapper
+from . import __version__, config, library, operations, oplog, styles, wit_wrapper
 from .disc_header import UNKNOWN_GAME_ID
 from .operations import OperationBusy, OperationKind, OperationOutcome
 
@@ -58,6 +58,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
         self.settings = config.Settings.load()
         config.ensure_dirs(self.settings)
+        styles.apply_color_scheme(self.settings.color_scheme)
 
         self._games: list[Game] = []
         self._rows: dict[str, GameRow] = {}
@@ -1555,6 +1556,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
     def _on_settings_saved(self, settings: config.Settings):
         settings.save()
         config.ensure_dirs(settings)
+        styles.apply_color_scheme(settings.color_scheme)
         self._library_available = config.library_path_available(settings)
         self._update_library_banner()
         self.rescan_library()
