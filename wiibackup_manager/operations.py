@@ -15,13 +15,13 @@ Este módulo es a propósito independiente de GTK: no importa nada de la
 interfaz, se puede probar sin levantar una ventana, y la interfaz se
 entera de los cambios registrando un listener.
 
-No es un candado global: dos operaciones que no se pisan (renombrar un
-juego mientras se escanea, o dos verificaciones de archivos distintos si
-ninguna otra cosa larga está en curso) siguen pudiendo correr juntas, y
-las descargas de carátulas ni pasan por acá: van por su propio pool en
-`gametdb` y siguen bajando aunque haya una operación en curso. Lo que se
-bloquea son las combinaciones peligrosas y las que se pelean por la barra
-de progreso, definidas en `_find_conflict`.
+No es un candado global: dos operaciones que no se pisan (verificar o
+borrar un juego mientras se convierte o se transfiere OTRO) siguen
+pudiendo correr juntas, y las descargas de carátulas ni pasan por acá:
+van por su propio pool en `gametdb` y siguen bajando aunque haya una
+operación en curso. Lo que se bloquea son las combinaciones peligrosas y
+las que se pelean por la barra de progreso, definidas en
+`_find_conflict`.
 """
 from __future__ import annotations
 
@@ -61,31 +61,38 @@ _EXCLUSIVE_KINDS = frozenset(
      OperationKind.TRANSFERRING, OperationKind.CONVERTING}
 )
 
-# Operaciones que además no conviven ENTRE SÍ, no solo con otra igual.
-# Todas actualizan la MISMA barra de progreso de la ventana principal:
-# corriendo dos a la vez el progreso salta de una a la otra y la primera
-# que termina esconde la barra mientras la otra sigue trabajando.
+# Tipos que SIEMPRE ocupan la barra de progreso, arranquen desde donde
+# arranquen. Dos de estas a la vez hacen que el progreso salte de una a la
+# otra y que la primera en terminar esconda la barra mientras la otra
+# sigue trabajando, así que no conviven entre sí.
 #
-# Verificar y eliminar entran acá por sus versiones en lote, que sí usan
-# esa barra (van por `_run_batch`). Sueltas, sobre un solo juego, no la
-# tocan: el precio de meterlas igual es que tampoco se pueda verificar o
-# borrar un juego suelto mientras se convierte o se transfiere otro. Se
-# eligió eso, y no distinguir "en lote" de "suelta" con una bandera
-# aparte, porque la regla queda entendible de una sola lectura y porque
-# las dos son operaciones pesadas sobre el mismo disco: serializarlas no
-# le hace mal a nadie.
+# Verificar y eliminar NO están acá porque depende de cómo se las use: en
+# lote muestran progreso (van por `_run_batch`) y sobre un solo juego no
+# (verificar un archivo no reporta avance, y borrarlo es instantáneo). Esa
+# diferencia la marca quien arranca la operación, con
+# `uses_progress_bar=True`, en vez de castigar al caso suelto: verificar o
+# borrar un juego mientras se convierte otro distinto es algo que se hace
+# todo el tiempo preparando varias unidades seguidas, y no se pisa con
+# nada -- si el archivo es el mismo, ahí lo frena la regla 3, que es la
+# que corresponde.
 #
-# El escaneo queda afuera a propósito: no es una acción que el usuario
-# pida (corre solo, después de cada operación y cuando la unidad de la
-# biblioteca aparece), la regla 2 de abajo ya lo separa de todo lo que
-# escribe archivos, y bloquearlo acá haría que un escaneo automático
-# quedara postergado detrás de cada transferencia de la pestaña
-# Transferir, que ni siquiera usa esta barra sino la suya.
+# El escaneo también dibuja en esa barra pero queda afuera a propósito: no
+# es una acción que el usuario pida (corre solo, después de cada operación
+# y cuando la unidad de la biblioteca aparece), la regla 2 de abajo ya lo
+# separa de todo lo que escribe archivos, y bloquearlo acá haría que un
+# escaneo automático quedara postergado detrás de cada transferencia de la
+# pestaña Transferir, que ni siquiera usa esta barra sino la suya.
 _SHARED_PROGRESS_KINDS = frozenset(
     {OperationKind.IMPORTING, OperationKind.TRANSFERRING,
-     OperationKind.CONVERTING, OperationKind.VERIFYING,
-     OperationKind.DELETING}
+     OperationKind.CONVERTING}
 )
+
+
+def _uses_progress_bar(kind: OperationKind, declared: bool) -> bool:
+    """Si esta operación ocupa la barra de progreso: por ser de un tipo
+    que siempre la usa, o porque quien la arranca lo declaró (el caso de
+    los lotes de verificar y eliminar)."""
+    return declared or kind in _SHARED_PROGRESS_KINDS
 
 
 @dataclass(frozen=True)
@@ -96,6 +103,9 @@ class Operation:
     id: int
     kind: OperationKind
     paths: frozenset
+    # Si esta operación está ocupando la barra de progreso de la ventana.
+    # Ver `_uses_progress_bar` y la regla 1b de `_find_conflict`.
+    uses_progress_bar: bool = False
 
     @property
     def label(self) -> str:
@@ -185,24 +195,27 @@ class OperationManager:
             return any(op.paths & target for op in self._active.values())
 
     # --------------------------------------------------------- Conflictos --
-    def _find_conflict(self, kind: OperationKind, paths: frozenset):
+    def _find_conflict(self, kind: OperationKind, paths: frozenset,
+                        uses_progress_bar: bool = False):
         """Devuelve (operación_que_bloquea, motivo) o None si se puede
         arrancar. Las reglas, en orden:
 
         1. De las operaciones "exclusivas" (escanear, importar, transferir,
            convertir) puede haber solo una a la vez de cada tipo.
-        1b. Las que comparten la barra de progreso de la ventana
-           (importar, transferir, convertir, verificar, eliminar) tampoco
-           conviven entre sí.
+        1b. Dos operaciones que ocupan la barra de progreso no conviven
+           (ver `_uses_progress_bar`). Verificar o borrar un juego suelto
+           no ocupa la barra, así que no entra por acá: para esas dos
+           manda la regla 3, o sea el archivo concreto.
         2. Escanear no convive con nada que escriba archivos: el escaneo
            llegaría a ver archivos a medio escribir y los identificaría mal.
         3. Dos operaciones que tocan el mismo archivo solo conviven si
            ninguna de las dos lo modifica."""
+        wants_bar = _uses_progress_bar(kind, uses_progress_bar)
         for op in self._active.values():
             if kind in _EXCLUSIVE_KINDS and op.kind is kind:
                 return op, f"ya hay una operación de este tipo en curso ({op.label})"
 
-            if kind in _SHARED_PROGRESS_KINDS and op.kind in _SHARED_PROGRESS_KINDS:
+            if wants_bar and op.uses_progress_bar:
                 return op, (
                     "hay otra operación larga en curso y las dos comparten la "
                     f"misma barra de progreso ({op.label})"
@@ -222,35 +235,47 @@ class OperationManager:
 
         return None
 
-    def conflict_for(self, kind: OperationKind, paths: Iterable = ()):
+    def conflict_for(self, kind: OperationKind, paths: Iterable = (),
+                      uses_progress_bar: bool = False):
         """Como `_find_conflict` pero pública y con las rutas sin
         normalizar: devuelve la operación que bloquea, o None."""
         normalized = _normalize(paths)
         with self._lock:
-            found = self._find_conflict(kind, normalized)
+            found = self._find_conflict(kind, normalized, uses_progress_bar)
         return found[0] if found else None
 
-    def check(self, kind: OperationKind, paths: Iterable = ()) -> None:
+    def check(self, kind: OperationKind, paths: Iterable = (),
+               uses_progress_bar: bool = False) -> None:
         """Levanta `OperationBusy` si `kind` sobre `paths` no puede
         arrancar ahora. Sirve para revalidar justo antes de tocar el disco
         en un flujo con diálogo de por medio, donde entre que el usuario
-        confirma y se ejecuta pudo arrancar otra cosa."""
+        confirma y se ejecuta pudo arrancar otra cosa.
+
+        `uses_progress_bar` tiene que valer lo mismo que en el `start` que
+        venga después: si no, se chequea una cosa y se arranca otra."""
         normalized = _normalize(paths)
         with self._lock:
-            found = self._find_conflict(kind, normalized)
+            found = self._find_conflict(kind, normalized, uses_progress_bar)
         if found is not None:
             raise OperationBusy(found[0], found[1])
 
     # ------------------------------------------------------ Ciclo de vida --
-    def start(self, kind: OperationKind, paths: Iterable = ()) -> Operation:
+    def start(self, kind: OperationKind, paths: Iterable = (),
+               uses_progress_bar: bool = False) -> Operation:
         """Registra una operación nueva y la devuelve. Levanta
-        `OperationBusy` si choca con algo en curso."""
+        `OperationBusy` si choca con algo en curso.
+
+        `uses_progress_bar=True` lo pasan las operaciones que muestran
+        progreso en la ventana principal y que no son de un tipo que
+        siempre lo haga: en la práctica, los lotes de verificar y
+        eliminar. Ver `_uses_progress_bar`."""
         normalized = _normalize(paths)
         with self._lock:
-            found = self._find_conflict(kind, normalized)
+            found = self._find_conflict(kind, normalized, uses_progress_bar)
             if found is not None:
                 raise OperationBusy(found[0], found[1])
-            op = Operation(id=self._next_id, kind=kind, paths=normalized)
+            op = Operation(id=self._next_id, kind=kind, paths=normalized,
+                           uses_progress_bar=_uses_progress_bar(kind, uses_progress_bar))
             self._next_id += 1
             self._active[op.id] = op
         self._notify()

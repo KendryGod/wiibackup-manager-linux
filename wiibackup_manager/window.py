@@ -368,12 +368,17 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         return OperationOutcome(status=status, target=target,
                                  detail=" · ".join(detail_parts))
 
-    def _reject_if_busy(self, kind: OperationKind, paths=()) -> bool:
+    def _reject_if_busy(self, kind: OperationKind, paths=(),
+                         uses_progress_bar: bool = False) -> bool:
         """True (y avisa al usuario) si la acción pedida choca con algo en
         curso. Se usa en los flujos que arrancan desde el menú de una fila,
-        donde no hay un botón que deshabilitar."""
+        donde no hay un botón que deshabilitar.
+
+        `uses_progress_bar` tiene que coincidir con el `start` posterior:
+        los lotes de verificar/eliminar lo pasan en True porque muestran
+        progreso, las mismas acciones sobre un juego suelto no."""
         try:
-            self.ops.check(kind, paths)
+            self.ops.check(kind, paths, uses_progress_bar)
         except OperationBusy as e:
             self._show_toast(f"No se puede ahora: {e.detail}.")
             return True
@@ -428,9 +433,16 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
         `kind` es el tipo de operación con el que se registra el lote
         entero en el OperationManager, para que nada más toque esos
-        archivos mientras dure."""
+        archivos mientras dure.
+
+        Se registra con `uses_progress_bar=True`: este runner sí muestra
+        progreso en la ventana, así que un lote de verificar o eliminar no
+        puede solaparse con una conversión o una transferencia aunque sean
+        archivos distintos. Las mismas acciones sobre un juego suelto no
+        pasan por acá y no reservan la barra."""
         try:
-            op = self.ops.start(kind, [g.path for g in games])
+            op = self.ops.start(kind, [g.path for g in games],
+                                 uses_progress_bar=True)
         except OperationBusy as e:
             self._show_toast(f"No se puede ahora: {e.detail}.")
             return
@@ -751,7 +763,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         games = self._selected_games()
         if not games:
             return
-        if self._reject_if_busy(OperationKind.VERIFYING, [g.path for g in games]):
+        if self._reject_if_busy(OperationKind.VERIFYING, [g.path for g in games],
+                                 uses_progress_bar=True):
             return
         if not wit_wrapper.is_available(self.settings.wit_binary):
             self._show_toast("No se encontró 'wit'. Instalalo para poder verificar (ver README).")
@@ -771,7 +784,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         # Chequeo antes de abrir el diálogo (y otra vez al confirmar, en
         # `_on_batch_delete_confirmed`): no tiene sentido preguntar por algo
         # que no se va a poder hacer.
-        if self._reject_if_busy(OperationKind.DELETING, [g.path for g in games]):
+        if self._reject_if_busy(OperationKind.DELETING, [g.path for g in games],
+                                 uses_progress_bar=True):
             return
         names = "\n".join(g.path.name for g in games[:8])
         if len(games) > 8:
@@ -791,7 +805,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         if response != "delete":
             return
         # Igual que en el borrado individual: revalidar después del diálogo.
-        if self._reject_if_busy(OperationKind.DELETING, [g.path for g in games]):
+        if self._reject_if_busy(OperationKind.DELETING, [g.path for g in games],
+                                 uses_progress_bar=True):
             return
 
         def delete_one(g: Game):
