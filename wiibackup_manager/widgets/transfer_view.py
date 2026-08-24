@@ -233,13 +233,30 @@ class TransferView(Gtk.Box):
         self._update_operation_ui()
 
     def _update_operation_ui(self):
-        """Apaga el botón de transferir mientras haya cualquier operación en
-        curso (propia o de la Biblioteca): son los mismos archivos."""
-        busy_label = self.ops.busy_label()
-        self.transfer_button.set_sensitive(busy_label is None)
+        """Apaga el botón de transferir solo si ESTA transferencia no puede
+        arrancar ahora, no porque haya cualquier cosa en curso.
+
+        Antes miraba `busy_label()`: una verificación suelta de un juego
+        que ni siquiera está en la selección dejaba el botón gris. Ahora se
+        le pregunta al gestor por la operación concreta, con los archivos
+        elegidos, igual que hacen los botones de la Biblioteca. Una
+        conversión o una importación siguen apagándolo: comparten la barra
+        de progreso con la transferencia y no pueden convivir (ver
+        `_SHARED_PROGRESS_KINDS` en operations.py).
+
+        El `is_busy()` de arranque evita resolver las rutas de toda la
+        selección en el caso normal: esto se recalcula en cada casilla que
+        el usuario toca."""
+        blocker = None
+        if self.ops.is_busy():
+            blocker = self.ops.conflict_for(
+                OperationKind.TRANSFERRING,
+                [game.path for game in self._selected_games()],
+            )
+        self.transfer_button.set_sensitive(blocker is None)
         self.transfer_button.set_tooltip_text(
-            f"Hay una operación en curso: {busy_label}. Esperá a que termine."
-            if busy_label else None
+            f"Hay una operación en curso: {blocker.label}. Esperá a que termine."
+            if blocker else None
         )
         return False
 
@@ -458,9 +475,17 @@ class TransferView(Gtk.Box):
 
         for game in games:
             row = TransferGameRow(game, self.settings.cover_region)
+            # Tildar o destildar cambia qué archivos tocaría la
+            # transferencia, y con eso si choca o no con lo que esté
+            # corriendo: hay que revisar el botón.
+            row.check.connect("toggled", lambda *_: self._update_operation_ui())
             self.game_list.append(row)
             self._game_rows.append(row)
             row.load_cover_async()
+        self._update_operation_ui()
+
+    def _selected_games(self) -> list[Game]:
+        return [row.game for row in self._game_rows if row.check.get_active()]
 
     def _set_all_selected(self, value: bool):
         for row in self._game_rows:
@@ -472,7 +497,7 @@ class TransferView(Gtk.Box):
             self._show_toast("Elegí primero una unidad o carpeta destino.")
             return
 
-        selected = [row.game for row in self._game_rows if row.check.get_active()]
+        selected = self._selected_games()
         if not selected:
             self._show_toast("No hay juegos seleccionados.")
             return
