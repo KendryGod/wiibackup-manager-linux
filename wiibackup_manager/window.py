@@ -1487,13 +1487,24 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         def worker():
             added: list[str] = []
             skipped: list[str] = []
+            # Un archivo que no se pudo identificar o que no se pudo copiar
+            # NO es un "no pasó nada": antes los dos casos hacían `continue`
+            # en silencio y el resumen decía "completado" igual, así que el
+            # historial -que existe justamente para poder confiar en él-
+            # informaba 7 importados cuando 2 habían fallado.
+            errors: list[str] = []
             total = len(plan)
 
             for i, (src, dest) in enumerate(plan, start=1):
                 GLib.idle_add(self.progress_bar.set_fraction, i / max(total, 1))
 
-                game = library.identify_file(src, self.settings.wit_binary)
+                try:
+                    game = library.identify_file(src, self.settings.wit_binary)
+                except Exception as e:
+                    errors.append(f"{src.name}: no se pudo leer ({e})")
+                    continue
                 if game is None:
+                    errors.append(f"{src.name}: no se pudo identificar el juego")
                     continue
 
                 if game.game_id != UNKNOWN_GAME_ID and game.game_id in known_ids:
@@ -1503,28 +1514,32 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 if not self._is_same_file(src, dest):
                     try:
                         _shutil.copy2(src, dest)
-                    except OSError:
+                    except OSError as e:
+                        errors.append(f"{game.title}: no se pudo copiar ({e.strerror or e})")
                         continue
 
                 if game.game_id != UNKNOWN_GAME_ID:
                     known_ids.add(game.game_id)
                 added.append(game.title)
 
-            GLib.idle_add(self._on_import_done, added, skipped, renamed, op)
+            GLib.idle_add(self._on_import_done, added, skipped, renamed, op, errors)
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_import_done(self, added: list[str], skipped: list[str],
-                         renamed: list[str] | None = None, op=None):
-        # Importar no tiene "errores" que contar (un archivo que no se
-        # pudo copiar se saltea en el worker), así que el resultado es
-        # siempre ok: lo que interesa registrar es cuántos entraron.
+                         renamed: list[str] | None = None, op=None,
+                         errors: list[str] | None = None):
         renamed = renamed or []
+        errors = errors or []
         detail_parts = [f"{len(added)} agregado(s)"]
         if skipped:
             detail_parts.append(f"{len(skipped)} ya estaban en la biblioteca")
         if renamed:
             detail_parts.append(f"{len(renamed)} renombrado(s) para no pisar otro archivo")
+        if errors:
+            preview = "; ".join(errors[:3])
+            mas = f" (+{len(errors) - 3} más)" if len(errors) > 3 else ""
+            detail_parts.append(f"{len(errors)} con error: {preview}{mas}")
         # "ningún juego" y no "0 juegos": cuando todos los archivos ya
         # estaban en la biblioteca (o ninguno se pudo identificar) la
         # entrada del historial quedaba como "Agregando juegos · 0 juegos",
@@ -1535,8 +1550,19 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             target = added[0]
         else:
             target = f"{len(added)} juegos"
+
+        # El estado tiene que reflejar lo que pasó de verdad: "completada"
+        # con dos archivos que no entraron es exactamente la clase de dato
+        # falso que hace que un historial no sirva para nada.
+        if not errors:
+            status = oplog.STATUS_OK
+        elif added or skipped:
+            status = oplog.STATUS_PARTIAL
+        else:
+            status = oplog.STATUS_ERROR
+
         self.ops.finish(op, OperationOutcome(
-            status=oplog.STATUS_OK,
+            status=status,
             target=target,
             detail=" · ".join(detail_parts),
         ))
@@ -1557,6 +1583,10 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             else:
                 parts.append(f"{len(renamed)} se guardaron con otro nombre para no pisar "
                              "archivos que ya estaban")
+        if errors:
+            preview = "; ".join(errors[:2])
+            mas = f" (+{len(errors) - 2} más, ver la pestaña Log)" if len(errors) > 2 else ""
+            parts.append(f"{len(errors)} con error: {preview}{mas}")
         if not parts:
             parts.append("No se agregó ningún juego nuevo")
         self._show_toast(". ".join(parts) + ".")
