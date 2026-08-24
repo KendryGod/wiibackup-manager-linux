@@ -345,16 +345,49 @@ def wiitdb_cache_path() -> Path:
     return config.CACHE_DIR / "wiitdb.xml"
 
 
-def _download_wiitdb() -> Optional[Path]:
+def _xml_is_well_formed(data: bytes) -> bool:
+    """True si `data` es XML parseable de punta a punta.
+
+    Se valida por partes con un parser incremental en vez de con
+    `ET.fromstring`: el volcado son 30+ MB y armar el árbol entero solo
+    para tirarlo duplicaría el pico de memoria justo cuando después hay
+    que armar el índice de verdad. Los elementos ya cerrados se vacían a
+    medida que aparecen, así que la validación no acumula el documento."""
+    parser = ET.XMLPullParser(events=("end",))
+    try:
+        for start in range(0, len(data), 1024 * 1024):
+            parser.feed(data[start:start + 1024 * 1024])
+            for _event, element in parser.read_events():
+                element.clear()
+        parser.close()
+    except ET.ParseError:
+        return False
+    return True
+
+
+def _download_wiitdb(force: bool = False) -> Optional[Path]:
     """Descarga el volcado de GameTDB y deja wiitdb.xml en la caché.
 
     Lo que se baja es un ZIP con un único miembro (wiitdb.xml), así que
     hay un paso de descompresión antes de guardar. Devuelve la ruta del
     XML ya listo, o None si algo falló (sin red, servidor caído, ZIP
-    corrupto): en ese caso la app sigue andando sin metadata extendida."""
+    corrupto): en ese caso la app sigue andando sin metadata extendida.
+
+    Con `force=True` se ignora (y se borra) lo que haya en la caché y se
+    baja de nuevo. Lo usa `_load_wiitdb_index` cuando el XML cacheado
+    resulta ilegible: sin eso, una caché corrupta -de una descarga
+    interrumpida por una versión vieja de la app, o de un disco que se
+    llenó a mitad de escritura- dejaba el índice vacío para siempre y ni
+    la sinopsis ni los controles volvían a aparecer nunca más, sin
+    ninguna forma de arreglarlo desde la interfaz."""
     path = wiitdb_cache_path()
     if path.exists():
-        return path
+        if not force:
+            return path
+        try:
+            path.unlink()
+        except OSError:
+            return None
 
     config.CACHE_DIR.mkdir(parents=True, exist_ok=True)
     try:
@@ -379,6 +412,15 @@ def _download_wiitdb() -> Optional[Path]:
     except (zipfile.BadZipFile, KeyError, OSError, EOFError):
         return None
 
+    # Validar ANTES de dejarlo como caché buena: `zf.read` ya verifica el
+    # CRC del miembro, pero eso no dice nada de una descarga que quedó
+    # cortada de una versión anterior de la app ni de un XML que el
+    # servidor haya publicado mal. Un archivo que no parsea guardado como
+    # caché válida es exactamente lo que dejaba el índice vacío para
+    # siempre.
+    if not _xml_is_well_formed(xml_bytes):
+        return None
+
     # Escribir a un temporal y mover: si el proceso se corta a mitad de la
     # escritura (30+ MB), no queremos dejar un wiitdb.xml truncado que
     # después ET.parse() no pueda leer y quede cacheado como "ya existe"
@@ -392,18 +434,43 @@ def _download_wiitdb() -> Optional[Path]:
     return path
 
 
-def _build_index(path: Path) -> dict[str, ET.Element]:
-    index: dict[str, ET.Element] = {}
+def _build_index(path: Path) -> Optional[dict[str, ET.Element]]:
+    """Índice por Game ID del XML de `path`, o None si el archivo no se
+    puede parsear.
+
+    None y "diccionario vacío" son casos distintos a propósito: el
+    primero significa "esta caché no sirve, bajala de nuevo" y el segundo
+    "el XML se leyó bien pero no tenía juegos adentro"."""
     try:
         tree = ET.parse(path)
-    except ET.ParseError:
-        return index
+    except (ET.ParseError, OSError):
+        return None
 
+    index: dict[str, ET.Element] = {}
     for game_el in tree.getroot().iter("game"):
         id_el = game_el.find("id")
         if id_el is not None and id_el.text:
             index[id_el.text.strip()] = game_el
     return index
+
+
+def _load_wiitdb_index() -> dict[str, ET.Element]:
+    """Índice de wiitdb.xml, bajando el volcado si hace falta.
+
+    El primer intento usa lo que haya en la caché. Si ese archivo no
+    parsea (descarga interrumpida, disco lleno, archivo pisado), se lo
+    descarta y se baja de nuevo una única vez: reintentar en un bucle no
+    tendría sentido, porque si el segundo archivo tampoco parsea el
+    problema no es la caché. Sin este reintento, una caché rota se
+    quedaba pegada para siempre y la metadata extendida no volvía nunca."""
+    for attempt in (1, 2):
+        path = _download_wiitdb(force=attempt == 2)
+        if path is None:
+            return {}
+        index = _build_index(path)
+        if index is not None:
+            return index
+    return {}
 
 
 def _ensure_wiitdb_index() -> dict[str, ET.Element]:
@@ -413,8 +480,7 @@ def _ensure_wiitdb_index() -> dict[str, ET.Element]:
     with _wiitdb_lock:
         if _wiitdb_index is not None:
             return _wiitdb_index
-        path = _download_wiitdb()
-        _wiitdb_index = _build_index(path) if path is not None else {}
+        _wiitdb_index = _load_wiitdb_index()
         return _wiitdb_index
 
 
