@@ -676,9 +676,24 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
         total = len(games)
         wit_binary = self.settings.wit_binary
-        total_bytes = sum(library.estimate_transfer_size(g, wit_binary) for g in games)
 
         def worker():
+            # El plan (cuánto va a ocupar cada juego en el destino) se arma
+            # acá y no en el hilo de GTK: implica preguntarle a `wit` por
+            # cada juego y con un lote grande congelaría la ventana.
+            GLib.idle_add(self.progress_bar.set_text, "Calculando espacio necesario…")
+            plan = library.plan_transfer(games, wit_binary)
+            total_bytes = sum(item.output_bytes for item in plan)
+            libres_ahora = library.free_space(dest_root)
+            if libres_ahora is not None and total_bytes > libres_ahora:
+                GLib.idle_add(
+                    self._on_send_done, 0,
+                    [f"No entra en el destino: se necesitan "
+                     f"{library.format_size(total_bytes)} y hay "
+                     f"{library.format_size(libres_ahora)} libres"],
+                    False, [], op, self._describe_target(games))
+                return
+
             ok = 0
             errors: list[str] = []
             skipped: list[str] = []
@@ -690,19 +705,20 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             bytes_skipped = 0
             start_time = time.monotonic()
             cancelled = False
-            for i, game in enumerate(games, start=1):
+            for i, item in enumerate(plan, start=1):
+                game = item.game
                 if cancel.cancelled:
                     cancelled = True
                     break
                 base_bytes_done = bytes_written + bytes_failed + bytes_skipped
 
-                def on_game_progress(current: int, _base=base_bytes_done, _game=game,
+                def on_game_progress(current: int, _base=base_bytes_done, _item=item,
                                       _written=bytes_written):
-                    # Tope al 97%: es una estimación por tamaño de archivo,
+                    # Tope al 97%: es una estimación del tamaño de salida,
                     # y wit puede seguir cerrando/renombrando un instante
                     # más después de escribir el último byte.
-                    est = min(current, int(_game.size_bytes * 0.97))
-                    GLib.idle_add(self._update_send_progress, i, total, _game.title,
+                    est = min(current, int(_item.output_bytes * 0.97))
+                    GLib.idle_add(self._update_send_progress, i, total, _item.game.title,
                                   _base + est, _written + est, total_bytes, start_time)
 
                 GLib.idle_add(self._update_send_progress, i, total, game.title,
@@ -711,7 +727,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
                 # Igual que en la pestaña Transferir: el espacio libre se
                 # revisa antes de cada juego, no una sola vez al principio.
-                necesario = library.estimate_transfer_size(game, wit_binary)
+                necesario = item.output_bytes
                 libres = library.free_space(dest_root)
                 if libres is not None and necesario > libres:
                     errors.append(
@@ -719,7 +735,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                         f"(necesita {library.format_size(necesario)}, "
                         f"quedan {library.format_size(libres)})"
                     )
-                    bytes_failed += game.size_bytes
+                    bytes_failed += item.output_bytes
                     continue
 
                 try:
@@ -727,7 +743,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                                                 bytes_progress_cb=on_game_progress,
                                                 overwrite=overwrite, cancel=cancel)
                     ok += 1
-                    bytes_written += game.size_bytes
+                    bytes_written += item.output_bytes
                 except wit_wrapper.OperationCancelled:
                     # Cancelado a mitad de ESTE juego: no es un error, y no
                     # se sigue con los que faltaban.
@@ -737,7 +753,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                     # El juego ya está en la unidad: no es un error ni un
                     # éxito, se informa aparte en el resumen final.
                     skipped.append(game.title)
-                    bytes_skipped += game.size_bytes
+                    bytes_skipped += item.output_bytes
                 except Exception as e:
                     if cancel.cancelled:
                         # El fallo es consecuencia de haber matado a `wit`
@@ -747,7 +763,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                     # No frena el resto de la selección: se cuenta como
                     # error y se sigue con el siguiente juego.
                     errors.append(f"{game.title}: {e}")
-                    bytes_failed += game.size_bytes
+                    bytes_failed += item.output_bytes
             GLib.idle_add(self._on_send_done, ok, errors, cancelled, skipped, op,
                           self._describe_target(games))
 

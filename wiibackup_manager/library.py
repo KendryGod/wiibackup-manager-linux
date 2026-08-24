@@ -423,7 +423,13 @@ def wbfs_dest_path(game: Game, drive_root: Path) -> Path:
 _WII_SINGLE_LAYER_BYTES = 4_699_979_776
 # Margen sobre el tamaño de datos que informa `wit`: el WBFS de destino
 # redondea a su tamaño de bloque y guarda su propia tabla, así que ocupa
-# un poco más que los datos puros (medido: ~1%).
+# un poco más que los datos puros (medido: ~1%; se usa 5% para no andar
+# al filo).
+#
+# Es una heurística conservadora, no una garantía matemática: el número
+# exacto depende del tamaño de bloque que elija `wit` y de si divide el
+# archivo. Por eso el espacio libre se vuelve a comprobar antes de cada
+# juego en vez de confiar en una única cuenta hecha al principio.
 _WBFS_OVERHEAD = 1.05
 
 # Formatos cuyo tamaño de archivo NO es una cota superior del WBFS final:
@@ -452,6 +458,39 @@ def estimate_transfer_size(game: Game, wit_binary: str = "wit") -> int:
     if game.fmt.upper() in _COMPACT_FORMATS:
         return max(game.size_bytes, _WII_SINGLE_LAYER_BYTES)
     return game.size_bytes
+
+
+@dataclass(frozen=True)
+class TransferItem:
+    """Un juego dentro de una transferencia, con sus DOS tamaños.
+
+    Confundirlos es fácil y da números falsos: `source_bytes` es lo que
+    pesa el archivo de origen (lo que se lee) y `output_bytes` lo que va a
+    ocupar en el destino (lo que se escribe). Para un ISO plano el
+    segundo es menor -el WBFS descarta el padding-, y para un CISO o un
+    WDF es al revés, porque esos ya vienen compactos. El chequeo de
+    espacio y la barra de progreso tienen que hablar de lo que se ESCRIBE;
+    usar el tamaño del archivo de origen para las dos cosas hacía que en
+    CISO/WDF la barra y el tiempo restante no tuvieran nada que ver con
+    la realidad."""
+
+    game: "Game"
+    source_bytes: int
+    output_bytes: int
+
+
+def plan_transfer(games, wit_binary: str = "wit") -> list:
+    """Arma los `TransferItem` de un lote.
+
+    OJO: esto puede tardar. Le pregunta a `wit` por cada juego (barato,
+    milisegundos) pero con un archivo dañado o una unidad lenta puede
+    demorar, así que va SIEMPRE en un hilo de fondo: llamarlo desde el
+    hilo de GTK congela la ventana entera."""
+    return [
+        TransferItem(game=game, source_bytes=game.size_bytes,
+                     output_bytes=estimate_transfer_size(game, wit_binary))
+        for game in games
+    ]
 
 
 def free_space(path: Path) -> Optional[int]:

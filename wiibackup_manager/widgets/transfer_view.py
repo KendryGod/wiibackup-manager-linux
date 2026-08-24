@@ -638,26 +638,10 @@ class TransferView(Gtk.Box):
             self._show_toast("No hay juegos seleccionados.")
             return
 
-        # Chequeo de espacio ANTES de arrancar, con lo que cada juego va a
-        # ocupar de verdad en el destino (ver `library.estimate_transfer_size`:
-        # para CISO/WDF el tamaño del archivo NO es una cota superior).
-        # Igual se vuelve a chequear antes de cada juego dentro del worker:
-        # el espacio libre va cambiando a medida que se copia.
-        total_bytes = sum(
-            library.estimate_transfer_size(g, self.settings.wit_binary)
-            for g in selected
-        )
-        free_bytes = library.free_space(self._dest_path)
-
-        if free_bytes is not None and total_bytes > free_bytes:
-            self._show_toast(
-                f"No hay espacio suficiente en el destino: se necesitan "
-                f"{library.format_size(total_bytes)} y hay {library.format_size(free_bytes)} libres "
-                f"(faltan {library.format_size(total_bytes - free_bytes)}). "
-                "Liberá espacio o elegí menos juegos."
-            )
-            return
-
+        # El chequeo de espacio NO se hace acá: calcular cuánto va a ocupar
+        # cada juego implica preguntarle a `wit` por cada uno, y con un
+        # lote grande (o un archivo dañado) eso congelaría la ventana. Lo
+        # hace el worker antes de copiar nada, mostrando "Calculando…".
         dest_root = self._dest_path
 
         # Con un solo juego (flujo individual) se pregunta antes de pisar
@@ -710,7 +694,8 @@ class TransferView(Gtk.Box):
         self.transfer_progress.set_visible(True)
 
         total = len(selected)
-        total_bytes = sum(g.size_bytes for g in selected)
+        # El total en bytes lo calcula el worker (`plan_transfer`): es el
+        # tamaño de SALIDA, no el de los archivos de origen.
         # Igual que en la Biblioteca: el título si es uno solo, el recuento
         # si es un lote. Se calcula acá (no en el worker) porque `selected`
         # es la lista con la que arrancó la transferencia.
@@ -718,6 +703,22 @@ class TransferView(Gtk.Box):
                   else f"{len(selected)} juegos")
 
         def worker():
+            # Paso previo, ya fuera del hilo de GTK: cuánto va a ocupar
+            # cada juego en el destino y si entra todo.
+            GLib.idle_add(self._show_planning)
+            plan = library.plan_transfer(selected, wit_binary)
+            total_bytes_salida = sum(item.output_bytes for item in plan)
+            libres_ahora = library.free_space(dest_root)
+            if libres_ahora is not None and total_bytes_salida > libres_ahora:
+                GLib.idle_add(
+                    self._on_transfer_done, 0, len(plan), False, 0, op, target,
+                    [f"No entra en el destino: se necesitan "
+                     f"{library.format_size(total_bytes_salida)} y hay "
+                     f"{library.format_size(libres_ahora)} libres (faltan "
+                     f"{library.format_size(total_bytes_salida - libres_ahora)}). "
+                     "Liberá espacio o elegí menos juegos."])
+                return
+
             ok_count = 0
             err_count = 0
             skipped_count = 0
@@ -737,13 +738,14 @@ class TransferView(Gtk.Box):
             bytes_skipped = 0
             start_time = time.monotonic()
             cancelled = False
-            for i, game in enumerate(selected, start=1):
+            for i, item in enumerate(plan, start=1):
+                game = item.game
                 if cancel.cancelled:
                     cancelled = True
                     break
                 base_bytes_done = bytes_written + bytes_failed + bytes_skipped
 
-                def on_game_progress(current: int, _base=base_bytes_done, _game=game,
+                def on_game_progress(current: int, _base=base_bytes_done, _item=item,
                                       _written=bytes_written):
                     # Tope al 97% del tamaño esperado de ESTE juego: es una
                     # estimación por tamaño de archivo, y wit puede seguir
@@ -751,21 +753,22 @@ class TransferView(Gtk.Box):
                     # escribir el último byte. Sin este margen la barra
                     # llegaría al 100% y se quedaría ahí "clavada" un rato
                     # antes de que el juego realmente termine.
-                    est = min(current, int(_game.size_bytes * 0.97))
-                    GLib.idle_add(self._update_progress, i, total, _game.title,
-                                  _base + est, _written + est, total_bytes, start_time)
+                    est = min(current, int(_item.output_bytes * 0.97))
+                    GLib.idle_add(self._update_progress, i, total, _item.game.title,
+                                  _base + est, _written + est, total_bytes_salida,
+                                  start_time)
 
                 GLib.idle_add(self._update_progress, i, total, game.title,
                               bytes_written + bytes_failed + bytes_skipped,
-                              bytes_written, total_bytes, start_time)
+                              bytes_written, total_bytes_salida, start_time)
                 # El espacio libre cambia a medida que se copia: revisar
                 # antes de CADA juego evita quedarse sin lugar a mitad de
                 # la escritura y dejar un archivo cortado en la unidad.
-                necesario = library.estimate_transfer_size(game, wit_binary)
+                necesario = item.output_bytes
                 libres = library.free_space(dest_root)
                 if libres is not None and necesario > libres:
                     err_count += 1
-                    bytes_failed += game.size_bytes
+                    bytes_failed += item.output_bytes
                     error_msgs.append(
                         f"{game.title}: no entra en el destino "
                         f"(necesita {library.format_size(necesario)}, "
@@ -778,7 +781,7 @@ class TransferView(Gtk.Box):
                                                 bytes_progress_cb=on_game_progress,
                                                 overwrite=overwrite, cancel=cancel)
                     ok_count += 1
-                    bytes_written += game.size_bytes
+                    bytes_written += item.output_bytes
                 except wit_wrapper.OperationCancelled:
                     # Cancelado a mitad de ESTE juego: no es un error, y no
                     # se sigue con los que faltaban.
@@ -788,7 +791,7 @@ class TransferView(Gtk.Box):
                     # El juego ya está en la unidad: ni éxito ni error, se
                     # cuenta aparte y se informa en el resumen final.
                     skipped_count += 1
-                    bytes_skipped += game.size_bytes
+                    bytes_skipped += item.output_bytes
                 except Exception as e:
                     if cancel.cancelled:
                         # El fallo es consecuencia de haber matado a `wit`
@@ -798,7 +801,7 @@ class TransferView(Gtk.Box):
                     # Un juego que falla no frena el resto: se cuenta como
                     # error y se sigue con el siguiente de la selección.
                     err_count += 1
-                    bytes_failed += game.size_bytes
+                    bytes_failed += item.output_bytes
                     error_msgs.append(f"{game.title}: {e}")
             GLib.idle_add(self._on_transfer_done, ok_count, err_count, cancelled,
                           skipped_count, op, target, error_msgs)
@@ -811,6 +814,14 @@ class TransferView(Gtk.Box):
         self._cancel_token.cancel()
         self.cancel_button.set_sensitive(False)
         self._show_toast("Cancelando la transferencia…")
+
+    def _show_planning(self):
+        """Mientras el worker calcula cuánto ocupa cada juego, la ventana
+        tiene que seguir viva y decir qué está haciendo."""
+        self.transfer_progress.set_visible(True)
+        self.transfer_progress.set_fraction(0)
+        self.transfer_progress.set_text("Calculando espacio necesario…")
+        return False
 
     def _update_progress(self, done: int, total: int, title: str,
                           bytes_done: int, bytes_written: int,
