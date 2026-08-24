@@ -536,6 +536,28 @@ EXPORT_CSV = "csv"
 EXPORT_TEXT = "text"
 
 
+# Caracteres con los que Excel y LibreOffice arrancan a interpretar una
+# celda como fórmula. El título de un juego sale del header de un archivo
+# que la app no controla, así que uno llamado "=1+1" o
+# "@SUM(1+1)*cmd|'/c calc'!A0" se ejecutaría al abrir la lista exportada
+# en la computadora de un cliente. Tab y retorno de carro entran en la
+# lista porque algunas versiones los tratan como separadores y corren la
+# interpretación a la celda siguiente.
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_safe(value: str) -> str:
+    """Neutraliza una celda que podría interpretarse como fórmula.
+
+    Se le antepone un apóstrofe, que es la marca de "esto es texto" que
+    entienden las hojas de cálculo: no se ve al abrir el archivo y la
+    celda queda con el valor literal."""
+    text = str(value)
+    if text.startswith(_CSV_FORMULA_PREFIXES):
+        return "'" + text
+    return text
+
+
 def export_games(games, fmt: str = EXPORT_CSV) -> str:
     """Devuelve el contenido del archivo a exportar para `games`.
 
@@ -561,6 +583,9 @@ def export_games(games, fmt: str = EXPORT_CSV) -> str:
     writer = csv.writer(buffer)
     writer.writerow(["Título", "ID", "Formato", "Tamaño", "Tamaño (bytes)"])
     for game in games:
-        writer.writerow([game.title, game.game_id, game.fmt,
+        # Los tres campos de texto pasan por `_csv_safe`; los tamaños son
+        # números que arma la app, no hace falta.
+        writer.writerow([_csv_safe(game.title), _csv_safe(game.game_id),
+                         _csv_safe(game.fmt),
                          format_size(game.size_bytes), game.size_bytes])
     return buffer.getvalue()
