@@ -244,20 +244,9 @@ def is_available(binary_name: str = "wit") -> bool:
 def _run(
     binary: str, *args: str, timeout: Optional[float] = DEFAULT_WIT_TIMEOUT
 ) -> subprocess.CompletedProcess:
-    try:
-        return subprocess.run(
-            [binary, *args],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=timeout,
-            # Grupo de procesos propio, igual que en `_run_with_progress`:
-            # así se puede matar el árbol entero de `wit` de una (ver
-            # `_terminate_process_group`).
-            start_new_session=True,
-        )
-    except subprocess.TimeoutExpired as exc:
-        return _timeout_result([binary, *args], exc, timeout)
+    """Corre `wit` y espera el resultado. Ver `_run_cancellable`, que es la
+    misma implementación: acá simplemente no hay token de cancelación."""
+    return _run_cancellable(binary, *args, timeout=timeout, cancel=None)
 
 
 def _timeout_result(
@@ -602,17 +591,20 @@ def _run_cancellable(
     binary: str, *args: str, timeout: Optional[float] = DEFAULT_WIT_TIMEOUT,
     cancel: Optional[CancellationToken] = None,
 ) -> subprocess.CompletedProcess:
-    """Como `_run`, pero registrando el proceso en el token para poder
-    matarlo desde el botón "Cancelar".
+    """Corre `wit` esperando el resultado, con dos garantías que
+    `subprocess.run` no da:
 
-    `_run` usa subprocess.run, que no da manera de llegar al proceso
-    mientras corre: sin esto, cancelar un lote de verificación tenía que
-    esperar a que `wit` terminara con el juego en curso, que en un
-    dual-layer son varios minutos."""
-    if cancel is None:
-        return _run(binary, *args, timeout=timeout)
-
-    if cancel.cancelled:
+    - si se pasa un `cancel`, el proceso queda registrado en el token para
+      poder matarlo desde el botón "Cancelar" (subprocess.run no deja
+      llegar al proceso mientras corre, así que cancelar un lote de
+      verificación tenía que esperar a que `wit` terminara con el juego
+      en curso: en un dual-layer, varios minutos);
+    - si salta el timeout, se mata el GRUPO de procesos entero y no solo
+      el proceso directo. `wit` se lanza con `start_new_session=True`, o
+      sea en su propio grupo, y `subprocess.run` solo le manda la señal al
+      hijo directo: cualquier nieto quedaba vivo, posiblemente escribiendo
+      todavía en el destino."""
+    if cancel is not None and cancel.cancelled:
         raise OperationCancelled("Operación cancelada antes de arrancar `wit`.")
 
     proc = subprocess.Popen(
@@ -622,7 +614,7 @@ def _run_cancellable(
         text=True,
         start_new_session=True,
     )
-    if not cancel.attach(proc):
+    if cancel is not None and not cancel.attach(proc):
         # La cancelación llegó entre el chequeo y el Popen: `attach` ya lo
         # mató, solo queda recogerlo para no dejar un zombi.
         proc.wait()
@@ -630,13 +622,21 @@ def _run_cancellable(
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
+        # Mata al proceso Y a su grupo, y recién después recoge lo que
+        # haya alcanzado a escribir.
         _terminate_process_group(proc)
-        proc.wait()
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = "", ""
+        exc.stdout = exc.stdout or stdout
+        exc.stderr = exc.stderr or stderr
         return _timeout_result([binary, *args], exc, timeout)
     finally:
-        cancel.detach(proc)
+        if cancel is not None:
+            cancel.detach(proc)
 
-    if cancel.cancelled:
+    if cancel is not None and cancel.cancelled:
         raise OperationCancelled("Operación cancelada por el usuario.")
     return subprocess.CompletedProcess(
         args=[binary, *args], returncode=proc.returncode,
