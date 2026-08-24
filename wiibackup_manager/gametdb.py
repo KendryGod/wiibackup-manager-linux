@@ -30,16 +30,29 @@ COVER_URL_TEMPLATE = "https://art.gametdb.com/wii/cover/{region}/{game_id}.png"
 # NTSC-U (p.ej. SMNE01, New Super Mario Bros. Wii) sólo existen bajo "US".
 # Probamos la región pedida y después esta lista de respaldo, en orden.
 COVER_FALLBACK_REGIONS = ["US", "EN", "DE", "FR", "JA", "KO"]
+DEFAULT_COVER_REGION = "EN"
 REQUEST_TIMEOUT = 5
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
 
-def cover_cache_path(game_id: str) -> Path:
-    """Ruta del PNG cacheado para `game_id`. Levanta ValueError si el ID no
-    es un ID6 válido: acá el ID se convierte en nombre de archivo dentro de
-    la caché (y más abajo en parte de una URL), así que no puede venir
-    crudo del header de un archivo. Ver `disc_header.validate_game_id`."""
-    return config.COVERS_DIR / f"{validate_game_id(game_id)}.png"
+def cover_cache_path(game_id: str, region: str = "EN") -> Path:
+    """Ruta del PNG cacheado para `game_id` en esa región.
+
+    La región va en el nombre del archivo, no solo en la clave de
+    deduplicación en memoria: guardándolo como "RMCE01.png" a secas, la
+    primera carátula que se bajaba (digamos la EN) se quedaba con el
+    nombre, y cuando el usuario cambiaba la región en Preferencias la
+    caché contestaba que ya la tenía y nunca se bajaba la nueva. El
+    selector de región no hacía nada después del primer uso.
+
+    Levanta ValueError si el ID no es un ID6 válido: acá el ID se
+    convierte en nombre de archivo dentro de la caché (y más abajo en
+    parte de una URL), así que no puede venir crudo del header de un
+    archivo. Ver `disc_header.validate_game_id`. La región se normaliza a
+    letras y números por el mismo motivo."""
+    safe_region = "".join(ch for ch in (region or DEFAULT_COVER_REGION)
+                           if ch.isalnum()).upper() or DEFAULT_COVER_REGION
+    return config.COVERS_DIR / f"{validate_game_id(game_id)}.{safe_region}.png"
 
 
 def _is_valid_cached_cover(path: Path) -> bool:
@@ -70,7 +83,7 @@ def get_cover_path(game_id: str, region: str = "EN", force: bool = False) -> Opt
     if not is_valid_game_id(game_id):
         return None
     game_id = validate_game_id(game_id)
-    cache_path = cover_cache_path(game_id)
+    cache_path = cover_cache_path(game_id, region)
     if cache_path.exists():
         if not force and _is_valid_cached_cover(cache_path):
             return cache_path
@@ -152,7 +165,7 @@ def fetch_cover_async(game_id: str, region: str = "EN",
         return
 
     game_id = validate_game_id(game_id)
-    cached = cover_cache_path(game_id)
+    cached = cover_cache_path(game_id, region)
     if _is_valid_cached_cover(cached):
         on_done(cached)
         return
