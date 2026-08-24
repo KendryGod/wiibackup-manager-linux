@@ -635,16 +635,36 @@ _metadata_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wiitd
 
 ExtraInfoCallback = Callable[[Optional[GameExtraInfo]], None]
 
+# Consultas de metadata en vuelo y resultados ya resueltos, por
+# (game_id, idioma). Mismo patrón que el `_inflight` de las carátulas, y
+# por el mismo motivo: la Biblioteca, Transferir y el panel de detalle
+# piden lo mismo, y cada rescan vuelve a pedir la biblioteca entera. Sin
+# esto, 300 juegos generaban 300 tareas encoladas contra UN solo worker,
+# cada una reteniendo su callback (y con él la fila que lo creó) hasta que
+# le tocara el turno.
+#
+# La caché de resultados es barata y vale la pena: lo que se guarda es una
+# referencia al GameExtraInfo que ya está en memoria dentro del índice de
+# wiitdb.xml, no una copia, y evita rehacer la búsqueda y el parseo de
+# controles/sinopsis en cada rescan.
+_extra_inflight: dict = {}
+_extra_cache: dict = {}
+_extra_lock = threading.Lock()
+
 
 def fetch_extra_info_async(game_id: str, language: str = DEFAULT_LANGUAGE,
                            on_done: Optional[ExtraInfoCallback] = None) -> None:
     """Pide la metadata de `game_id` y llama a `on_done(info_o_None)` al
     terminar.
 
-    Igual que `fetch_cover_async`: `on_done` corre en un hilo de fondo, así
-    que quien toque widgets de GTK adentro tiene que reenviarlo con
-    `GLib.idle_add`. Un juego sin identificar se resuelve como None en el
-    acto, sin ocupar el worker."""
+    Igual que `fetch_cover_async`: `on_done` corre en un hilo de fondo (o
+    en el hilo que llama, si ya estaba resuelto), así que quien toque
+    widgets de GTK adentro tiene que reenviarlo con `GLib.idle_add`. Un
+    juego sin identificar se resuelve como None en el acto, sin ocupar el
+    worker.
+
+    Dos pedidos iguales no encolan dos tareas: el segundo se cuelga del
+    primero, y si el dato ya se resolvió antes se contesta en el acto."""
     if on_done is None:
         return
 
@@ -653,18 +673,46 @@ def fetch_extra_info_async(game_id: str, language: str = DEFAULT_LANGUAGE,
         return
 
     game_id = validate_game_id(game_id)
+    key = (game_id, language)
 
-    def job():
+    with _extra_lock:
+        if key in _extra_cache:
+            cached = _extra_cache[key]
+            resolver = True
+        else:
+            resolver = False
+            waiting = _extra_inflight.get(key)
+            if waiting is not None:
+                # Ya hay una consulta igual en curso: colgarse de ella.
+                waiting.append(on_done)
+                return
+            _extra_inflight[key] = [on_done]
+    if resolver:
+        on_done(cached)
+        return
+
+    _metadata_executor.submit(_run_extra_info_job, key)
+
+
+def _run_extra_info_job(key: tuple) -> None:
+    game_id, language = key
+    try:
+        info = get_game_extra_info(game_id, language)
+    except Exception:
+        info = None
+    with _extra_lock:
+        callbacks = _extra_inflight.pop(key, [])
+        _extra_cache[key] = info
+    for cb in callbacks:
         try:
-            info = get_game_extra_info(game_id, language)
-        except Exception:
-            info = None
-        try:
-            on_done(info)
+            cb(info)
         except Exception:
             # Un callback que falla (p. ej. una fila que ya no existe) no
-            # puede llevarse puesto al worker y dejar sin metadata al
-            # resto de la biblioteca.
+            # puede llevarse puestos a los demás ni al worker.
             pass
 
-    _metadata_executor.submit(job)
+
+def extra_info_in_flight() -> int:
+    """Cuántas consultas de metadata distintas están en curso."""
+    with _extra_lock:
+        return len(_extra_inflight)
