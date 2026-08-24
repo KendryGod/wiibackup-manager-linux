@@ -239,10 +239,25 @@ class OperationManager:
                       uses_progress_bar: bool = False):
         """Como `_find_conflict` pero pública y con las rutas sin
         normalizar: devuelve la operación que bloquea, o None."""
+        return self.conflicts_for([kind], paths, uses_progress_bar)[kind]
+
+    def conflicts_for(self, kinds: Iterable, paths: Iterable = (),
+                       uses_progress_bar: bool = False) -> dict:
+        """Lo mismo pero para varios tipos de una sola vez: {tipo: op_que_
+        bloquea_o_None}.
+
+        Existe por el costo de `_normalize`, que resuelve cada ruta contra
+        el filesystem: la barra de selección pregunta por los cuatro
+        botones en cada click de una casilla, y con una biblioteca grande
+        seleccionada entera resolver las rutas cuatro veces en vez de una
+        se nota como un tironeo en la interfaz."""
         normalized = _normalize(paths)
+        result = {}
         with self._lock:
-            found = self._find_conflict(kind, normalized, uses_progress_bar)
-        return found[0] if found else None
+            for kind in kinds:
+                found = self._find_conflict(kind, normalized, uses_progress_bar)
+                result[kind] = found[0] if found is not None else None
+        return result
 
     def check(self, kind: OperationKind, paths: Iterable = (),
                uses_progress_bar: bool = False) -> None:

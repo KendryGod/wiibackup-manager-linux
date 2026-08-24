@@ -83,6 +83,12 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             lambda: GLib.idle_add(self._update_operation_ui)
         )
 
+        # Mientras se restauran las casillas de una lista recién
+        # reconstruida (ver `_on_sort_changed`) cada fila emite su señal, y
+        # recalcular la barra de selección en cada una es trabajo al pedo:
+        # se hace una sola vez al final.
+        self._suspend_selection_updates = False
+
         # Generación del escaneo: cada `rescan_library()` la incrementa y el
         # resultado que llega con una generación vieja se descarta, para que
         # un escaneo lento no pise con datos viejos a uno más reciente.
@@ -292,7 +298,21 @@ class WiiBackupWindow(Adw.ApplicationWindow):
     def _selected_games(self) -> list[Game]:
         return [row.game for row in self._rows.values() if row.is_selected()]
 
+    _BATCH_BUTTONS = (
+        ("_batch_send_btn", OperationKind.TRANSFERRING),
+        ("_batch_convert_btn", OperationKind.CONVERTING),
+        ("_batch_verify_btn", OperationKind.VERIFYING),
+        ("_batch_delete_btn", OperationKind.DELETING),
+    )
+
+    @staticmethod
+    def _busy_tooltip(blocker) -> str:
+        return (f"Hay una operación en curso: {blocker.label}. "
+                "Esperá a que termine.")
+
     def _update_selection_bar(self):
+        if self._suspend_selection_updates:
+            return
         games = self._selected_games()
         count = len(games)
         if count:
@@ -300,31 +320,47 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             self._sel_count_label.set_label(f"{count} seleccionado(s) · {total_size}")
         else:
             self._sel_count_label.set_label("0 seleccionado(s)")
-        busy_label = self.ops.busy_label()
-        # Con una operación en curso los botones quedan apagados: son todas
-        # acciones que escriben o borran archivos que esa operación puede
-        # estar usando ahora mismo.
-        enabled = count > 0 and busy_label is None
-        tooltip = (f"Hay una operación en curso: {busy_label}. Esperá a que termine."
-                   if busy_label else None)
-        for btn in (self._batch_send_btn, self._batch_convert_btn,
-                    self._batch_verify_btn, self._batch_delete_btn):
-            btn.set_sensitive(enabled)
-            btn.set_tooltip_text(tooltip)
+
+        # Cada botón se apaga solo si SU acción no puede arrancar ahora, no
+        # porque haya cualquier cosa en curso: con una verificación suelta
+        # corriendo sobre un juego, enviar otros a la unidad sigue siendo
+        # perfectamente posible y antes quedaba gris igual. Los lotes van
+        # con `uses_progress_bar=True` porque es como se van a registrar.
+        #
+        # El `is_busy()` de arranque es para no pagar el costo de resolver
+        # las rutas de toda la selección en el caso normal (nada en curso),
+        # que es el que se recalcula en cada click de una casilla.
+        if count and self.ops.is_busy():
+            blockers = self.ops.conflicts_for(
+                [kind for _attr, kind in self._BATCH_BUTTONS],
+                [g.path for g in games], uses_progress_bar=True)
+        else:
+            blockers = {}
+        for attr, kind in self._BATCH_BUTTONS:
+            btn = getattr(self, attr)
+            blocker = blockers.get(kind)
+            btn.set_sensitive(count > 0 and blocker is None)
+            btn.set_tooltip_text(self._busy_tooltip(blocker) if blocker else None)
 
     def _update_operation_ui(self):
         """Refleja en la interfaz si hay algo en curso. Lo llama el listener
         del OperationManager (reenviado al hilo de GTK) cada vez que una
-        operación arranca o termina."""
-        busy_label = self.ops.busy_label()
-        tooltip = (f"Hay una operación en curso: {busy_label}. Esperá a que termine."
-                   if busy_label else None)
-        for btn in (self._refresh_button, self._add_button):
-            btn.set_sensitive(busy_label is None)
-            btn.set_tooltip_text(tooltip)
-        if busy_label is None:
-            self._refresh_button.set_tooltip_text("Volver a escanear la biblioteca")
-            self._add_button.set_tooltip_text("Agregar juegos (ISO/WBFS)")
+        operación arranca o termina.
+
+        Igual que en la barra de selección, cada botón mira si lo suyo
+        puede arrancar: escanear se apaga cuando algo está escribiendo en
+        la biblioteca, y agregar juegos cuando hay otra operación ocupando
+        la barra de progreso. Una verificación suelta no apaga ninguno de
+        los dos."""
+        for btn, kind, idle_tooltip in (
+                (self._refresh_button, OperationKind.SCANNING,
+                 "Volver a escanear la biblioteca"),
+                (self._add_button, OperationKind.IMPORTING,
+                 "Agregar juegos (ISO/WBFS)")):
+            blocker = self.ops.conflict_for(kind)
+            btn.set_sensitive(blocker is None)
+            btn.set_tooltip_text(idle_tooltip if blocker is None
+                                 else self._busy_tooltip(blocker))
         self._update_selection_bar()
         return False
 
@@ -938,9 +974,13 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self._apply_sort()
         self._populate_list()
 
-        for key, row in self._rows.items():
-            if key in selected:
-                row.select_check.set_active(True)
+        self._suspend_selection_updates = True
+        try:
+            for key, row in self._rows.items():
+                if key in selected:
+                    row.select_check.set_active(True)
+        finally:
+            self._suspend_selection_updates = False
         self._update_selection_bar()
 
     # ---------------------------------------------------------- Filter --
