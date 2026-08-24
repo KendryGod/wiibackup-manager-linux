@@ -130,6 +130,85 @@ wiibackup_manager/
 
 ## Changelog
 
+### 0.1.5
+
+Se salta la 0.1.4. Esta versión junta 36 commits de correcciones de
+integridad de datos, coordinación de operaciones y rendimiento de la
+lista, más la metadata extendida de GameTDB.
+
+#### Corregido
+
+- **Path traversal**: el Game ID sale del header del archivo (contenido
+  que la app no controla) y se usaba para armar rutas del filesystem sin
+  validar. Ahora se valida antes de convertirlo en un componente de ruta.
+- **Sobrescrituras silenciosas**: convertir ISO↔WBFS, enviar a una unidad
+  WBFS e importar pisaban un archivo existente sin preguntar. Los tres
+  confirman ahora con el mismo diálogo; al importar en lote, además, el
+  archivo entra con un nombre alternativo ("Juego (2).wbfs") en vez de
+  reemplazar a otro juego que tuviera el mismo nombre.
+- **Cancelar no cancelaba**: era una bandera que se miraba entre juegos,
+  así que un `wit` copiando 20 minutos seguía hasta el final. Ahora se
+  mata el proceso (y su grupo) en el acto. La copia directa revisa la
+  cancelación cada 1 MiB en vez de cada 4 MiB.
+- **Timeout de `wit`**: era absoluto y cortaba copias lentas pero sanas.
+  Ahora se lo da por colgado por inactividad (que el destino no crezca),
+  con el límite absoluto solo como última red.
+- **WBFS en FAT32**: los discos dual-layer de más de 4 GB no entran en
+  FAT32 y quedaban truncados. Se divide con `--split-size` explícito
+  cuando el destino lo necesita.
+- **Operaciones simultáneas peligrosas**: un gestor central impide borrar
+  o renombrar un juego que se está convirtiendo, dos escaneos que se
+  pisan el resultado, y escanear mientras se escriben archivos en la
+  biblioteca. El bloqueo es por conflicto real: verificar o borrar un
+  juego suelto mientras se convierte OTRO sigue permitido, y cada botón
+  se apaga solo si su propia acción no puede arrancar.
+- **Carátulas**: la pestaña Transferir lanzaba un hilo por fila (300
+  juegos = 300 descargas simultáneas). Ahora hay un único pool compartido
+  con toda la app, y un rescan no vuelve a encolar lo que ya está en
+  vuelo.
+- **Escritura atómica** de `config.json` y del historial, con validación
+  de tipos al leerlos: un corte a mitad de la escritura ya no deja el
+  archivo corrupto.
+- **Crash con carátulas tardías**: los callbacks de GameTDB tocaban la
+  fila sin comprobar que siguiera existiendo. Reordenar la lista o cerrar
+  el panel de detalle con una descarga en vuelo podía tirar la app
+  (`Gtk-CRITICAL` y volcado de core). Además, una fila reusada que pasó a
+  mostrar otro juego descarta los datos del anterior si llegan tarde.
+- **Caché de `wiitdb.xml` corrupta**: si el volcado cacheado no parseaba,
+  el índice quedaba vacío para siempre y no volvían a aparecer ni la
+  sinopsis ni los controles. Ahora se descarta y se baja de nuevo, y un
+  XML recién bajado se valida antes de quedar como caché buena.
+- **Selección múltiple**: ya no se pierde al cambiar el orden ni al
+  rescanear, así que se puede mandar la misma tanda de juegos a una
+  unidad y después a la siguiente sin volver a tildarlos.
+- **Rendimiento de la lista**: reordenar y reescanear reconstruían las
+  filas una por una. Con 300 juegos, cambiar el orden pasó de ~900 ms a
+  6 ms y un rescan sin cambios de ~700 ms a 10 ms.
+- **Carpetas sin permiso**: se salteaban en silencio al escanear y
+  faltaban juegos sin explicación. Ahora el escaneo sigue igual con el
+  resto, pero avisa cuáles quedaron afuera y lo anota en el historial.
+- **Parseo de contenedores WBFS multi-juego**: el título se mezclaba con
+  las columnas de tamaño y región.
+
+#### Agregado
+
+- **Panel de detalle con datos de GameTDB**: sinopsis y accesorios
+  compatibles (Wii Remote, Nunchuk, Balance Board…), además de género,
+  jugadores, fecha, publisher y developer.
+- **Título original de GameTDB** junto al título del disco, cuando aporta
+  algo distinto de lo que ya se ve.
+- **Barra de uso de disco** en el destino de Transferir, coloreada según
+  el espacio que queda.
+- **Pestaña Log**: historial persistente de todas las operaciones, con su
+  resultado y el motivo de los errores.
+- **Cancelar** ahora también en la conversión (individual y en lote) y en
+  los lotes de verificar y eliminar, con el proceso en curso muerto de
+  verdad y un resumen de cuántos se alcanzaron a procesar.
+- **Ícono propio de la aplicación** instalado en el sistema (16 a 512 px)
+  y referenciado desde el `.desktop`.
+- **Progreso real por bytes** dentro de la conversión o copia de un solo
+  juego grande, en vez de saltar de 0% a 100% al terminar.
+
 ### 0.1.3
 
 - La pestaña Transferir valida sus destinos (unidades y carpetas agregadas
