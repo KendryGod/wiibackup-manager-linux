@@ -46,45 +46,81 @@ class OperationCancelled(RuntimeError):
 _KILL_GRACE_SECONDS = 5.0
 
 
-def _terminate_process_group(proc: subprocess.Popen) -> None:
-    """Mata `proc` y todo su grupo de procesos.
+def _send_signal_group(proc: subprocess.Popen, sig) -> None:
+    """Manda `sig` a `proc` y a todo su grupo de procesos.
 
     Los subprocesos de `wit` se lanzan con `start_new_session=True`, o sea
-    en su propio grupo: matar el grupo entero (`os.killpg`) y no solo el
+    en su propio grupo: señalar el grupo entero (`os.killpg`) y no solo el
     PID directo asegura que no quede ningún hijo de `wit` escribiendo en
     el destino después de cancelar. Si por algún motivo no se puede
-    obtener el grupo, cae a señalar el proceso directamente.
-
-    Primero SIGTERM (le da la chance de cerrar y limpiar sus temporales) y,
-    si no se muere en `_KILL_GRACE_SECONDS`, SIGKILL."""
-    if proc.poll() is not None:
-        return
-
+    obtener el grupo, cae a señalar el proceso directamente."""
     try:
         pgid = os.getpgid(proc.pid)
     except OSError:
         pgid = None
 
-    def send(sig) -> None:
-        if pgid is not None:
-            try:
-                os.killpg(pgid, sig)
-                return
-            except OSError:
-                pass  # el grupo ya no existe: probamos con el proceso solo
+    if pgid is not None:
         try:
-            proc.send_signal(sig)
+            os.killpg(pgid, sig)
+            return
         except OSError:
-            pass
+            pass  # el grupo ya no existe: probamos con el proceso solo
+    try:
+        proc.send_signal(sig)
+    except OSError:
+        pass
 
-    send(signal.SIGTERM)
+
+def _escalate_to_kill(proc: subprocess.Popen) -> None:
+    """Espera la gracia del SIGTERM y, si el proceso sigue vivo, SIGKILL.
+
+    Sondea con `poll()` en vez de `wait()` a propósito: el hilo que lanzó
+    el proceso ya está esperándolo, y dos `wait()` sobre el mismo Popen
+    desde hilos distintos es justo la clase de carrera que no hace falta
+    tener."""
+    deadline = time.monotonic() + _KILL_GRACE_SECONDS
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            return
+        time.sleep(0.1)
+    if proc.poll() is None:
+        _send_signal_group(proc, signal.SIGKILL)
+
+
+def _request_termination(proc: subprocess.Popen) -> None:
+    """Pide que `proc` termine y VUELVE EN EL ACTO.
+
+    Esto lo llama el botón "Cancelar", o sea el hilo de GTK: cualquier
+    espera acá congela la ventana entera. Antes se mandaba SIGTERM y se
+    esperaba hasta 5 segundos, y otros 5 después del SIGKILL: hasta 10
+    segundos con la interfaz trabada, sin repintar ni responder clicks,
+    justo cuando el usuario acaba de pedir que algo se detenga.
+
+    El SIGTERM se manda de inmediato (es lo que corta la escritura) y la
+    escalada a SIGKILL queda a cargo de un hilo suelto, que es trabajo de
+    fondo y a nadie le importa cuánto tarde."""
+    if proc.poll() is not None:
+        return
+    _send_signal_group(proc, signal.SIGTERM)
+    threading.Thread(target=_escalate_to_kill, args=(proc,), daemon=True,
+                      name="wit-kill").start()
+
+
+def _terminate_process_group(proc: subprocess.Popen) -> None:
+    """Versión bloqueante de lo de arriba, para los hilos de fondo que ya
+    estaban esperando al proceso (por ejemplo cuando `wit` se cuelga y
+    salta el timeout). Acá sí se puede esperar: no hay ninguna ventana del
+    otro lado."""
+    if proc.poll() is not None:
+        return
+    _send_signal_group(proc, signal.SIGTERM)
     try:
         proc.wait(timeout=_KILL_GRACE_SECONDS)
         return
     except subprocess.TimeoutExpired:
         pass
 
-    send(signal.SIGKILL)
+    _send_signal_group(proc, signal.SIGKILL)
     try:
         proc.wait(timeout=_KILL_GRACE_SECONDS)
     except subprocess.TimeoutExpired:
@@ -114,13 +150,14 @@ class CancellationToken:
             return self._cancelled
 
     def cancel(self) -> None:
-        """Marca la operación como cancelada y mata el proceso en curso (si
-        hay uno). Se llama desde el hilo de GTK."""
+        """Marca la operación como cancelada y le pide al proceso en curso
+        que termine. Se llama desde el hilo de GTK, así que no espera nada:
+        ver `_request_termination`."""
         with self._lock:
             self._cancelled = True
             proc = self._proc
         if proc is not None:
-            _terminate_process_group(proc)
+            _request_termination(proc)
 
     def attach(self, proc: subprocess.Popen) -> bool:
         """Registra el proceso recién lanzado. Devuelve False (y lo mata en
@@ -130,7 +167,9 @@ class CancellationToken:
             self._proc = proc
             cancelled = self._cancelled
         if cancelled:
-            _terminate_process_group(proc)
+            # `attach` corre en el hilo de fondo, pero no hay motivo para
+            # esperar acá tampoco: quien llama va a recoger el proceso.
+            _request_termination(proc)
             return False
         return True
 
