@@ -151,6 +151,10 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
         menu_button = Gtk.MenuButton(icon_name="open-menu-symbolic")
         menu = Gio.Menu()
+        export_section = Gio.Menu()
+        export_section.append("Exportar lista a CSV…", "win.export-csv")
+        export_section.append("Exportar lista como texto…", "win.export-text")
+        menu.append_section(None, export_section)
         menu.append("Preferencias", "win.preferences")
         menu.append("Acerca de", "win.about")
         menu_button.set_menu_model(menu)
@@ -160,6 +164,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self._add_action("about", self._on_about)
         self._add_action("add-files", self._on_add_files)
         self._add_action("add-folder", self._on_add_folder)
+        self._add_action("export-csv", lambda: self._on_export(library.EXPORT_CSV))
+        self._add_action("export-text", lambda: self._on_export(library.EXPORT_TEXT))
 
         # Barra de búsqueda
         self.search_entry = Gtk.SearchEntry(placeholder_text="Buscar por título o ID…")
@@ -1099,6 +1105,75 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         for row in self._rows.values():
             row.sort_key = self._sort_key(row.game)
         self.list_box.invalidate_sort()
+
+    # --------------------------------------------------------- Exportar --
+    def _visible_games(self) -> list[Game]:
+        """Los juegos que se están viendo ahora, en el orden de la pantalla
+        y sin los que el buscador dejó afuera."""
+        juegos = []
+        row = self.list_box.get_first_child()
+        while row is not None:
+            if isinstance(row, GameRow) and self._filter_row(row):
+                juegos.append(row.game)
+            row = row.get_next_sibling()
+        return juegos
+
+    def _games_to_export(self) -> list[Game]:
+        """Lo tildado si hay algo tildado; si no, lo que se está viendo.
+
+        Es la misma regla que espera cualquiera que use la app: si me tomé
+        el trabajo de elegir doce juegos, exportar esos doce; si no elegí
+        nada, exportar la lista tal como la tengo filtrada y ordenada."""
+        return self._selected_games() or self._visible_games()
+
+    def _on_export(self, fmt: str):
+        juegos = self._games_to_export()
+        if not juegos:
+            self._show_toast("No hay juegos para exportar.")
+            return
+
+        extension = "csv" if fmt == library.EXPORT_CSV else "txt"
+        dialog = Gtk.FileDialog(title="Guardar la lista de juegos")
+        dialog.set_initial_name(
+            f"biblioteca-wii-{time.strftime('%Y-%m-%d')}.{extension}")
+        dialog.set_initial_folder(gtk_helpers.safe_initial_folder())
+        filtro = Gtk.FileFilter()
+        if fmt == library.EXPORT_CSV:
+            filtro.set_name("Planilla CSV (*.csv)")
+            filtro.add_pattern("*.csv")
+        else:
+            filtro.set_name("Texto plano (*.txt)")
+            filtro.add_pattern("*.txt")
+        filtros = Gio.ListStore.new(Gtk.FileFilter)
+        filtros.append(filtro)
+        dialog.set_filters(filtros)
+        dialog.save(self, None,
+                     lambda d, r: self._on_export_file_chosen(d, r, juegos, fmt))
+
+    def _on_export_file_chosen(self, dialog, result, juegos: list[Game], fmt: str):
+        try:
+            archivo = dialog.save_finish(result)
+        except Exception:
+            return  # el usuario canceló
+        if archivo is None or not archivo.get_path():
+            return
+        destino = Path(archivo.get_path())
+
+        contenido = library.export_games(juegos, fmt)
+        # utf-8-sig en el CSV: sin el BOM, Excel en Windows abre los
+        # acentos rotos, y estas listas terminan en la computadora de un
+        # cliente. El texto plano va en utf-8 pelado, que es lo que espera
+        # cualquier chat o editor.
+        codificacion = "utf-8-sig" if fmt == library.EXPORT_CSV else "utf-8"
+        try:
+            destino.write_text(contenido, encoding=codificacion)
+        except OSError as e:
+            self._show_toast(f"No se pudo guardar la lista: {e}")
+            return
+
+        frase = ("1 juego exportado" if len(juegos) == 1
+                  else f"{len(juegos)} juegos exportados")
+        self._show_toast(f"{frase} a {destino.name}")
 
     # ---------------------------------------------------------- Filter --
     def _on_search_changed(self, entry):

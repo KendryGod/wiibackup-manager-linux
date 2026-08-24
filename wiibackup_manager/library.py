@@ -1,6 +1,8 @@
 """Escaneo de la biblioteca y modelo de datos de un juego."""
 from __future__ import annotations
 
+import csv
+import io
 import os
 import re
 import shutil
@@ -372,3 +374,43 @@ def send_to_wbfs_drive(
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "Error desconocido al convertir con wit")
     return dest
+
+
+# --------------------------------------------------------------- Exportar --
+#
+# El armado del texto vive acá y no en la ventana para poder probarlo sin
+# levantar GTK, y porque es lo mismo que se exportaría desde cualquier otra
+# vista que muestre juegos.
+
+EXPORT_CSV = "csv"
+EXPORT_TEXT = "text"
+
+
+def export_games(games, fmt: str = EXPORT_CSV) -> str:
+    """Devuelve el contenido del archivo a exportar para `games`.
+
+    `EXPORT_CSV` arma una planilla con Título, ID, Formato y Tamaño. El
+    tamaño va dos veces, legible y en bytes: "4.3 GB" se lee de una pero
+    se ordena mal en una planilla, y el número crudo ordena bien pero no
+    se lee. Poner las dos columnas sale gratis y evita tener que elegir.
+
+    `EXPORT_TEXT` arma una lista suelta ("Título — 4.3 GB", una por línea)
+    para pegar en un chat, con el total al final."""
+    if fmt == EXPORT_TEXT:
+        lineas = [f"{game.title} — {format_size(game.size_bytes)}" for game in games]
+        total = sum(game.size_bytes for game in games)
+        noun = "juego" if len(games) == 1 else "juegos"
+        lineas.append("")
+        lineas.append(f"{len(games)} {noun} · {format_size(total)}")
+        return "\n".join(lineas) + "\n"
+
+    buffer = io.StringIO()
+    # QUOTE_MINIMAL con la coma como separador: los títulos de Wii traen
+    # comas y dos puntos ("Zelda: Skyward Sword"), y el módulo csv ya los
+    # entrecomilla solo cuando hace falta.
+    writer = csv.writer(buffer)
+    writer.writerow(["Título", "ID", "Formato", "Tamaño", "Tamaño (bytes)"])
+    for game in games:
+        writer.writerow([game.title, game.game_id, game.fmt,
+                         format_size(game.size_bytes), game.size_bytes])
+    return buffer.getvalue()
