@@ -1459,14 +1459,21 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             return a.absolute() == b.absolute()
 
     @staticmethod
-    def _free_import_dest(dest: Path) -> Path:
+    def _free_import_dest(dest: Path, reservados: set) -> Path:
         """Variante libre de `dest` agregándole un sufijo: 'Título.wbfs' ->
         'Título (2).wbfs'. Se usa en el flujo en lote, donde parar a
         preguntar por cada colisión no tiene sentido y pisar el archivo
-        existente sería perder un juego que el usuario ya tenía."""
+        existente sería perder un juego que el usuario ya tenía.
+
+        "Libre" es libre en el disco Y en este mismo lote: `reservados`
+        trae los destinos que ya se le asignaron a otros archivos de la
+        misma importación. Sin eso, dos archivos llamados igual que vienen
+        de dos pendrives distintos calculaban los dos el mismo destino
+        -ninguno existía todavía en el disco al planificar- y el segundo
+        pisaba al primero, con los dos anotados como agregados."""
         n = 2
         candidate = dest
-        while candidate.exists():
+        while candidate.exists() or candidate in reservados:
             candidate = dest.with_name(f"{dest.stem} ({n}){dest.suffix}")
             n += 1
         return candidate
@@ -1500,9 +1507,13 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         # la pregunta de sobrescritura se hace en el hilo de GTK.
         plan: list[tuple[Path, Path]] = []
         renamed: list[str] = []
+        # Destinos ya comprometidos por ESTE lote: el disco todavía no los
+        # tiene, pero están tan ocupados como si los tuviera.
+        reservados: set = set()
         for src in src_paths:
             dest = dest_dir / src.name
-            if not self._is_same_file(src, dest) and dest.exists() and not overwrite:
+            ya_esta = self._is_same_file(src, dest)
+            if not ya_esta and (dest.exists() or dest in reservados) and not overwrite:
                 if len(src_paths) == 1:
                     gtk_helpers.confirm_overwrite(
                         self,
@@ -1512,9 +1523,14 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                         lambda: self._start_import(src_paths, overwrite=True),
                     )
                     return
-                dest = self._free_import_dest(dest)
+                dest = self._free_import_dest(dest, reservados)
                 renamed.append(dest.name)
+            reservados.add(dest)
             plan.append((src, dest))
+
+        # Invariante del plan: dos archivos no pueden ir al mismo lado.
+        destinos = [d for _s, d in plan]
+        assert len(set(destinos)) == len(destinos), "plan de importación con destinos repetidos"
 
         # Origen y destino: mientras se copia, nadie puede borrar ni
         # convertir ninguno de los dos.
