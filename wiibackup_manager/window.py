@@ -1730,11 +1730,18 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             nonlocal ok, cancelled
             detail = ""
             try:
-                result = wit_wrapper.convert(game.path, dest, target_ext.strip("."),
-                                              self.settings.wit_binary,
-                                              bytes_progress_cb=on_progress,
-                                              cancel=cancel)
-                ok = result.returncode == 0
+                # El destino puede existir (el usuario confirmó pisarlo):
+                # se lo aparta y se lo devuelve si la conversión no
+                # termina bien. Ver library.DestinationGuard.
+                with library.DestinationGuard(
+                        dest, enabled=bool(library.wbfs_group(dest))) as guard:
+                    result = wit_wrapper.convert(game.path, dest, target_ext.strip("."),
+                                                  self.settings.wit_binary,
+                                                  bytes_progress_cb=on_progress,
+                                                  cancel=cancel)
+                    ok = result.returncode == 0
+                    if ok:
+                        guard.commit()
                 detail = (f"a {dest.name}" if ok else result.stderr.strip()[:200])
                 msg = (f"Convertido a {dest.name}" if ok
                        else f"Error al convertir: {result.stderr.strip()[:200]}")

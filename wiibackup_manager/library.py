@@ -463,6 +463,123 @@ def free_space(path: Path) -> Optional[int]:
         return None
 
 
+def wbfs_group(dest: Path) -> list:
+    """`dest` y las partes que lo acompañan si el WBFS está dividido.
+
+    `wit` parte los juegos grandes en 'juego.wbfs' + 'juego.wbf1' +
+    'juego.wbf2'…, y todas esas piezas son UN respaldo: reemplazar unas y
+    dejar otras deja un juego inservible, así que se tratan siempre como
+    un conjunto."""
+    miembros = []
+    try:
+        if dest.exists():
+            miembros.append(dest)
+    except OSError:
+        return miembros
+    stem = dest.with_suffix("")
+    numero = 1
+    while True:
+        parte = stem.with_suffix(f".wbf{numero}")
+        try:
+            if not parte.exists():
+                break
+        except OSError:
+            break
+        miembros.append(parte)
+        numero += 1
+    return miembros
+
+
+class DestinationGuard:
+    """Aparta lo que ya hay en el destino y lo devuelve si algo falla.
+
+    Es para las operaciones que le pasan `--overwrite` a `wit`. El
+    problema con dejar que `wit` sobrescriba solo es que no hay forma
+    confiable de deshacerlo: `wit` escribe en temporales propios y los
+    renombra a los nombres finales al terminar, así que si lo matan
+    justo después de renombrar la primera parte, el nombre final ya
+    quedó con contenido parcial y el limpiador no puede distinguirlo del
+    archivo que el usuario tenía ahí desde antes.
+
+    Con el respaldo explícito no hay nada que adivinar: los archivos que
+    ya estaban se mueven a un nombre oculto (un rename dentro de la misma
+    carpeta, instantáneo y sin copiar datos), `wit` escribe sobre nombres
+    libres, y al final se borra el respaldo o se lo devuelve a su lugar
+    según cómo haya salido.
+
+    El precio es que mientras dura la operación conviven el respaldo y lo
+    nuevo, o sea que hace falta espacio para los dos. Es el costo de
+    poder volver atrás.
+
+    Uso:
+
+        with DestinationGuard(dest) as guard:
+            ...escribir dest...
+            guard.commit()      # solo si salió TODO bien
+    """
+
+    def __init__(self, dest: Path, enabled: bool = True):
+        self.dest = Path(dest)
+        self.enabled = enabled
+        self._saved: list = []
+        self._committed = False
+
+    def __enter__(self) -> "DestinationGuard":
+        if not self.enabled:
+            return self
+        marca = f".respaldo-{os.getpid()}"
+        for original in wbfs_group(self.dest):
+            respaldo = original.with_name(f".{original.name}{marca}")
+            try:
+                os.replace(original, respaldo)
+            except OSError:
+                # No se pudo apartar: se deshace lo ya apartado y se sale
+                # sin tocar nada, mejor que quedar a mitad de camino.
+                self._restore()
+                raise
+            self._saved.append((original, respaldo))
+        return self
+
+    def commit(self) -> None:
+        """La operación salió bien: el respaldo ya no hace falta."""
+        self._committed = True
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        if not self.enabled:
+            return False
+        if self._committed and exc_type is None:
+            self._discard()
+        else:
+            self._cleanup_partials()
+            self._restore()
+        return False  # nunca se traga la excepción
+
+    def _cleanup_partials(self) -> None:
+        """Borra lo que la operación fallida haya alcanzado a dejar con los
+        nombres finales, para que el respaldo pueda volver a su lugar."""
+        for parcial in wbfs_group(self.dest):
+            try:
+                parcial.unlink()
+            except OSError:
+                pass
+
+    def _restore(self) -> None:
+        for original, respaldo in reversed(self._saved):
+            try:
+                os.replace(respaldo, original)
+            except OSError:
+                pass
+        self._saved = []
+
+    def _discard(self) -> None:
+        for _original, respaldo in self._saved:
+            try:
+                respaldo.unlink(missing_ok=True)
+            except OSError:
+                pass
+        self._saved = []
+
+
 def wbfs_dest_paths(games, drive_root: Path) -> list:
     """Las rutas que van a ocupar `games` dentro de `drive_root`.
 
@@ -541,10 +658,15 @@ def send_to_wbfs_drive(
     if not wit_wrapper.is_available(wit_binary):
         raise wit_wrapper.WitNotFoundError(wit_binary)
 
-    result = wit_wrapper.convert(game.path, dest, "WBFS", wit_binary, split=split,
-                                  bytes_progress_cb=bytes_progress_cb, cancel=cancel)
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or "Error desconocido al convertir con wit")
+    # Si había algo en el destino, se lo aparta antes de dejar que `wit`
+    # escriba: si la conversión falla o se cancela, vuelve a su lugar.
+    with DestinationGuard(dest, enabled=bool(wbfs_group(dest))) as guard:
+        result = wit_wrapper.convert(game.path, dest, "WBFS", wit_binary, split=split,
+                                      bytes_progress_cb=bytes_progress_cb, cancel=cancel)
+        if result.returncode != 0:
+            raise RuntimeError(
+                result.stderr.strip() or "Error desconocido al convertir con wit")
+        guard.commit()
     return dest
 
 
