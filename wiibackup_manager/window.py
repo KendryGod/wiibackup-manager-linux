@@ -96,6 +96,9 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         # Un rescan pedido mientras ya había uno corriendo no se pierde: se
         # anota acá y se dispara cuando el actual termina.
         self._rescan_pending = False
+        # Carpetas que el último escaneo no pudo leer, para no repetir el
+        # aviso en cada rescan automático. Ver `_on_scan_done`.
+        self._skipped_dirs: set[str] = set()
 
         self._build_ui()
 
@@ -867,6 +870,19 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self._run_batch(games, "Eliminando", delete_one, OperationKind.DELETING)
 
     # -------------------------------------------------------- Library --
+    @staticmethod
+    def _describe_skipped(skipped: list) -> str:
+        """Texto para avisar qué carpetas quedaron afuera del escaneo."""
+        nombres = []
+        for path in skipped:
+            if str(path) not in nombres:
+                nombres.append(str(path))
+        preview = ", ".join(nombres[:2])
+        mas = f" (+{len(nombres) - 2} más)" if len(nombres) > 2 else ""
+        carpeta = "carpeta" if len(nombres) == 1 else "carpetas"
+        return (f"No se pudo leer {len(nombres)} {carpeta} (permisos): "
+                f"{preview}{mas}. Los juegos que haya adentro no aparecen.")
+
     def _update_library_banner(self):
         if self._library_available:
             self._library_banner.set_revealed(False)
@@ -910,22 +926,39 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             def progress(done, total):
                 GLib.idle_add(self.progress_bar.set_fraction, done / max(total, 1))
 
+            skipped: list = []
             try:
-                games = library.scan_library(root, self.settings.wit_binary, progress)
+                games = library.scan_library(root, self.settings.wit_binary, progress,
+                                              skipped_dirs=skipped)
             except Exception:
                 games = []
-            GLib.idle_add(self._on_scan_done, games, generation, op)
+            GLib.idle_add(self._on_scan_done, games, generation, op, skipped)
 
         threading.Thread(target=worker, daemon=True).start()
         return False  # para idle_add
 
-    def _on_scan_done(self, games: list[Game], generation: int, op=None):
+    def _on_scan_done(self, games: list[Game], generation: int, op=None,
+                       skipped: list | None = None):
         self.ops.finish(op)
 
         # Resultado de un escaneo que ya quedó viejo (arrancó otro después):
         # se descarta en vez de pisar la lista con datos de antes.
         if generation != self._scan_generation:
             return False
+
+        # Carpetas que quedaron afuera por permisos. El escaneo corre solo
+        # después de cada operación, así que avisar en cada uno sería un
+        # toast cada treinta segundos: se avisa (y se anota en el
+        # historial) solo cuando la lista de carpetas ilegibles cambia
+        # respecto del escaneo anterior.
+        ilegibles = {str(path) for path in (skipped or [])}
+        if ilegibles and ilegibles != self._skipped_dirs:
+            mensaje = self._describe_skipped(sorted(ilegibles))
+            self._show_toast(mensaje)
+            self.op_log.record(OperationKind.SCANNING.label,
+                               f"{len(ilegibles)} carpeta(s) sin permiso",
+                               oplog.STATUS_PARTIAL, mensaje)
+        self._skipped_dirs = ilegibles
 
         self._games = games
         self._apply_sort()
@@ -1089,10 +1122,12 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             return
 
         root = Path(folder.get_path())
-        paths = sorted(
-            p for p in root.rglob("*")
-            if p.is_file() and p.suffix.lower() in library.VALID_EXTENSIONS
-        )
+        skipped: list = []
+        paths = library.find_game_files(root, skipped)
+        if skipped:
+            # Acá sí se avisa siempre: el usuario acaba de elegir esa
+            # carpeta a propósito y tiene que saber que parte no se leyó.
+            self._show_toast(self._describe_skipped(skipped))
         if not paths:
             self._show_toast("No se encontraron archivos válidos en esa carpeta.")
             return
@@ -1105,18 +1140,19 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             return False
 
         paths: list[Path] = []
+        skipped: list = []
         for f in files:
             raw_path = f.get_path()
             if not raw_path:
                 continue
             p = Path(raw_path)
             if p.is_dir():
-                paths.extend(
-                    sorted(q for q in p.rglob("*")
-                           if q.is_file() and q.suffix.lower() in library.VALID_EXTENSIONS)
-                )
+                paths.extend(library.find_game_files(p, skipped))
             elif p.is_file() and p.suffix.lower() in library.VALID_EXTENSIONS:
                 paths.append(p)
+
+        if skipped:
+            self._show_toast(self._describe_skipped(skipped))
 
         if not paths:
             self._show_toast(

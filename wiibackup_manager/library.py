@@ -1,6 +1,7 @@
 """Escaneo de la biblioteca y modelo de datos de un juego."""
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import time
@@ -126,19 +127,53 @@ def identify_file(path: Path, wit_binary: str = "wit") -> Optional[Game]:
     )
 
 
+def find_game_files(root: Path, skipped: Optional[list] = None) -> list[Path]:
+    """Todos los ISO/WBFS/CISO/WDF que haya debajo de `root`, ordenados.
+
+    Camina con `os.walk` y no con `Path.rglob` justamente por las carpetas
+    que no se pueden leer: rglob se las saltea en silencio (probado en
+    Python 3.14: no levanta PermissionError, simplemente devuelve menos
+    archivos), así que el usuario veía faltar juegos que sabía que estaban
+    y no tenía forma de enterarse de por qué. `os.walk` avisa por
+    `onerror`, y acá esas carpetas se saltean igual -una carpeta ilegible
+    no puede frenar el escaneo de todo lo demás- pero se anotan en
+    `skipped` para que quien llame lo pueda informar.
+
+    Con `skipped=None` el comportamiento es el de siempre: saltear y
+    seguir."""
+    found: list[Path] = []
+
+    def on_error(error: OSError) -> None:
+        if skipped is None:
+            return
+        name = getattr(error, "filename", None)
+        skipped.append(Path(name) if name else Path(root))
+
+    for dirpath, _dirnames, filenames in os.walk(root, onerror=on_error):
+        base = Path(dirpath)
+        for name in filenames:
+            path = base / name
+            if path.suffix.lower() in VALID_EXTENSIONS and path.is_file():
+                found.append(path)
+    found.sort()
+    return found
+
+
 def scan_library(
     root: Path,
     wit_binary: str = "wit",
     progress_cb: Optional[Callable[[int, int], None]] = None,
+    skipped_dirs: Optional[list] = None,
 ) -> list[Game]:
-    """Escanea recursivamente `root` buscando ISO/WBFS/CISO/WDF."""
+    """Escanea recursivamente `root` buscando ISO/WBFS/CISO/WDF.
+
+    `skipped_dirs`, si se pasa, recibe las carpetas que no se pudieron
+    leer (permisos, unidad que se desconectó a mitad del escaneo). Ver
+    `find_game_files`."""
     if not root.exists():
         return []
 
-    candidates = [
-        p for p in root.rglob("*")
-        if p.is_file() and p.suffix.lower() in VALID_EXTENSIONS
-    ]
+    candidates = find_game_files(root, skipped_dirs)
 
     games: list[Game] = []
     total = len(candidates)
