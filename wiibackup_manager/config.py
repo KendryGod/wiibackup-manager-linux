@@ -10,7 +10,7 @@ import json
 import os
 import sys
 import tempfile
-from dataclasses import dataclass, asdict, fields
+from dataclasses import dataclass, asdict, field, fields
 from pathlib import Path
 
 APP_ID = "com.gamefixsps.WiiBackupManager"
@@ -75,6 +75,10 @@ class Settings:
     # Apariencia: "system" (la del escritorio), "light" u "dark". Ver
     # `styles.apply_color_scheme`.
     color_scheme: str = "system"
+    # Destinos guardados de la pestaña Transferir: [{"name": ..., "path": ...}].
+    # Se guardan como lista de diccionarios y no como dataclass propia para
+    # que el config.json siga siendo legible y editable a mano.
+    dest_presets: list = field(default_factory=list)
 
     @classmethod
     def load(cls) -> "Settings":
@@ -118,12 +122,47 @@ class Settings:
                 continue
             values[f.name] = value
 
+        if "dest_presets" in values:
+            values["dest_presets"] = clean_presets(values["dest_presets"])
+
         return cls(**values)
 
     def save(self) -> None:
         """Guarda la configuración de forma atómica (ver
         `write_json_atomic`, compartida con el historial de operaciones)."""
         write_json_atomic(CONFIG_FILE, json.dumps(asdict(self), indent=2))
+
+
+def clean_presets(raw) -> list:
+    """Deja solo los destinos guardados que tengan forma de tal.
+
+    La validación por tipo de `Settings.load` alcanza para saber que
+    `dest_presets` es una lista, pero no dice nada de lo que hay adentro:
+    un config.json editado a mano puede traer strings sueltos o
+    diccionarios a medias, y eso reventaría recién al dibujar la pestaña
+    Transferir. Se descarta lo que no sirve y se conserva el resto, igual
+    que hace `load` campo por campo.
+
+    Los duplicados por ruta se colapsan quedándose con el último: dos
+    accesos rápidos al mismo lugar no aportan nada y ensucian la lista."""
+    presets = []
+    vistos = {}
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        path = item.get("path")
+        if not isinstance(name, str) or not isinstance(path, str):
+            continue
+        name, path = name.strip(), path.strip()
+        if not name or not path:
+            continue
+        if path in vistos:
+            presets[vistos[path]] = {"name": name, "path": path}
+            continue
+        vistos[path] = len(presets)
+        presets.append({"name": name, "path": path})
+    return presets
 
 
 def ensure_dirs(settings: Settings) -> None:

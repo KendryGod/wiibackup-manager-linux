@@ -108,6 +108,10 @@ class TransferView(Gtk.Box):
         # cambió de verdad (unidad nueva, expulsada, o carpeta manual que
         # dejó de existir) en vez de reconstruir todo cada 3 segundos.
         self._known_auto_mounts: set[Path] = set()
+        # Disponibilidad de cada destino guardado en el último refresco, para
+        # que el sondeo detecte cuando uno se conecta o se va. Ver
+        # `_preset_availability`.
+        self._known_preset_state: dict = {}
 
         self._build_ui()
         GLib.timeout_add_seconds(3, self._poll_drives)
@@ -138,6 +142,15 @@ class TransferView(Gtk.Box):
         add_folder_btn.connect("clicked", self._on_add_folder)
         dest_buttons.append(refresh_drives_btn)
         dest_buttons.append(add_folder_btn)
+
+        # Guardar el destino elegido con un nombre corto ("HDD principal",
+        # "SD cliente") para no volver a navegar carpetas la próxima vez.
+        self.save_preset_btn = Gtk.Button(label="Guardar destino")
+        self.save_preset_btn.set_tooltip_text(
+            "Guardar el destino elegido como acceso rápido, con un nombre."
+        )
+        self.save_preset_btn.connect("clicked", self._on_save_preset)
+        dest_buttons.append(self.save_preset_btn)
 
         self.eject_button = Gtk.Button(label="Expulsar unidad")
         self.eject_button.set_tooltip_text(
@@ -290,8 +303,19 @@ class TransferView(Gtk.Box):
             self.dest_list.remove(child)
             child = nxt
 
+        # Primero los destinos guardados: son los que el usuario eligió
+        # tener a mano, y una unidad que además esté guardada se muestra
+        # con SU nombre ("SD cliente") en vez del genérico del sistema, sin
+        # aparecer dos veces en la lista.
+        preset_paths = set()
+        for preset in list(self.settings.dest_presets):
+            self.dest_list.append(self._build_preset_row(preset))
+            preset_paths.add(Path(preset["path"]))
+
         auto_drives = drives.list_removable_drives()
         for drive in auto_drives:
+            if drive.mount_point in preset_paths:
+                continue
             subtitle = f"{drive.free_gb:.1f} GB libres de {drive.total_gb:.1f} GB · {drive.mount_point}"
             row = Adw.ActionRow(title=drive.name, subtitle=subtitle)
             row.dest_path = drive.mount_point
@@ -299,8 +323,11 @@ class TransferView(Gtk.Box):
             row.add_prefix(Gtk.Image.new_from_icon_name("drive-removable-media-symbolic"))
             self.dest_list.append(row)
         self._known_auto_mounts = {d.mount_point for d in auto_drives}
+        self._known_preset_state = self._preset_availability()
 
         for row in manual_rows:
+            if row.dest_path in preset_paths:
+                continue
             self.dest_list.append(row)
 
         # Si el destino elegido sigue en la lista (unidad que ya estaba
@@ -323,6 +350,94 @@ class TransferView(Gtk.Box):
             self._update_eject_button()
             self._show_toast("El destino elegido ya no está disponible y se quitó de la lista.")
 
+    def _build_preset_row(self, preset: dict):
+        """Fila de un destino guardado. Si la ruta no está disponible ahora
+        (la SD que se sacó, el disco que no se conectó), la fila se muestra
+        igual pero apagada y diciendo por qué: borrarla sola sería peor,
+        porque el acceso rápido justamente existe para cuando esa unidad
+        vuelva."""
+        path = Path(preset["path"])
+        row = Adw.ActionRow(title=preset["name"])
+        row.dest_path = path
+        row.is_manual = False
+        row.is_preset = True
+        row.preset_name = preset["name"]
+        row.add_prefix(Gtk.Image.new_from_icon_name("starred-symbolic"))
+
+        if self._is_dest_valid(path):
+            try:
+                usage = shutil.disk_usage(path)
+                libres = usage.free / (1024 ** 3)
+                total = usage.total / (1024 ** 3)
+                row.set_subtitle(f"{libres:.1f} GB libres de {total:.1f} GB · {path}")
+            except OSError:
+                row.set_subtitle(str(path))
+        else:
+            row.set_subtitle(f"No disponible ahora · {path}")
+            # Apagada: así no se puede elegir un destino que no está, que
+            # es lo que terminaba en un error feo al tocar Transferir.
+            row.set_sensitive(False)
+            row.add_css_class("dim-label")
+
+        quitar = Gtk.Button(icon_name="user-trash-symbolic", valign=Gtk.Align.CENTER)
+        quitar.add_css_class("flat")
+        quitar.set_tooltip_text("Quitar este acceso rápido")
+        quitar.connect("clicked", lambda *_: self._on_delete_preset(preset))
+        # El botón va fuera del estado de la fila: un destino que no está
+        # disponible es justamente el que uno quiere poder borrar.
+        quitar.set_sensitive(True)
+        row.add_suffix(quitar)
+        return row
+
+    def _on_save_preset(self, *_):
+        if self._dest_path is None:
+            self._show_toast("Elegí primero un destino de la lista para guardarlo.")
+            return
+        path = self._dest_path
+
+        dialog = Adw.AlertDialog(
+            heading="Guardar este destino",
+            body=f"Se va a guardar como acceso rápido:\n{path}",
+        )
+        entry = Gtk.Entry(text=path.name or str(path),
+                           placeholder_text="Ej.: HDD principal, SD cliente")
+        entry.set_margin_start(12); entry.set_margin_end(12)
+        entry.set_margin_top(8); entry.set_margin_bottom(4)
+        dialog.set_extra_child(entry)
+        dialog.add_response("cancel", "Cancelar")
+        dialog.add_response("save", "Guardar")
+        dialog.set_default_response("save")
+        dialog.set_response_appearance("save", Adw.ResponseAppearance.SUGGESTED)
+        dialog.connect("response", self._on_save_preset_response, entry, path)
+        dialog.present(self.get_root())
+
+    def _on_save_preset_response(self, dialog, response, entry, path: Path):
+        if response != "save":
+            return
+        nombre = entry.get_text().strip() or (path.name or str(path))
+        presets = [p for p in self.settings.dest_presets if p.get("path") != str(path)]
+        presets.append({"name": nombre, "path": str(path)})
+        self.settings.dest_presets = presets
+        self._save_settings()
+        self._refresh_drives()
+        self._show_toast(f"Destino guardado como '{nombre}'.")
+
+    def _on_delete_preset(self, preset: dict):
+        self.settings.dest_presets = [
+            p for p in self.settings.dest_presets if p.get("path") != preset.get("path")
+        ]
+        self._save_settings()
+        self._refresh_drives()
+        self._show_toast(f"Se quitó el acceso rápido '{preset.get('name', '')}'.")
+
+    def _save_settings(self):
+        try:
+            self.settings.save()
+        except OSError as e:
+            # No se pierde lo que ya está en pantalla: la lista en memoria
+            # queda igual, solo no sobrevive al próximo arranque.
+            self._show_toast(f"No se pudo guardar la configuración: {e}")
+
     def _poll_drives(self):
         """Sondeo periódico (mismo patrón que la detección de la Biblioteca
         desconectada): solo repuebla la lista de destinos cuando algo
@@ -331,9 +446,18 @@ class TransferView(Gtk.Box):
         current_auto = {d.mount_point for d in drives.list_removable_drives()}
         manual_rows = [row for row in self._iter_dest_rows() if getattr(row, "is_manual", False)]
         manual_became_invalid = any(not self._is_dest_valid(row.dest_path) for row in manual_rows)
-        if current_auto != self._known_auto_mounts or manual_became_invalid:
+        # Un destino guardado que se conecta (o se desconecta) también tiene
+        # que reflejarse solo: si no, la SD que el usuario acaba de enchufar
+        # sigue mostrándose como "No disponible" hasta que toque Actualizar.
+        preset_state = self._preset_availability()
+        presets_cambiaron = preset_state != self._known_preset_state
+        if current_auto != self._known_auto_mounts or manual_became_invalid or presets_cambiaron:
             self._refresh_drives()
         return True  # seguir sondeando
+
+    def _preset_availability(self) -> dict:
+        return {p["path"]: self._is_dest_valid(Path(p["path"]))
+                for p in self.settings.dest_presets}
 
     def _iter_dest_rows(self):
         row = self.dest_list.get_first_child()
