@@ -231,7 +231,7 @@ class OperationLog:
             # Misma escritura atómica que config.json: si la app se cierra
             # a mitad de la escritura, queda el historial viejo entero y no
             # un archivo truncado que después no se pueda leer.
-            config.write_json_atomic(self._path, payload)
+            config.write_text_atomic(self._path, payload)
         except OSError as e:
             # No poder guardar el historial no puede hacer fallar la
             # operación que se acaba de completar: el archivo copiado ya

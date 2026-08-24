@@ -1347,7 +1347,11 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         # cualquier chat o editor.
         codificacion = "utf-8-sig" if fmt == library.EXPORT_CSV else "utf-8"
         try:
-            destino.write_text(contenido, encoding=codificacion)
+            # Misma escritura atómica que config.json y el historial: si el
+            # proceso se corta a mitad, el usuario se queda con el archivo
+            # anterior entero (o sin archivo), nunca con una lista cortada
+            # que parece completa.
+            config.write_text_atomic(destino, contenido, encoding=codificacion)
         except OSError as e:
             self._show_toast(f"No se pudo guardar la lista: {e}")
             return

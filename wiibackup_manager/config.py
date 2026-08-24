@@ -31,7 +31,7 @@ CACHE_DIR = XDG_CACHE_HOME / "wiibackup-manager"
 COVERS_DIR = CACHE_DIR / "covers"
 
 
-def write_json_atomic(path: Path, payload: str) -> None:
+def write_text_atomic(path: Path, payload: str, encoding: str = "utf-8") -> None:
     """Escribe `payload` en `path` de forma atómica.
 
     Se escribe primero a un temporal en la MISMA carpeta (para que el
@@ -43,8 +43,10 @@ def write_json_atomic(path: Path, payload: str) -> None:
     Antes esto era un `write_text()` directo en config.json: si la app o
     el sistema se cortaba en ese instante, el archivo quedaba truncado y
     el próximo arranque volvía a los valores por defecto sin decir nada,
-    perdiendo las preferencias del usuario. El historial de operaciones
-    usa la misma escritura por el mismo motivo.
+    perdiendo las preferencias del usuario. El historial de operaciones y
+    las listas exportadas (CSV/texto) usan la misma escritura por el mismo
+    motivo: `encoding` está para eso, porque el CSV se guarda como
+    utf-8-sig y no como utf-8 pelado.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -53,7 +55,7 @@ def write_json_atomic(path: Path, payload: str) -> None:
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent),
                                      prefix=f".{path.name}.", suffix=".tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        with os.fdopen(fd, "w", encoding=encoding) as f:
             f.write(payload)
             f.flush()
             os.fsync(f.fileno())
@@ -130,8 +132,8 @@ class Settings:
 
     def save(self) -> None:
         """Guarda la configuración de forma atómica (ver
-        `write_json_atomic`, compartida con el historial de operaciones)."""
-        write_json_atomic(CONFIG_FILE, json.dumps(asdict(self), indent=2))
+        `write_text_atomic`, compartida con el historial y las listas exportadas)."""
+        write_text_atomic(CONFIG_FILE, json.dumps(asdict(self), indent=2))
 
 
 def try_save(settings: Settings) -> Optional[str]:
