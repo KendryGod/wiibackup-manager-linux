@@ -70,12 +70,23 @@ class LogEntry:
         return STATUS_LABELS.get(self.status, self.status)
 
     def when(self) -> Optional[datetime]:
-        """El timestamp como datetime, o None si el archivo traía algo que
-        no se puede interpretar (historial editado a mano)."""
+        """El timestamp como datetime CON zona horaria, o None si el
+        archivo traía algo que no se puede interpretar.
+
+        La app siempre escribe el timestamp con offset, pero el historial
+        se lee de forma tolerante (puede estar editado a mano, o venir de
+        una versión anterior), y ahí puede aparecer uno sin zona. Mezclar
+        los dos rompe el orden entero: comparar un datetime "naive" contra
+        uno "aware" levanta TypeError, y el `sorted` de `entries()` se
+        lleva puesta la carga del historial completo. A los que vienen sin
+        zona se les asume la local, que es de donde salieron."""
         try:
-            return datetime.fromisoformat(self.timestamp)
+            moment = datetime.fromisoformat(self.timestamp)
         except (ValueError, TypeError):
             return None
+        if moment.tzinfo is None:
+            return moment.astimezone()
+        return moment
 
     def when_text(self) -> str:
         """Fecha y hora para mostrar: '2026-08-23 14:35'."""
