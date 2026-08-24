@@ -911,8 +911,22 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self._games.sort(key=key_fn, reverse=reverse)
 
     def _on_sort_changed(self, *_):
+        # Cambiar el criterio de orden reconstruye TODAS las filas, y con
+        # ellas sus casillas: sin esto, elegir doce juegos y después
+        # ordenar por tamaño para revisar la lista borraba la selección
+        # entera. Se guarda por ruta y no por game_id porque la ruta es lo
+        # que identifica a una fila: dos archivos del mismo juego (o varios
+        # sin identificar, todos con el mismo ID desconocido) no tienen que
+        # terminar seleccionados por haber elegido uno.
+        selected = {key for key, row in self._rows.items() if row.is_selected()}
+
         self._apply_sort()
         self._populate_list()
+
+        for key, row in self._rows.items():
+            if key in selected:
+                row.select_check.set_active(True)
+        self._update_selection_bar()
 
     # ---------------------------------------------------------- Filter --
     def _on_search_changed(self, entry):
