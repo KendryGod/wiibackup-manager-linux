@@ -864,10 +864,22 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         cancel = self._begin_cancellable_progress(
             "Convirtiendo", "Cancelando la conversión…")
 
-        total_bytes = sum(g.size_bytes for g in games)
         wit_binary = self.settings.wit_binary
 
         def worker():
+            # Los tamaños de SALIDA (no los de los archivos de origen): el
+            # progreso de `wit` cuenta bytes escritos en el destino. Se
+            # calcula acá y no en el hilo de GTK, igual que en la
+            # transferencia.
+            GLib.idle_add(self.progress_bar.set_text, "Calculando…")
+            salidas = {
+                id(g): library.estimate_output_size(
+                    g, ".wbfs" if g.fmt.upper() != "WBFS" else ".iso", wit_binary)
+                for g in games
+            }
+            total_bytes = sum(salidas.values())
+            GLib.idle_add(self.progress_bar.set_text, None)
+
             ok = 0
             errors: list[str] = []
             skipped: list[str] = []
@@ -885,8 +897,9 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 dest = game.path.with_suffix(target_ext)
                 base_bytes_done = bytes_written + bytes_other
 
-                def on_progress(current: int, _base=base_bytes_done, _game=game):
-                    est = min(current, int(_game.size_bytes * 0.97))
+                def on_progress(current: int, _base=base_bytes_done, _game=game,
+                                 _salida=salidas[id(game)]):
+                    est = min(current, int(_salida * 0.97))
                     frac = min((_base + est) / max(total_bytes, 1), 0.99)
                     GLib.idle_add(self.progress_bar.set_fraction, frac)
 
@@ -897,7 +910,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                     # saltea y se informa aparte en el resumen final, en
                     # vez de pisar en silencio o frenar todo el lote.
                     skipped.append(game.title)
-                    bytes_other += game.size_bytes
+                    bytes_other += salidas[id(game)]
                 else:
                     try:
                         result = wit_wrapper.convert(game.path, dest, target_ext.strip("."),
@@ -906,7 +919,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                         if result.returncode != 0:
                             raise RuntimeError(result.stderr.strip()[:200] or "error de wit")
                         ok += 1
-                        bytes_written += game.size_bytes
+                        bytes_written += salidas[id(game)]
                     except wit_wrapper.OperationCancelled:
                         # Cancelado a mitad de ESTE juego: no es un error, y
                         # no se sigue con los que faltaban.
@@ -919,7 +932,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                             cancelled = True
                             break
                         errors.append(f"{game.title}: {e}")
-                        bytes_other += game.size_bytes
+                        bytes_other += salidas[id(game)]
             GLib.idle_add(self._on_batch_done, "Convirtiendo", ok, errors, skipped, op,
                           self._describe_target(games), cancelled)
 
@@ -1747,6 +1760,9 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         # varios minutos y hasta ahora la única salida era cerrar la app.
         cancel = self._begin_cancellable_progress(
             "Convirtiendo", "Cancelando la conversión…")
+        # Tamaño de SALIDA, no del archivo de origen: el progreso de `wit`
+        # cuenta bytes escritos en el destino. Se calcula al vuelo dentro
+        # del worker (`_calcular_total`) para no frenar el hilo de GTK.
         total_bytes = max(game.size_bytes, 1)
         # Se inicializan acá y no dentro del `try`: el `finally` los lee
         # para armar la entrada del historial, y si la excepción salta
@@ -1759,7 +1775,9 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             GLib.idle_add(self.progress_bar.set_fraction, min(est / total_bytes, 0.99))
 
         def worker():
-            nonlocal ok, cancelled
+            nonlocal ok, cancelled, total_bytes
+            total_bytes = max(
+                library.estimate_output_size(game, target_ext, self.settings.wit_binary), 1)
             detail = ""
             try:
                 # El destino puede existir (el usuario confirmó pisarlo):

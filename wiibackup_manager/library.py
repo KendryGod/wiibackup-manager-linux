@@ -493,6 +493,30 @@ def plan_transfer(games, wit_binary: str = "wit") -> list:
     ]
 
 
+# Un disco de Wii de doble capa: lo que ocupa un ISO plano de esos.
+_WII_DUAL_LAYER_BYTES = 8_511_160_320
+
+
+def estimate_output_size(game: Game, target_ext: str, wit_binary: str = "wit") -> int:
+    """Cuánto va a pesar `game` convertido a `target_ext`.
+
+    No es lo mismo según a qué se convierta, y por eso no alcanza con
+    `estimate_transfer_size`: un WBFS guarda solo los sectores usados,
+    pero un ISO plano trae el disco entero con su relleno. Convertir un
+    WBFS de 350 MB a ISO da 4.7 GB, no 350 MB.
+
+    Se usa como denominador de la barra de progreso de la conversión: el
+    callback de `wit` informa bytes escritos en el DESTINO, así que
+    dividir por el tamaño del archivo de origen daba una barra que llegaba
+    al final antes de tiempo (o que no llegaba nunca)."""
+    if target_ext.lower().lstrip(".") == "iso":
+        usado = wit_wrapper.iso_size_bytes(game.path, wit_binary)
+        if usado and usado > _WII_SINGLE_LAYER_BYTES:
+            return _WII_DUAL_LAYER_BYTES
+        return _WII_SINGLE_LAYER_BYTES
+    return estimate_transfer_size(game, wit_binary)
+
+
 def free_space(path: Path) -> Optional[int]:
     """Bytes libres en el filesystem de `path`, o None si no se puede
     saber (unidad desconectada a mitad de camino, por ejemplo)."""
