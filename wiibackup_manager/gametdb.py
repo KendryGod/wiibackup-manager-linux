@@ -430,6 +430,14 @@ def _download_wiitdb(force: bool = False) -> Optional[Path]:
         tmp_path.write_bytes(xml_bytes)
         tmp_path.replace(path)
     except OSError:
+        # Si la escritura o el movimiento fallan (disco lleno, permisos,
+        # /home montado de otra forma), el temporal de 30 MB quedaba
+        # ocupando lugar en la caché para siempre: nadie más lo mira, y el
+        # próximo intento escribe sobre él pero solo si llega hasta acá.
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
         return None
     return path
 
