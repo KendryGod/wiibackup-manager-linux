@@ -337,12 +337,28 @@ def _copy_with_progress(
 
     Si se pasa `cancel`, se revisa entre bloques: cancelar corta la copia
     en el momento (no cuando el archivo termina solo, que con varios GB
-    sobre USB pueden ser 20 minutos) y borra el destino a medio escribir,
-    que no sirve para nada y ocuparía lugar en la unidad."""
+    sobre USB pueden ser 20 minutos).
+
+    NUNCA se escribe sobre `dest` directamente. Se copia a un archivo
+    temporal en la misma carpeta y recién cuando la copia terminó entera
+    (y bajó a disco) se lo mueve encima del destino, que es una operación
+    atómica dentro del mismo filesystem.
+
+    El motivo es el caso que más caro sale: sobrescribir. `open(dest,
+    "wb")` vacía el archivo destino en el acto, así que si la copia se
+    caía después -USB desenchufado, cancelación, disco lleno- el respaldo
+    bueno que el cliente ya tenía en esa unidad ya no existía, y lo único
+    que hacía el `except` era borrar la basura que había quedado. Con el
+    temporal, un fallo en cualquier punto deja el destino original
+    exactamente como estaba."""
     written = 0
     last_report = time.monotonic()
+    # Oculto y con el PID adentro: no lo toma un escaneo de la biblioteca
+    # y dos copias simultáneas hacia el mismo destino no se pisan el
+    # temporal entre sí.
+    tmp = dest.with_name(f".{dest.name}.parcial-{os.getpid()}")
     try:
-        with open(src, "rb") as fsrc, open(dest, "wb") as fdst:
+        with open(src, "rb") as fsrc, open(tmp, "wb") as fdst:
             while True:
                 if cancel is not None and cancel.cancelled:
                     raise wit_wrapper.OperationCancelled(
@@ -357,17 +373,23 @@ def _copy_with_progress(
                 if now - last_report >= 1.0:
                     progress_cb(written)
                     last_report = now
+            # A disco ANTES del intercambio: si no, el rename puede quedar
+            # registrado mientras los datos siguen en cache, y un tirón del
+            # cable dejaría el destino nuevo incompleto y el viejo ya
+            # borrado.
+            fdst.flush()
+            os.fsync(fdst.fileno())
+        shutil.copystat(src, tmp)
+        os.replace(tmp, dest)
     except BaseException:
-        # El destino quedó truncado a mitad de camino (open("wb") ya lo
-        # había vaciado): un WBFS parcial no sirve y confundiría al
-        # próximo escaneo, así que se borra.
+        # Solo se borra el temporal: el destino original -si había uno- no
+        # se tocó en ningún momento.
         try:
-            dest.unlink(missing_ok=True)
+            tmp.unlink(missing_ok=True)
         except OSError:
             pass
         raise
     progress_cb(written)
-    shutil.copystat(src, dest)
 
 
 class DestinationExistsError(FileExistsError):
