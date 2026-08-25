@@ -599,9 +599,14 @@ class DestinationGuard:
         self.enabled = enabled
         self._saved: list = []
         self._committed = False
+        self._outputs_before: set = set()
 
     def __enter__(self) -> "DestinationGuard":
         if not self.enabled:
+            # Sin respaldo que apartar, pero la foto se toma igual: la
+            # limpieza de un fallo tiene que poder distinguir lo que dejó
+            # ESTA operación de lo que ya estaba.
+            self._outputs_before = wit_wrapper.output_files(self.dest)
             return self
         marca = f".respaldo-{os.getpid()}"
         for original in wbfs_group(self.dest):
@@ -614,6 +619,14 @@ class DestinationGuard:
                 self._restore()
                 raise
             self._saved.append((original, respaldo))
+        # La foto va DESPUÉS de apartar el respaldo, no antes: el respaldo
+        # se llama `.{nombre}.respaldo-PID` y cae dentro del mismo glob con
+        # el que `wit_wrapper` reconoce sus temporales
+        # (`.{nombre}.{lo que sea}`). Si la foto se tomara antes, el
+        # respaldo aparecería como "archivo nuevo de esta operación" y la
+        # limpieza de un fallo lo borraría — o sea, justo lo contrario de
+        # para lo que existe esta clase.
+        self._outputs_before = wit_wrapper.output_files(self.dest)
         return self
 
     def commit(self) -> None:
@@ -621,8 +634,10 @@ class DestinationGuard:
         self._committed = True
 
     def __exit__(self, exc_type, exc, tb) -> bool:
-        if not self.enabled:
-            return False
+        # Ojo: acá NO se corta por `enabled`. Con el respaldo desactivado
+        # no hay nada que restaurar (`_saved` está vacío y `_restore` /
+        # `_discard` no hacen nada), pero sí hay que barrer lo que la
+        # operación fallida dejó a medio escribir.
         if self._committed and exc_type is None:
             self._discard()
         else:
@@ -631,8 +646,27 @@ class DestinationGuard:
         return False  # nunca se traga la excepción
 
     def _cleanup_partials(self) -> None:
-        """Borra lo que la operación fallida haya alcanzado a dejar con los
-        nombres finales, para que el respaldo pueda volver a su lugar."""
+        """Borra lo que la operación fallida haya alcanzado a dejar, para
+        que el respaldo pueda volver a su lugar y no quede basura ocupando
+        espacio.
+
+        Hay que barrer dos cosas, no una: los nombres finales (`dest`,
+        `dest.wbf1`, ...) y los temporales OCULTOS que `wit` usa mientras
+        escribe (`.{dest}.{random}.tmp`, `.tmp.1`, ...). `wit_wrapper` ya
+        limpia los suyos cuando cancela o cuando vence el timeout, pero si
+        `wit` simplemente devuelve un código de error después de haber
+        escrito medio archivo, esos temporales no los borraba nadie:
+        quedaban huérfanos, invisibles para el usuario (empiezan con
+        punto) y ocupando varios GB.
+
+        `cleanup_new_output_files` cubre las dos familias y solo toca lo
+        que apareció después de `__enter__`, así que no se lleva por
+        delante lo que ya estaba."""
+        # Los respaldos van explícitos en el conjunto protegido además de
+        # estar en la foto: son lo único que no se puede perder acá, y no
+        # depende de que la foto se haya tomado en el orden correcto.
+        protegidos = self._outputs_before | {resp for _orig, resp in self._saved}
+        wit_wrapper.cleanup_new_output_files(self.dest, protegidos)
         for parcial in wbfs_group(self.dest):
             try:
                 parcial.unlink()

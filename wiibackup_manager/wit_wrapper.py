@@ -285,7 +285,7 @@ def _wbfs_temp_files(dest: Path):
         return []
 
 
-def _output_files(dest: Path) -> set:
+def output_files(dest: Path) -> set:
     """Todos los archivos que una operación hacia `dest` puede estar
     escribiendo en este momento: los temporales de `wit` (ver
     `_wbfs_temp_files`), el archivo final y sus partes `.wbf1`, `.wbf2`,
@@ -310,7 +310,7 @@ def _output_files(dest: Path) -> set:
     return files
 
 
-def _cleanup_new_output_files(dest: Path, before: set) -> None:
+def cleanup_new_output_files(dest: Path, before: set) -> None:
     """Borra lo que ESTA operación dejó a medio escribir hacia `dest`.
 
     Se compara contra el conjunto de archivos que ya existían antes de
@@ -325,7 +325,7 @@ def _cleanup_new_output_files(dest: Path, before: set) -> None:
     respaldo bueno en el próximo escaneo. Si el destino YA existía antes,
     no se toca: puede ser el archivo original del usuario, que `wit` deja
     intacto hasta el rename final."""
-    for f in _output_files(dest) - before:
+    for f in output_files(dest) - before:
         try:
             f.unlink()
         except OSError:
@@ -342,7 +342,7 @@ def estimate_bytes_written(dest: Path) -> int:
     dos existe, salvo un instante muy breve durante el rename, donde
     sumar ambos no rompe nada."""
     total = 0
-    for f in _output_files(dest):
+    for f in output_files(dest):
         try:
             total += f.stat().st_size
         except OSError:
@@ -380,7 +380,7 @@ def _run_with_progress(
     detrás como última red de seguridad."""
     # Lo que ya existía antes de arrancar: si hay que limpiar por una
     # cancelación, se borra solo lo que agregó ESTA operación.
-    outputs_before = _output_files(dest)
+    outputs_before = output_files(dest)
     with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
         proc = subprocess.Popen(args, stdout=out_f, stderr=err_f, start_new_session=True)
         # Si la cancelación llegó entre el chequeo previo y el Popen,
@@ -426,7 +426,7 @@ def _run_with_progress(
                 proc.wait()
         except BaseException:
             _terminate_process_group(proc)
-            _cleanup_new_output_files(dest, outputs_before)
+            cleanup_new_output_files(dest, outputs_before)
             raise
         finally:
             if cancel is not None:
@@ -436,7 +436,7 @@ def _run_with_progress(
         if cancelled or timeout_reason is not None:
             # El proceso murió a mitad de una escritura: los temporales que
             # dejó no los va a renombrar ni limpiar nadie.
-            _cleanup_new_output_files(dest, outputs_before)
+            cleanup_new_output_files(dest, outputs_before)
 
         out_f.seek(0)
         err_f.seek(0)
