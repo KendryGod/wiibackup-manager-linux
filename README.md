@@ -5,7 +5,7 @@ de Windows. Hecho con GTK4 + libadwaita para verse nativo en Fedora/GNOME.
 
 ![Estado](https://img.shields.io/badge/estado-alpha-orange)
 ![Licencia](https://img.shields.io/badge/licencia-MIT-blue)
-![Versión](https://img.shields.io/badge/versión-0.1.5-green)
+![Versión](https://img.shields.io/badge/versión-0.1.6-green)
 
 ![La pestaña Biblioteca con las carátulas descargadas](docs/screenshots/biblioteca.png)
 
@@ -292,6 +292,114 @@ wiibackup_manager/
 ```
 
 ## Changelog
+
+### 0.1.6
+
+35 commits desde la 0.1.5. El foco está en integridad de datos: dos
+rondas de revisión externa sobre los arreglos de pérdida de datos de la
+versión anterior encontraron caminos de código que habían quedado sin la
+protección, y esta versión los cierra. Suma además cuatro funciones
+nuevas y el README completo.
+
+#### Corregido (crítico — pérdida de datos)
+
+- **Sobrescribir ya no puede perder el respaldo previo, por ningún
+  camino**. Reemplazar un archivo en la unidad o al convertir se hace con
+  respaldo explícito + intercambio atómico: lo que ya estaba se aparta a
+  un nombre oculto, se escribe sobre un nombre libre, y recién al final
+  se descarta el respaldo o se lo devuelve a su lugar según cómo haya
+  salido. La copia directa escribe en un temporal y lo mueve encima del
+  destino, en vez de abrirlo con `"wb"` (que lo vacía en el acto). Las
+  revisiones posteriores encontraron dos ramas que se salteaban esta
+  protección -la copia sin callbacks de progreso y la conversión sin
+  progreso ni cancelación- y ahora no queda ningún camino de escritura
+  sin cubrir: hay una sola ruta y está protegida siempre.
+- **El timeout de `wit` mata el grupo de procesos completo**, no solo el
+  proceso directo. `wit` corre en su propia sesión, así que cualquier
+  nieto sobrevivía a la señal y podía seguir escribiendo en el destino
+  después de que la app ya había dado la operación por terminada, pisando
+  lo que el respaldo acababa de restaurar.
+- **Colisiones de nombre al importar, adentro y afuera del lote**. Dos
+  archivos del mismo lote llamados igual ya no se pisan entre sí (los
+  destinos se reservan al planificar), y un archivo creado por un proceso
+  EXTERNO entre el planificado y la copia tampoco: el nombre se reserva
+  con `O_CREAT|O_EXCL`, que es atómico y falla si alguien llegó antes, y
+  esa colisión tardía se resuelve con un nombre alternativo en vez de
+  reemplazar en silencio. Renombrar usa la misma reserva atómica.
+- **`--overwrite` de `wit` dejó de enviarse de forma incondicional**. Era
+  una trampa para código futuro: cualquier llamada nueva a `convert()`
+  que no se ocupara del destino por su cuenta pisaba un juego sin
+  enterarse. Ahora es un parámetro explícito, con el default en "no
+  pisar", y solo se activa donde corresponde.
+
+#### Corregido
+
+- **Temporales de `wit` huérfanos**: se limpiaban al cancelar y al vencer
+  el timeout, pero no cuando `wit` fallaba con un error genérico a mitad
+  de la escritura. Una conversión cortada podía dejar varios GB ocupados
+  en archivos ocultos que no borraba nadie.
+- **Expulsar la unidad mientras se le escribe**: el botón solo miraba si
+  el destino era un punto de montaje, así que se podía desmontar un
+  pendrive a mitad de una transferencia. Las operaciones declaran ahora
+  qué leen, qué escriben y qué lugares ocupan mientras duran.
+- **Cancelar congelaba la ventana hasta 10 segundos** esperando a que el
+  proceso muriera. El SIGTERM sale en el acto y la espera de gracia queda
+  en un hilo aparte.
+- **Espacio necesario mal estimado para CISO y WDF**: esos formatos ya
+  vienen compactos, así que el archivo puede pesar mucho menos que el
+  WBFS que va a generar. El chequeo previo pasaba igual y `wit` fallaba a
+  mitad de una transferencia larga con el disco lleno. Ahora se le
+  pregunta a `wit ISOSIZE` cuánto ocupa el juego de verdad, y el cálculo
+  corre fuera del hilo de GTK.
+- **La importación informaba "completada" con archivos que fallaron**: un
+  archivo que no se podía identificar o copiar hacía `continue` en
+  silencio. Ahora cada fallo se anota con su motivo y el estado refleja
+  lo que pasó (completada, parcial o error).
+- **La caché de carátulas no distinguía la región**, así que el selector
+  de región no hacía nada después del primer uso.
+- **Escaneo fallido mostrado como biblioteca vacía**: si el disco se
+  desconectaba a mitad del recorrido, el usuario abría la app y veía la
+  lista vacía sin saber que fue un error. Ahora se conserva la última
+  lista conocida y se avisa.
+- **Progreso y ETA inflados**: los juegos que fallaban o que ya estaban
+  en el destino sumaban su tamaño al progreso como si se hubieran
+  escrito, y la conversión medía contra los bytes del origen en vez de
+  los de salida (convertir un WBFS de 350 MB a ISO da 4.7 GB, no 350 MB).
+- **Historial roto por timestamps sin zona horaria**: bastaba una entrada
+  mezclada para que fallara la carga del historial completo.
+- **Una sola entrada de historial por lote de renombrado**, en vez de dos
+  para la misma acción.
+- **Guardar preferencias podía tirar una excepción sin manejar** desde el
+  callback de GTK si el disco estaba lleno o la carpeta no era escribible.
+- **Fórmulas en el CSV exportado**: un título como `=1+1` (o algo peor)
+  se ejecutaría al abrir la lista en una hoja de cálculo. Los campos de
+  texto se neutralizan, y la exportación se escribe de forma atómica.
+- **Un fallo de red dejaba la metadata rota hasta reiniciar la app**: el
+  índice vacío y las respuestas nulas se cacheaban como definitivas.
+- **Carátulas cortadas cacheadas como válidas**: se daba por buena
+  cualquier descarga cuyos primeros 8 bytes fueran el magic de PNG. Ahora
+  se valida el archivo entero y se guarda de forma atómica.
+- **Consultas de metadata de GameTDB duplicadas**: con 300 juegos se
+  encolaban 300 tareas idénticas después de cada rescan. Ahora se
+  deduplican y se cachean como ya hacían las carátulas.
+
+#### Agregado
+
+- **Renombrar en lote** toda la biblioteca (o lo seleccionado) al formato
+  estándar "Título [ID].ext", con ejemplos concretos en la confirmación,
+  progreso y cancelación. Los que ya están bien se saltean.
+- **Exportar la lista de juegos** a CSV o a texto plano, respetando el
+  filtro del buscador y el orden de la pantalla.
+- **Destinos guardados** (accesos rápidos con nombre propio) en la
+  pestaña Transferir. Un destino que no está disponible se muestra
+  apagado en vez de desaparecer.
+- **Elegir la apariencia** desde Preferencias: Sistema (por defecto),
+  Claro u Oscuro.
+
+#### Otros
+
+- README completo, escrito para alguien que nunca vio el proyecto.
+- Toda la configuración de empaquetado unificada en `pyproject.toml`.
 
 ### 0.1.5
 
