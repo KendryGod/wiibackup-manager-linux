@@ -222,7 +222,7 @@ _MAX_RENAME_ATTEMPTS = 100
 
 
 def rename_no_replace(src: Path, dest: Path) -> None:
-    """Renombra `src` a `dest` sin pisar `dest` NUNCA.
+    """Renombra `src` a `dest` sin pisar un archivo ajeno.
 
     `Path.rename` en Linux reemplaza el destino en silencio, así que el
     patrón "si no existe, renombrar" tiene una ventana entre las dos
@@ -235,9 +235,22 @@ def rename_no_replace(src: Path, dest: Path) -> None:
     renameat2(RENAME_NOREPLACE) porque esto anda en cualquier filesystem
     (los pendrives suelen ser FAT32/exFAT) y sin ctypes.
 
+    Hasta dónde llega la garantía, con precisión:
+
+    - contra las carreras de la propia app (dos operaciones sobre la misma
+      carpeta) y contra el uso normal de otros programas: el nombre queda
+      reservado de forma atómica, así que no se pisa nada;
+    - lo que NO cubre es un proceso externo que borre o reemplace
+      justamente nuestra reserva entre el O_CREAT|O_EXCL y el os.replace.
+      Ahí el replace pisaría lo que haya quedado con ese nombre. Es una
+      ventana de microsegundos y hace falta que alguien esté buscando
+      pisarla a propósito; no hay forma de cerrarla del todo sin
+      renameat2, y no vale la pena pagar esa complejidad por un escenario
+      que no es el de esta app.
+
     Si el proceso se muere justo entre la reserva y el movimiento queda un
-    archivo de 0 bytes con el nombre nuevo: es lo peor que puede pasar, y
-    es preferible a perder un juego."""
+    archivo de 0 bytes con el nombre nuevo: es lo peor que puede pasar por
+    las buenas, y es preferible a perder un juego."""
     fd = os.open(dest, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
     os.close(fd)
     try:
