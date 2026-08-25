@@ -1395,6 +1395,20 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             return
         destino = Path(archivo.get_path())
 
+        # Confirmación propia antes de pisar: el selector del sistema suele
+        # preguntar, pero eso depende del portal que esté instalado, y el
+        # resto de la app no delega esa decisión en nadie.
+        if destino.exists():
+            gtk_helpers.confirm_overwrite(
+                self,
+                f"Ya existe un archivo en:\n{destino.name}\n\n"
+                "Exportar la lista lo va a reemplazar.",
+                lambda: self._write_export(destino, juegos, fmt),
+            )
+            return
+        self._write_export(destino, juegos, fmt)
+
+    def _write_export(self, destino: Path, juegos: list[Game], fmt: str):
         contenido = library.export_games(juegos, fmt)
         # utf-8-sig en el CSV: sin el BOM, Excel en Windows abre los
         # acentos rotos, y estas listas terminan en la computadora de un
