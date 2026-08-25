@@ -556,28 +556,28 @@ def convert(
         args += ["--split-size", _SPLIT_SIZE_ARG]
     args += [str(src), "--dest", str(dest)]
 
-    # Con `cancel` siempre se usa el camino de `Popen` aunque no haga falta
-    # progreso: es el único que puede registrar el proceso para matarlo.
-    if bytes_progress_cb is not None or cancel is not None:
-        result = _run_with_progress(
-            args, dest, bytes_progress_cb or (lambda _n: None), cancel,
-            inactivity_timeout=inactivity_timeout,
-            absolute_timeout=absolute_timeout,
-        )
-    else:
-        # Sin sondeo de progreso no hay forma de medir inactividad, así que
-        # acá solo aplica el límite absoluto.
-        try:
-            result = subprocess.run(
-                args,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=absolute_timeout,
-                start_new_session=True,
-            )
-        except subprocess.TimeoutExpired as exc:
-            result = _timeout_result(args, exc, absolute_timeout)
+    # UN SOLO camino de ejecución, haya o no callbacks. Antes, sin progreso
+    # ni cancelación se caía en un `subprocess.run` con timeout, que al
+    # vencer:
+    #
+    # - le manda la señal SOLO al hijo directo. `wit` corre con
+    #   `start_new_session=True`, o sea en su propio grupo, así que
+    #   cualquier nieto quedaba vivo escribiendo en el destino después de
+    #   que la app ya había dado la operación por terminada (comprobado con
+    #   un proceso de prueba que deja un nieto escribiendo: sobrevivía);
+    # - no limpiaba los temporales a medio escribir. Una conversión real de
+    #   7.1 GB cortada por timeout dejaba un `.salida.iso.XXXX.tmp` de
+    #   8.1 GB huérfano ocupando el disco;
+    # - solo podía aplicar el límite absoluto, no el de inactividad.
+    #
+    # `_run_with_progress` ya resuelve las tres cosas, y el sondeo del
+    # destino que necesita para medir inactividad no depende de que el que
+    # llama quiera progreso: cuando no lo quiere, recibe un callback no-op.
+    result = _run_with_progress(
+        args, dest, bytes_progress_cb or (lambda _n: None), cancel,
+        inactivity_timeout=inactivity_timeout,
+        absolute_timeout=absolute_timeout,
+    )
 
     if cancel is not None and cancel.cancelled:
         raise OperationCancelled("Transferencia cancelada por el usuario.")
