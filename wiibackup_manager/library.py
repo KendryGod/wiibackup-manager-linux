@@ -724,11 +724,16 @@ def send_to_wbfs_drive(
     # dividir (si hiciera falta dividir, una copia plana no puede hacerlo:
     # hay que pasar por `wit COPY --split`).
     if game.fmt.upper() == "WBFS" and not (split and game.size_bytes >= _FAT32_SIZE_LIMIT_BYTES):
-        if bytes_progress_cb is not None or cancel is not None:
-            _copy_with_progress(game.path, dest,
-                                bytes_progress_cb or (lambda _n: None), cancel)
-        else:
-            shutil.copy2(game.path, dest)
+        # SIEMPRE por `_copy_with_progress`, aunque no haya progreso ni
+        # cancelación que reportar: es el único camino que escribe en un
+        # temporal y recién al final lo mueve encima del destino. La rama
+        # "atajo" con `shutil.copy2` que había acá abría el destino con
+        # "wb", o sea que lo vaciaba en el acto, y un fallo posterior
+        # (crash, USB desenchufado, disco lleno) dejaba al usuario sin el
+        # respaldo que ya tenía. El callback no-op no cuesta nada; tener
+        # dos caminos de escritura, uno protegido y otro no, sí.
+        _copy_with_progress(game.path, dest,
+                            bytes_progress_cb or (lambda _n: None), cancel)
         return dest
 
     if not wit_wrapper.is_available(wit_binary):
