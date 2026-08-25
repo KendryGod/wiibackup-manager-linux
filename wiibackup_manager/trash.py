@@ -37,6 +37,8 @@ from pathlib import Path
 
 from gi.repository import Gio, GLib
 
+from .i18n import _
+
 
 class TrashUnsupported(OSError):
     """No hay papelera disponible para ese archivo (unidad de solo
@@ -87,7 +89,8 @@ def send_to_trash(path) -> None:
     except GLib.Error as e:
         if e.matches(Gio.io_error_quark(), Gio.IOErrorEnum.NOT_SUPPORTED):
             raise TrashUnsupported(
-                f"la unidad donde está '{Path(path).name}' no tiene papelera"
+                _("la unidad donde está '{name}' no tiene papelera")
+                .format(name=Path(path).name)
             ) from e
         raise OSError(e.message) from e
 

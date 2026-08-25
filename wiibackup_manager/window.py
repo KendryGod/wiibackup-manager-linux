@@ -13,6 +13,7 @@ from gi.repository import Adw, Gtk, GLib, Gio, Gdk  # noqa: E402
 
 from . import __version__, config, library, operations, oplog, styles, trash, wit_wrapper
 from .disc_header import UNKNOWN_GAME_ID
+from .i18n import _, ngettext
 from .operations import OperationBusy, OperationKind, OperationOutcome
 
 
@@ -35,11 +36,11 @@ def _game_ctime(game: "Game") -> float:
 
 
 SORT_OPTIONS = [
-    ("Título (A-Z)", lambda g: g.title.lower(), False),
-    ("Tamaño (mayor a menor)", lambda g: g.size_bytes, True),
-    ("Tamaño (menor a mayor)", lambda g: g.size_bytes, False),
-    ("Fecha de agregado (más nuevo primero)", _game_ctime, True),
-    ("Formato (A-Z)", lambda g: (g.fmt, g.title.lower()), False),
+    (_("Título (A-Z)"), lambda g: g.title.lower(), False),
+    (_("Tamaño (mayor a menor)"), lambda g: g.size_bytes, True),
+    (_("Tamaño (menor a mayor)"), lambda g: g.size_bytes, False),
+    (_("Fecha de agregado (más nuevo primero)"), _game_ctime, True),
+    (_("Formato (A-Z)"), lambda g: (g.fmt, g.title.lower()), False),
 ]
 from .library import Game
 from .widgets.game_detail_dialog import GameDetailDialog
@@ -139,34 +140,34 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         header.set_title_widget(self.title_widget)
 
         self._add_button = add_button = Gtk.MenuButton(icon_name="list-add-symbolic")
-        add_button.set_tooltip_text("Agregar juegos (ISO/WBFS)")
+        add_button.set_tooltip_text(_("Agregar juegos (ISO/WBFS)"))
         add_menu = Gio.Menu()
-        add_menu.append("Agregar archivos", "win.add-files")
-        add_menu.append("Agregar carpeta completa", "win.add-folder")
+        add_menu.append(_("Agregar archivos"), "win.add-files")
+        add_menu.append(_("Agregar carpeta completa"), "win.add-folder")
         add_button.set_menu_model(add_menu)
         header.pack_start(add_button)
 
         self._refresh_button = refresh_button = Gtk.Button(icon_name="view-refresh-symbolic")
-        refresh_button.set_tooltip_text("Volver a escanear la biblioteca")
-        refresh_button.connect("clicked", lambda *_: self.rescan_library())
+        refresh_button.set_tooltip_text(_("Volver a escanear la biblioteca"))
+        refresh_button.connect("clicked", lambda *_a: self.rescan_library())
         header.pack_start(refresh_button)
 
         self.select_toggle = Gtk.ToggleButton(icon_name="object-select-symbolic")
-        self.select_toggle.set_tooltip_text("Selección múltiple")
+        self.select_toggle.set_tooltip_text(_("Selección múltiple"))
         self.select_toggle.connect("toggled", self._on_select_mode_toggled)
         header.pack_start(self.select_toggle)
 
         menu_button = Gtk.MenuButton(icon_name="open-menu-symbolic")
         menu = Gio.Menu()
         tools_section = Gio.Menu()
-        tools_section.append("Renombrar todo a estándar…", "win.rename-all")
+        tools_section.append(_("Renombrar todo a estándar…"), "win.rename-all")
         menu.append_section(None, tools_section)
         export_section = Gio.Menu()
-        export_section.append("Exportar lista a CSV…", "win.export-csv")
-        export_section.append("Exportar lista como texto…", "win.export-text")
+        export_section.append(_("Exportar lista a CSV…"), "win.export-csv")
+        export_section.append(_("Exportar lista como texto…"), "win.export-text")
         menu.append_section(None, export_section)
-        menu.append("Preferencias", "win.preferences")
-        menu.append("Acerca de", "win.about")
+        menu.append(_("Preferencias"), "win.preferences")
+        menu.append(_("Acerca de"), "win.about")
         menu_button.set_menu_model(menu)
         header.pack_end(menu_button)
 
@@ -179,7 +180,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self._add_action("export-text", lambda: self._on_export(library.EXPORT_TEXT))
 
         # Barra de búsqueda
-        self.search_entry = Gtk.SearchEntry(placeholder_text="Buscar por título o ID…")
+        self.search_entry = Gtk.SearchEntry(placeholder_text=_("Buscar por título o ID…"))
         self.search_entry.connect("search-changed", self._on_search_changed)
         search_bar_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, margin_start=12,
                                   margin_end=12, margin_top=8, margin_bottom=8)
@@ -189,12 +190,12 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self.sort_dropdown = Gtk.DropDown.new_from_strings(
             [label for label, _fn, _rev in SORT_OPTIONS]
         )
-        self.sort_dropdown.set_tooltip_text("Ordenar por")
+        self.sort_dropdown.set_tooltip_text(_("Ordenar por"))
         self.sort_dropdown.connect("notify::selected", self._on_sort_changed)
         search_bar_box.append(self.sort_dropdown)
 
         self.progress_bar = Gtk.ProgressBar(visible=False, show_text=True, hexpand=True)
-        self.progress_cancel_btn = Gtk.Button(label="Cancelar", visible=False)
+        self.progress_cancel_btn = Gtk.Button(label=_("Cancelar"), visible=False)
         self.progress_cancel_btn.connect("clicked", self._on_progress_cancel_clicked)
 
         progress_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
@@ -223,8 +224,9 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         scroller.set_margin_bottom(12)
 
         self.status_page = Adw.StatusPage(
-            title="Sin juegos todavía",
-            description="Agregá tus ISO/WBFS o elegí una carpeta de biblioteca en Preferencias.",
+            title=_("Sin juegos todavía"),
+            description=_("Agregá tus ISO/WBFS o elegí una carpeta de biblioteca "
+                          "en Preferencias."),
             icon_name="drive-harddisk-symbolic",
         )
 
@@ -249,65 +251,66 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         drop_target.connect("drop", self._on_files_dropped)
         self.stack.add_controller(drop_target)
 
-        self.view_stack.add_titled_with_icon(content_box, "library", "Biblioteca",
+        self.view_stack.add_titled_with_icon(content_box, "library", _("Biblioteca"),
                                               "view-list-symbolic")
 
         self.transfer_view = TransferView(self.settings, self._show_toast, self.ops)
-        self.view_stack.add_titled_with_icon(self.transfer_view, "transfer", "Transferir",
+        self.view_stack.add_titled_with_icon(self.transfer_view, "transfer", _("Transferir"),
                                               "drive-removable-media-symbolic")
 
         self.log_view = LogView(self.op_log, self._show_toast)
-        self.view_stack.add_titled_with_icon(self.log_view, "log", "Log",
+        self.view_stack.add_titled_with_icon(self.log_view, "log", _("Log"),
                                               "document-open-recent-symbolic")
 
         toolbar_view.set_content(self.view_stack)
 
         if not wit_wrapper.is_available(self.settings.wit_binary):
             banner = Adw.Banner(
-                title="No se encontró 'wit' (Wiimms ISO Tools): la conversión y "
-                      "los WBFS multi-juego estarán limitados. Ver README para instalarlo.",
+                title=_("No se encontró 'wit' (Wiimms ISO Tools): la conversión y "
+                        "los WBFS multi-juego estarán limitados. Ver README para "
+                        "instalarlo."),
                 revealed=True,
             )
             toolbar_view.add_top_bar(banner)
 
-        self._library_banner = Adw.Banner(button_label="Reintentar")
-        self._library_banner.connect("button-clicked", lambda *_: self.rescan_library())
+        self._library_banner = Adw.Banner(button_label=_("Reintentar"))
+        self._library_banner.connect("button-clicked", lambda *_a: self.rescan_library())
         toolbar_view.add_top_bar(self._library_banner)
         self._update_library_banner()
 
         # Barra de acciones en lote: aparece al activar el modo selección.
         self._selection_bar = Gtk.ActionBar()
-        self._sel_count_label = Gtk.Label(label="0 seleccionados")
+        self._sel_count_label = Gtk.Label(label=_("0 seleccionados"))
         self._selection_bar.pack_start(self._sel_count_label)
         self._selection_bar.pack_start(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
 
-        self._batch_send_btn = Gtk.Button(label="Enviar a unidad WBFS")
-        self._batch_send_btn.connect("clicked", lambda *_: self._on_batch_send())
+        self._batch_send_btn = Gtk.Button(label=_("Enviar a unidad WBFS"))
+        self._batch_send_btn.connect("clicked", lambda *_a: self._on_batch_send())
         self._selection_bar.pack_start(self._batch_send_btn)
 
-        self._batch_convert_btn = Gtk.Button(label="Convertir")
-        self._batch_convert_btn.connect("clicked", lambda *_: self._on_batch_convert())
+        self._batch_convert_btn = Gtk.Button(label=_("Convertir"))
+        self._batch_convert_btn.connect("clicked", lambda *_a: self._on_batch_convert())
         self._selection_bar.pack_start(self._batch_convert_btn)
 
-        self._batch_rename_btn = Gtk.Button(label="Renombrar")
+        self._batch_rename_btn = Gtk.Button(label=_("Renombrar"))
         self._batch_rename_btn.set_tooltip_text(
-            "Renombrar los archivos elegidos a 'Título [ID].ext'"
+            _("Renombrar los archivos elegidos a 'Título [ID].ext'")
         )
-        self._batch_rename_btn.connect("clicked", lambda *_: self._on_batch_rename())
+        self._batch_rename_btn.connect("clicked", lambda *_a: self._on_batch_rename())
         self._selection_bar.pack_start(self._batch_rename_btn)
 
-        self._batch_verify_btn = Gtk.Button(label="Verificar")
-        self._batch_verify_btn.connect("clicked", lambda *_: self._on_batch_verify())
+        self._batch_verify_btn = Gtk.Button(label=_("Verificar"))
+        self._batch_verify_btn.connect("clicked", lambda *_a: self._on_batch_verify())
         self._selection_bar.pack_start(self._batch_verify_btn)
 
-        self._batch_delete_btn = Gtk.Button(label="Eliminar")
+        self._batch_delete_btn = Gtk.Button(label=_("Eliminar"))
         self._batch_delete_btn.add_css_class("destructive-action")
-        self._batch_delete_btn.connect("clicked", lambda *_: self._on_batch_delete())
+        self._batch_delete_btn.connect("clicked", lambda *_a: self._on_batch_delete())
         self._selection_bar.pack_start(self._batch_delete_btn)
 
         cancel_selection_btn = Gtk.Button(icon_name="window-close-symbolic")
-        cancel_selection_btn.set_tooltip_text("Cancelar selección")
-        cancel_selection_btn.connect("clicked", lambda *_: self.select_toggle.set_active(False))
+        cancel_selection_btn.set_tooltip_text(_("Cancelar selección"))
+        cancel_selection_btn.connect("clicked", lambda *_a: self.select_toggle.set_active(False))
         self._selection_bar.pack_end(cancel_selection_btn)
 
         self._selection_bar.set_revealed(False)
@@ -316,7 +319,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
     def _add_action(self, name: str, callback):
         action = Gio.SimpleAction.new(name, None)
-        action.connect("activate", lambda *_: callback())
+        action.connect("activate", lambda *_a: callback())
         self.add_action(action)
 
     # --------------------------------------------------------- Selección --
@@ -356,8 +359,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
     @staticmethod
     def _busy_tooltip(blocker) -> str:
-        return (f"Hay una operación en curso: {blocker.label}. "
-                "Esperá a que termine.")
+        return _("Hay una operación en curso: {op}. Esperá a que termine.").format(
+            op=blocker.label)
 
     def _update_selection_bar(self):
         if self._suspend_selection_updates:
@@ -366,9 +369,11 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         count = len(games)
         if count:
             total_size = library.format_size(sum(g.size_bytes for g in games))
-            self._sel_count_label.set_label(f"{count} seleccionado(s) · {total_size}")
+            self._sel_count_label.set_label(
+                _("{count} seleccionado(s) · {size}").format(count=count,
+                                                             size=total_size))
         else:
-            self._sel_count_label.set_label("0 seleccionado(s)")
+            self._sel_count_label.set_label(_("0 seleccionado(s)"))
 
         # Cada botón se apaga solo si SU acción no puede arrancar ahora, no
         # porque haya cualquier cosa en curso: con una verificación suelta
@@ -404,9 +409,9 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         biblioteca = Path(self.settings.library_path)
         for btn, kind, recursos, idle_tooltip in (
                 (self._refresh_button, OperationKind.SCANNING, [biblioteca],
-                 "Volver a escanear la biblioteca"),
+                 _("Volver a escanear la biblioteca")),
                 (self._add_button, OperationKind.IMPORTING, [],
-                 "Agregar juegos (ISO/WBFS)")):
+                 _("Agregar juegos (ISO/WBFS)"))):
             blocker = self.ops.conflict_for(kind, resources=recursos)
             btn.set_sensitive(blocker is None)
             btn.set_tooltip_text(idle_tooltip if blocker is None
@@ -421,7 +426,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         haría ilegible la entrada)."""
         if len(games) == 1:
             return games[0].title
-        return f"{len(games)} juegos"
+        return _("{n} juegos").format(n=len(games))
 
     @staticmethod
     def _batch_outcome(target: str, ok: int, errors: list[str],
@@ -486,11 +491,11 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             self.ops.check(kind, read=read, write=write, resources=resources,
                             uses_progress_bar=uses_progress_bar)
         except OperationBusy as e:
-            self._show_toast(f"No se puede ahora: {e.detail}.")
+            self._show_toast(_("No se puede ahora: {detail}.").format(detail=e.detail))
             return True
         return False
 
-    def _on_progress_cancel_clicked(self, *_):
+    def _on_progress_cancel_clicked(self, *_args):
         # Mata el `wit` (o corta la copia) que esté corriendo ahora mismo,
         # no solo evita que arranque el próximo juego.
         self._cancel_token.cancel()
@@ -514,7 +519,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self.progress_bar.set_fraction(0)
         self.progress_cancel_btn.set_visible(True)
         self.progress_cancel_btn.set_sensitive(True)
-        self.set_title(f"WiiBackup Manager — {title}…")
+        self.set_title(_("WiiBackup Manager — {title}…").format(title=title))
         return cancel
 
     def _hide_progress(self):
@@ -569,7 +574,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 uses_progress_bar=True,
             )
         except OperationBusy as e:
-            self._show_toast(f"No se puede ahora: {e.detail}.")
+            self._show_toast(_("No se puede ahora: {detail}.").format(detail=e.detail))
             return
 
         cancel = self._begin_cancellable_progress(title, cancel_message)
@@ -626,26 +631,33 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self._hide_progress()
         if cancelled:
             self._show_toast(
-                f"{title}: cancelado tras {ok} completado(s)"
-                + (f", {len(errors)} con error" if errors else "")
-                + (f", {len(skipped)} omitido(s)" if skipped else "")
+                _("{title}: cancelado tras {ok} completado(s)").format(
+                    title=title, ok=ok)
+                + (_(", {n} con error").format(n=len(errors)) if errors else "")
+                + (_(", {n} omitido(s)").format(n=len(skipped)) if skipped else "")
                 + "."
             )
             self.rescan_library()
             return False
-        parts = [f"{ok} ok" if (errors or skipped) else f"{ok} completado(s) ✓"]
+        parts = [_("{n} ok").format(n=ok) if (errors or skipped)
+                 else _("{n} completado(s) ✓").format(n=ok)]
         if skipped:
             preview = "; ".join(skipped[:3])
-            more = f" (+{len(skipped) - 3} más)" if len(skipped) > 3 else ""
-            parts.append(f"{len(skipped)} omitido(s): {preview}{more}")
+            more = (_(" (+{n} más)").format(n=len(skipped) - 3)
+                    if len(skipped) > 3 else "")
+            parts.append(_("{n} omitido(s): {preview}{more}").format(
+                n=len(skipped), preview=preview, more=more))
         if notes:
             preview = "; ".join(notes[:2])
-            more = f" (+{len(notes) - 2} más, ver el Log)" if len(notes) > 2 else ""
+            more = (_(" (+{n} más, ver el Log)").format(n=len(notes) - 2)
+                    if len(notes) > 2 else "")
             parts.append(preview + more)
         if errors:
             preview = "; ".join(errors[:3])
-            more = f" (+{len(errors) - 3} más)" if len(errors) > 3 else ""
-            parts.append(f"{len(errors)} con error: {preview}{more}")
+            more = (_(" (+{n} más)").format(n=len(errors) - 3)
+                    if len(errors) > 3 else "")
+            parts.append(_("{n} con error: {preview}{more}").format(
+                n=len(errors), preview=preview, more=more))
         self._show_toast(f"{title}: " + " · ".join(parts))
         self.rescan_library()
         return False
@@ -657,7 +669,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         if self._reject_if_busy(OperationKind.TRANSFERRING,
                                  read=[g.path for g in games]):
             return
-        dialog = Gtk.FileDialog(title="Elegí la unidad/carpeta destino (WBFS)")
+        dialog = Gtk.FileDialog(title=_("Elegí la unidad/carpeta destino (WBFS)"))
         dialog.select_folder(self, None,
                               lambda d, r: self._on_batch_send_folder_chosen(d, r, games))
 
@@ -672,7 +684,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         if any(g.fmt.upper() != "WBFS" for g in games) and \
                 not wit_wrapper.is_available(self.settings.wit_binary):
             self._show_toast(
-                "No se encontró 'wit'; no se puede convertir a WBFS los que no lo son ya."
+                _("No se encontró 'wit'; no se puede convertir a WBFS los que "
+                  "no lo son ya.")
             )
             return
 
@@ -688,9 +701,10 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             if dest is not None and dest.exists():
                 gtk_helpers.confirm_overwrite(
                     self,
-                    f"Ya existe un archivo en:\n{dest}\n\n"
-                    f"Enviar '{games[0].title}' lo va a reemplazar. "
-                    "Esta acción no se puede deshacer.",
+                    _("Ya existe un archivo en:\n{dest}\n\n"
+                      "Enviar '{title}' lo va a reemplazar. "
+                      "Esta acción no se puede deshacer.")
+                    .format(dest=dest, title=games[0].title),
                     lambda: self._start_send(games, dest_root, overwrite=True),
                 )
                 return
@@ -713,7 +727,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 resources=[dest_root],
             )
         except OperationBusy as e:
-            self._show_toast(f"No se puede ahora: {e.detail}.")
+            self._show_toast(_("No se puede ahora: {detail}.").format(detail=e.detail))
             return
 
         cancel = self._begin_cancellable_progress(
@@ -833,12 +847,16 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         if bytes_written > 0 and elapsed > 1:
             speed = bytes_written / elapsed
             remaining = max(total_bytes - bytes_done, 0)
-            eta_text = f" · ~{library.format_eta(remaining / speed)} restantes" if speed > 0 else ""
+            eta_text = (_(" · ~{eta} restantes")
+                        .format(eta=library.format_eta(remaining / speed))
+                        if speed > 0 else "")
         elif total > 1:
-            eta_text = " · calculando tiempo restante…"
+            eta_text = _(" · calculando tiempo restante…")
         else:
             eta_text = ""
-        self.progress_bar.set_text(f"{done}/{total} · {title}{eta_text}")
+        self.progress_bar.set_text(
+            _("{done}/{total} · {title}{eta}").format(
+                done=done, total=total, title=title, eta=eta_text))
         return False
 
     def _on_send_done(self, ok: int, errors: list[str], cancelled: bool,
@@ -854,23 +872,29 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self.progress_bar.set_text(None)
         if cancelled:
             self._show_toast(
-                f"Envío a unidad WBFS cancelado: {ok} ok, {len(errors)} con error"
-                + (f", {len(skipped)} omitido(s)" if skipped else "")
-                + " antes de cancelar."
+                _("Envío a unidad WBFS cancelado: {ok} ok, {err} con error").format(
+                    ok=ok, err=len(errors))
+                + (_(", {n} omitido(s)").format(n=len(skipped)) if skipped else "")
+                + _(" antes de cancelar.")
             )
         elif errors or skipped:
-            parts = [f"{ok} ok"]
+            parts = [_("{n} ok").format(n=ok)]
             if skipped:
                 preview = "; ".join(skipped[:3])
-                more = f" (+{len(skipped) - 3} más)" if len(skipped) > 3 else ""
-                parts.append(f"{len(skipped)} ya estaban en el destino: {preview}{more}")
+                more = (_(" (+{n} más)").format(n=len(skipped) - 3)
+                        if len(skipped) > 3 else "")
+                parts.append(_("{n} ya estaban en el destino: {preview}{more}").format(
+                    n=len(skipped), preview=preview, more=more))
             if errors:
                 preview = "; ".join(errors[:3])
-                more = f" (+{len(errors) - 3} más)" if len(errors) > 3 else ""
-                parts.append(f"{len(errors)} con error: {preview}{more}")
-            self._show_toast("Enviando a unidad WBFS: " + " · ".join(parts))
+                more = (_(" (+{n} más)").format(n=len(errors) - 3)
+                        if len(errors) > 3 else "")
+                parts.append(_("{n} con error: {preview}{more}").format(
+                    n=len(errors), preview=preview, more=more))
+            self._show_toast(_("Enviando a unidad WBFS: ") + " · ".join(parts))
         else:
-            self._show_toast(f"Enviando a unidad WBFS: {ok} completado(s) ✓")
+            self._show_toast(
+                _("Enviando a unidad WBFS: {n} completado(s) ✓").format(n=ok))
         self.rescan_library()
         return False
 
@@ -885,7 +909,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                                      for g in games]):
             return
         if not wit_wrapper.is_available(self.settings.wit_binary):
-            self._show_toast("No se encontró 'wit'. Instalalo para poder convertir (ver README).")
+            self._show_toast(_("No se encontró 'wit'. Instalalo para poder convertir "
+                               "(ver README)."))
             return
 
         # Worker dedicado (no _run_batch genérico) porque acá sí tiene
@@ -903,11 +928,11 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             op = self.ops.start(OperationKind.CONVERTING,
                                  read=[g.path for g in games], write=destinos)
         except OperationBusy as e:
-            self._show_toast(f"No se puede ahora: {e.detail}.")
+            self._show_toast(_("No se puede ahora: {detail}.").format(detail=e.detail))
             return
 
         cancel = self._begin_cancellable_progress(
-            "Convirtiendo", "Cancelando la conversión…")
+            _("Convirtiendo"), _("Cancelando la conversión…"))
 
         wit_binary = self.settings.wit_binary
 
@@ -916,7 +941,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             # progreso de `wit` cuenta bytes escritos en el destino. Se
             # calcula acá y no en el hilo de GTK, igual que en la
             # transferencia.
-            GLib.idle_add(self.progress_bar.set_text, "Calculando…")
+            GLib.idle_add(self.progress_bar.set_text, _("Calculando…"))
             salidas = {
                 id(g): library.estimate_output_size(
                     g, ".wbfs" if g.fmt.upper() != "WBFS" else ".iso", wit_binary)
@@ -1027,17 +1052,18 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             for g in pendientes[:6]
         )
         if len(pendientes) > 6:
-            ejemplos += f"\n… y {len(pendientes) - 6} más"
-        archivos = "archivo" if len(pendientes) == 1 else "archivos"
+            ejemplos += _("\n… y {n} más").format(n=len(pendientes) - 6)
 
         dialog = Adw.AlertDialog(
-            heading=f"¿Renombrar {len(pendientes)} {archivos}?",
-            body=f"Se van a renombrar los archivos en el disco:\n\n{ejemplos}\n\n"
-                 "Si el nombre que corresponde ya está ocupado por otro juego, "
-                 "el archivo se guarda con un sufijo (2) en vez de pisarlo.",
+            heading=ngettext("¿Renombrar {n} archivo?", "¿Renombrar {n} archivos?",
+                             len(pendientes)).format(n=len(pendientes)),
+            body=_("Se van a renombrar los archivos en el disco:\n\n{examples}\n\n"
+                   "Si el nombre que corresponde ya está ocupado por otro juego, "
+                   "el archivo se guarda con un sufijo (2) en vez de pisarlo.")
+                 .format(examples=ejemplos),
         )
-        dialog.add_response("cancel", "Cancelar")
-        dialog.add_response("rename", "Renombrar")
+        dialog.add_response("cancel", _("Cancelar"))
+        dialog.add_response("rename", _("Renombrar"))
         dialog.set_response_appearance("rename", Adw.ResponseAppearance.SUGGESTED)
         dialog.connect("response", self._on_batch_rename_confirmed, pendientes)
         dialog.present(self)
@@ -1079,17 +1105,18 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                                  uses_progress_bar=True):
             return
         if not wit_wrapper.is_available(self.settings.wit_binary):
-            self._show_toast("No se encontró 'wit'. Instalalo para poder verificar (ver README).")
+            self._show_toast(_("No se encontró 'wit'. Instalalo para poder verificar "
+                               "(ver README)."))
             return
 
         def verify_one(g: Game, cancel):
             ok, _output = wit_wrapper.verify(g.path, self.settings.wit_binary,
                                               cancel=cancel)
             if not ok:
-                raise RuntimeError("verificación con errores")
+                raise RuntimeError(_("verificación con errores"))
 
-        self._run_batch(games, "Verificando", verify_one, OperationKind.VERIFYING,
-                         cancel_message="Cancelando la verificación…")
+        self._run_batch(games, _("Verificando"), verify_one, OperationKind.VERIFYING,
+                         cancel_message=_("Cancelando la verificación…"))
 
     def _on_batch_delete(self):
         games = self._selected_games()
@@ -1110,26 +1137,29 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         # se van a poder recuperar y cuáles no.
         permanentes = {g.path for g in games if not trash.can_trash(g.path)}
         if not permanentes:
-            heading = "¿Mover a la papelera los juegos seleccionados?"
-            cierre = ("Van a la papelera del sistema. Podés recuperarlos "
-                      "desde ahí.")
-            verb = "Mover a la papelera"
+            heading = _("¿Mover a la papelera los juegos seleccionados?")
+            cierre = _("Van a la papelera del sistema. Podés recuperarlos "
+                       "desde ahí.")
+            verb = _("Mover a la papelera")
         elif len(permanentes) == len(games):
-            heading = "¿Eliminar definitivamente los juegos seleccionados?"
-            cierre = ("La unidad donde están no tiene papelera, así que esta "
-                      "acción no se puede deshacer.")
-            verb = "Eliminar"
+            heading = _("¿Eliminar definitivamente los juegos seleccionados?")
+            cierre = _("La unidad donde están no tiene papelera, así que esta "
+                       "acción no se puede deshacer.")
+            verb = _("Eliminar")
         else:
-            heading = "¿Eliminar los juegos seleccionados?"
-            cierre = (f"{len(games) - len(permanentes)} van a la papelera y se "
-                      f"pueden recuperar. Los otros {len(permanentes)} están en "
-                      "una unidad sin papelera: esos se borran definitivamente.")
-            verb = "Eliminar"
+            heading = _("¿Eliminar los juegos seleccionados?")
+            cierre = _("{trashed} van a la papelera y se pueden recuperar. Los "
+                       "otros {permanent} están en una unidad sin papelera: esos "
+                       "se borran definitivamente.").format(
+                           trashed=len(games) - len(permanentes),
+                           permanent=len(permanentes))
+            verb = _("Eliminar")
         dialog = Adw.AlertDialog(
             heading=heading,
-            body=f"{len(games)} archivo(s):\n{names}\n\n{cierre}",
+            body=_("{n} archivo(s):\n{names}\n\n{closing}").format(
+                n=len(games), names=names, closing=cierre),
         )
-        dialog.add_response("cancel", "Cancelar")
+        dialog.add_response("cancel", _("Cancelar"))
         dialog.add_response("delete", verb)
         dialog.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
         dialog.connect("response", self._on_batch_delete_confirmed, games, permanentes)
@@ -1161,14 +1191,15 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
         a_papelera = len(games) - len(permanentes)
         if not permanentes:
-            nota = "a la papelera"
+            nota = _("a la papelera")
         elif a_papelera == 0:
-            nota = "borrado definitivo (unidad sin papelera)"
+            nota = _("borrado definitivo (unidad sin papelera)")
         else:
-            nota = (f"{a_papelera} a la papelera, {len(permanentes)} "
-                    "borrado(s) definitivamente (unidad sin papelera)")
-        self._run_batch(games, "Eliminando", delete_one, OperationKind.DELETING,
-                         cancel_message="Cancelando el borrado…",
+            nota = _("{trashed} a la papelera, {permanent} borrado(s) "
+                     "definitivamente (unidad sin papelera)").format(
+                         trashed=a_papelera, permanent=len(permanentes))
+        self._run_batch(games, _("Eliminando"), delete_one, OperationKind.DELETING,
+                         cancel_message=_("Cancelando el borrado…"),
                          summary_note=nota)
 
     # -------------------------------------------------------- Library --
@@ -1180,18 +1211,23 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             if str(path) not in nombres:
                 nombres.append(str(path))
         preview = ", ".join(nombres[:2])
-        mas = f" (+{len(nombres) - 2} más)" if len(nombres) > 2 else ""
-        carpeta = "carpeta" if len(nombres) == 1 else "carpetas"
-        return (f"No se pudo leer {len(nombres)} {carpeta} (permisos): "
-                f"{preview}{mas}. Los juegos que haya adentro no aparecen.")
+        mas = (_(" (+{n} más)").format(n=len(nombres) - 2)
+               if len(nombres) > 2 else "")
+        return ngettext(
+            "No se pudo leer {n} carpeta (permisos): {preview}{more}. "
+            "Los juegos que haya adentro no aparecen.",
+            "No se pudo leer {n} carpetas (permisos): {preview}{more}. "
+            "Los juegos que haya adentro no aparecen.",
+            len(nombres)).format(n=len(nombres), preview=preview, more=mas)
 
     def _update_library_banner(self):
         if self._library_available:
             self._library_banner.set_revealed(False)
         else:
             self._library_banner.set_title(
-                f"Unidad no disponible: {self.settings.library_path} no está "
-                "conectada. Conectala y se detectará automáticamente."
+                _("Unidad no disponible: {path} no está conectada. Conectala y "
+                  "se detectará automáticamente.").format(
+                      path=self.settings.library_path)
             )
             self._library_banner.set_revealed(True)
 
@@ -1226,7 +1262,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         root = Path(self.settings.library_path)
         self.progress_bar.set_visible(True)
         self.progress_bar.set_fraction(0)
-        self.set_title("WiiBackup Manager — Escaneando…")
+        self.set_title(_("WiiBackup Manager — Escaneando…"))
 
         def worker():
             def progress(done, total):
@@ -1262,12 +1298,13 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             # pero es mucho mejor que mostrar la biblioteca vacía y hacerle
             # creer al usuario que perdió todo.
             self.progress_bar.set_visible(False)
-            self.set_title(f"WiiBackup Manager — {len(self._games)} juegos")
+            self.set_title(_("WiiBackup Manager — {n} juegos").format(
+                n=len(self._games)))
             self._show_toast(
-                f"No se pudo escanear la biblioteca ({error}). "
-                "Se sigue mostrando la última lista conocida."
+                _("No se pudo escanear la biblioteca ({error}). "
+                  "Se sigue mostrando la última lista conocida.").format(error=error)
             )
-            self.op_log.record(OperationKind.SCANNING.label,
+            self.op_log.record(OperationKind.SCANNING.value,
                                str(self.settings.library_path),
                                oplog.STATUS_ERROR, error)
             if self._rescan_pending:
@@ -1284,15 +1321,16 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         if ilegibles and ilegibles != self._skipped_dirs:
             mensaje = self._describe_skipped(sorted(ilegibles))
             self._show_toast(mensaje)
-            self.op_log.record(OperationKind.SCANNING.label,
-                               f"{len(ilegibles)} carpeta(s) sin permiso",
+            self.op_log.record(OperationKind.SCANNING.value,
+                               _("{n} carpeta(s) sin permiso").format(
+                                   n=len(ilegibles)),
                                oplog.STATUS_PARTIAL, mensaje)
         self._skipped_dirs = ilegibles
 
         self._games = games
         self._apply_sort()
         self.progress_bar.set_visible(False)
-        self.set_title(f"WiiBackup Manager — {len(games)} juegos")
+        self.set_title(_("WiiBackup Manager — {n} juegos").format(n=len(games)))
         self._populate_list()
         self.stack.set_visible_child_name("list" if games else "empty")
         self.transfer_view.set_games(games)
@@ -1306,8 +1344,9 @@ class WiiBackupWindow(Adw.ApplicationWindow):
     def _update_library_status_bar(self):
         count = len(self._games)
         total_size = library.format_size(sum(g.size_bytes for g in self._games))
-        noun = "juego" if count == 1 else "juegos"
-        self.library_status_label.set_label(f"{count} {noun} · {total_size}")
+        self.library_status_label.set_label(
+            ngettext("{count} juego · {size}", "{count} juegos · {size}", count)
+            .format(count=count, size=total_size))
 
     def _make_row(self, game: Game) -> GameRow:
         row = GameRow(game, self.settings.cover_region)
@@ -1315,7 +1354,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         row.connect("convert-requested", self._on_convert_requested)
         row.connect("verify-requested", self._on_verify_requested)
         row.connect("delete-requested", self._on_delete_requested)
-        row.connect("selection-toggled", lambda *_: self._update_selection_bar())
+        row.connect("selection-toggled", lambda *_a: self._update_selection_bar())
         row.connect("detail-requested", self._on_game_detail_requested)
         row.set_selection_mode(self.select_toggle.get_active())
         row.load_cover_async()
@@ -1393,7 +1432,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         _label, key_fn, reverse = self._current_sort()
         self._games.sort(key=key_fn, reverse=reverse)
 
-    def _on_sort_changed(self, *_):
+    def _on_sort_changed(self, *_args):
         # Sin reconstruir nada: se recalcula la clave de cada fila y el
         # ListBox reacomoda los widgets que ya existen. Así el cambio de
         # orden es instantáneo aunque haya cientos de juegos, y de paso no
@@ -1427,20 +1466,20 @@ class WiiBackupWindow(Adw.ApplicationWindow):
     def _on_export(self, fmt: str):
         juegos = self._games_to_export()
         if not juegos:
-            self._show_toast("No hay juegos para exportar.")
+            self._show_toast(_("No hay juegos para exportar."))
             return
 
         extension = "csv" if fmt == library.EXPORT_CSV else "txt"
-        dialog = Gtk.FileDialog(title="Guardar la lista de juegos")
+        dialog = Gtk.FileDialog(title=_("Guardar la lista de juegos"))
         dialog.set_initial_name(
             f"biblioteca-wii-{time.strftime('%Y-%m-%d')}.{extension}")
         dialog.set_initial_folder(gtk_helpers.safe_initial_folder())
         filtro = Gtk.FileFilter()
         if fmt == library.EXPORT_CSV:
-            filtro.set_name("Planilla CSV (*.csv)")
+            filtro.set_name(_("Planilla CSV (*.csv)"))
             filtro.add_pattern("*.csv")
         else:
-            filtro.set_name("Texto plano (*.txt)")
+            filtro.set_name(_("Texto plano (*.txt)"))
             filtro.add_pattern("*.txt")
         filtros = Gio.ListStore.new(Gtk.FileFilter)
         filtros.append(filtro)
@@ -1463,8 +1502,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         if destino.exists():
             gtk_helpers.confirm_overwrite(
                 self,
-                f"Ya existe un archivo en:\n{destino.name}\n\n"
-                "Exportar la lista lo va a reemplazar.",
+                _("Ya existe un archivo en:\n{name}\n\n"
+                  "Exportar la lista lo va a reemplazar.").format(name=destino.name),
                 lambda: self._write_export(destino, juegos, fmt),
             )
             return
@@ -1484,12 +1523,13 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             # que parece completa.
             config.write_text_atomic(destino, contenido, encoding=codificacion)
         except OSError as e:
-            self._show_toast(f"No se pudo guardar la lista: {e}")
+            self._show_toast(_("No se pudo guardar la lista: {error}").format(error=e))
             return
 
-        frase = ("1 juego exportado" if len(juegos) == 1
-                  else f"{len(juegos)} juegos exportados")
-        self._show_toast(f"{frase} a {destino.name}")
+        self._show_toast(
+            ngettext("{n} juego exportado a {name}",
+                     "{n} juegos exportados a {name}", len(juegos))
+            .format(n=len(juegos), name=destino.name))
 
     # ---------------------------------------------------------- Filter --
     def _on_search_changed(self, entry):
@@ -1502,8 +1542,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         return query in row.game.title.lower() or query in row.game.game_id.lower()
 
     # ----------------------------------------------------------- Actions --
-    def _on_add_files(self, *_):
-        dialog = Gtk.FileDialog(title="Agregar archivos")
+    def _on_add_files(self, *_args):
+        dialog = Gtk.FileDialog(title=_("Agregar archivos"))
         filt = Gtk.FileFilter()
         filt.set_name("Imágenes de Wii (*.iso, *.wbfs, *.ciso, *.wdf)")
         for pattern in ("*.iso", "*.wbfs", "*.ciso", "*.wdf"):
@@ -1524,8 +1564,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         paths = [Path(files.get_item(i).get_path()) for i in range(files.get_n_items())]
         self._start_import(paths)
 
-    def _on_add_folder(self, *_):
-        dialog = Gtk.FileDialog(title="Agregar carpeta completa")
+    def _on_add_folder(self, *_args):
+        dialog = Gtk.FileDialog(title=_("Agregar carpeta completa"))
         dialog.set_initial_folder(gtk_helpers.safe_initial_folder())
         dialog.select_folder(self, None, self._on_folder_chosen)
 
@@ -1545,7 +1585,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             # carpeta a propósito y tiene que saber que parte no se leyó.
             self._show_toast(self._describe_skipped(skipped))
         if not paths:
-            self._show_toast("No se encontraron archivos válidos en esa carpeta.")
+            self._show_toast(_("No se encontraron archivos válidos en esa carpeta."))
             return
         self._start_import(paths)
 
@@ -1572,7 +1612,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
         if not paths:
             self._show_toast(
-                "No se encontraron archivos ISO/WBFS/CISO/WDF válidos en lo soltado."
+                _("No se encontraron archivos ISO/WBFS/CISO/WDF válidos en lo "
+                  "soltado.")
             )
             return False
 
@@ -1625,7 +1666,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         try:
             dest_dir.mkdir(parents=True, exist_ok=True)
         except OSError as e:
-            self._show_toast(f"No se pudo escribir en la carpeta de biblioteca: {e}")
+            self._show_toast(_("No se pudo escribir en la carpeta de biblioteca: {error}")
+                             .format(error=e))
             return
 
         known_ids = {g.game_id for g in self._games if g.game_id != UNKNOWN_GAME_ID}
@@ -1670,12 +1712,12 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 write=[dest for _src, dest in plan],
             )
         except OperationBusy as e:
-            self._show_toast(f"No se puede ahora: {e.detail}.")
+            self._show_toast(_("No se puede ahora: {detail}.").format(detail=e.detail))
             return
 
         self.progress_bar.set_visible(True)
         self.progress_bar.set_fraction(0)
-        self.set_title("WiiBackup Manager — Agregando…")
+        self.set_title(_("WiiBackup Manager — Agregando…"))
 
         def worker():
             added: list[str] = []
@@ -1811,22 +1853,26 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             if len(skipped) <= 5:
                 parts.append(f"{len(skipped)} omitido(s) por ya existir: " + ", ".join(skipped))
             else:
-                parts.append(f"{len(skipped)} omitido(s) por ya existir en la biblioteca")
+                parts.append(_("{n} omitido(s) por ya existir en la biblioteca")
+                             .format(n=len(skipped)))
         if renamed:
             # Se informa aparte: el archivo entró, pero con otro nombre que
             # el que tenía, y sin eso el usuario no tendría cómo saberlo.
             if len(renamed) <= 3:
-                parts.append("Ya había un archivo con el mismo nombre, se guardó como: "
-                             + ", ".join(renamed))
+                parts.append(_("Ya había un archivo con el mismo nombre, se "
+                               "guardó como: {names}").format(
+                                   names=", ".join(renamed)))
             else:
-                parts.append(f"{len(renamed)} se guardaron con otro nombre para no pisar "
-                             "archivos que ya estaban")
+                parts.append(_("{n} se guardaron con otro nombre para no pisar "
+                               "archivos que ya estaban").format(n=len(renamed)))
         if errors:
             preview = "; ".join(errors[:2])
-            mas = f" (+{len(errors) - 2} más, ver la pestaña Log)" if len(errors) > 2 else ""
-            parts.append(f"{len(errors)} con error: {preview}{mas}")
+            mas = (_(" (+{n} más, ver la pestaña Log)").format(n=len(errors) - 2)
+                   if len(errors) > 2 else "")
+            parts.append(_("{n} con error: {preview}{more}").format(
+                n=len(errors), preview=preview, more=mas))
         if not parts:
-            parts.append("No se agregó ningún juego nuevo")
+            parts.append(_("No se agregó ningún juego nuevo"))
         self._show_toast(". ".join(parts) + ".")
         self.rescan_library()
         return False
@@ -1851,18 +1897,20 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             new_path = library.rename_to_standard(row.game)
         except FileExistsError as e:
             self._show_toast(str(e))
-            self.op_log.record(OperationKind.RENAMING.label, row.game.title,
+            self.op_log.record(OperationKind.RENAMING.value, row.game.title,
                                 oplog.STATUS_ERROR, str(e))
             return
-        self._show_toast(f"Renombrado a: {new_path.name}")
-        self.op_log.record(OperationKind.RENAMING.label, row.game.title,
-                            oplog.STATUS_OK, f"a {new_path.name}")
+        self._show_toast(_("Renombrado a: {name}").format(name=new_path.name))
+        self.op_log.record(OperationKind.RENAMING.value, row.game.title,
+                            oplog.STATUS_OK,
+                            _("a {name}").format(name=new_path.name))
         self.rescan_library()
 
     def _on_convert_requested(self, row: GameRow):
         game = row.game
         if not wit_wrapper.is_available(self.settings.wit_binary):
-            self._show_toast("No se encontró 'wit'. Instalalo para poder convertir (ver README).")
+            self._show_toast(_("No se encontró 'wit'. Instalalo para poder convertir "
+                               "(ver README)."))
             return
 
         target_ext = ".wbfs" if game.fmt.upper() != "WBFS" else ".iso"
@@ -1877,9 +1925,10 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             # que --overwrite lo reemplace en silencio.
             gtk_helpers.confirm_overwrite(
                 self,
-                f"Ya existe un archivo en:\n{dest.name}\n\n"
-                f"Convertir '{game.title}' lo va a reemplazar. "
-                "Esta acción no se puede deshacer.",
+                _("Ya existe un archivo en:\n{name}\n\n"
+                  "Convertir '{title}' lo va a reemplazar. "
+                  "Esta acción no se puede deshacer.")
+                .format(name=dest.name, title=game.title),
                 lambda: self._start_convert(game, dest, target_ext),
             )
             return
@@ -1898,13 +1947,13 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         try:
             op = self.ops.start(OperationKind.CONVERTING, read=[game.path], write=[dest])
         except OperationBusy as e:
-            self._show_toast(f"No se puede ahora: {e.detail}.")
+            self._show_toast(_("No se puede ahora: {detail}.").format(detail=e.detail))
             return
 
         # Con botón de cancelar: convertir un dual-layer puede tardar
         # varios minutos y hasta ahora la única salida era cerrar la app.
         cancel = self._begin_cancellable_progress(
-            "Convirtiendo", "Cancelando la conversión…")
+            _("Convirtiendo"), _("Cancelando la conversión…"))
         # Tamaño de SALIDA, no del archivo de origen: el progreso de `wit`
         # cuenta bytes escritos en el destino. Se calcula al vuelo dentro
         # del worker (`_calcular_total`) para no frenar el hilo de GTK.
@@ -1979,7 +2028,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
     def _on_verify_requested(self, row: GameRow):
         game = row.game
         if not wit_wrapper.is_available(self.settings.wit_binary):
-            self._show_toast("No se encontró 'wit'. Instalalo para poder verificar (ver README).")
+            self._show_toast(_("No se encontró 'wit'. Instalalo para poder verificar "
+                               "(ver README)."))
             return
 
         # Verificar solo lee, así que convive con otra lectura del mismo
@@ -1987,7 +2037,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         try:
             op = self.ops.start(OperationKind.VERIFYING, read=[game.path])
         except OperationBusy as e:
-            self._show_toast(f"No se puede ahora: {e.detail}.")
+            self._show_toast(_("No se puede ahora: {detail}.").format(detail=e.detail))
             return
 
         def worker():
@@ -2025,18 +2075,18 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
     def _present_delete_dialog(self, game: Game, to_trash: bool):
         if to_trash:
-            heading = "¿Mover este juego a la papelera?"
-            body = (f"El archivo:\n{game.path.name}\n\nva a la papelera del "
-                    "sistema. Podés recuperarlo desde ahí.")
-            verb = "Mover a la papelera"
+            heading = _("¿Mover este juego a la papelera?")
+            body = _("El archivo:\n{name}\n\nva a la papelera del sistema. "
+                     "Podés recuperarlo desde ahí.").format(name=game.path.name)
+            verb = _("Mover a la papelera")
         else:
-            heading = "¿Eliminar este juego definitivamente?"
-            body = (f"Se borrará el archivo:\n{game.path.name}\n\nLa unidad "
-                    "donde está no tiene papelera, así que esta acción no se "
-                    "puede deshacer.")
-            verb = "Eliminar"
+            heading = _("¿Eliminar este juego definitivamente?")
+            body = _("Se borrará el archivo:\n{name}\n\nLa unidad donde está "
+                     "no tiene papelera, así que esta acción no se puede "
+                     "deshacer.").format(name=game.path.name)
+            verb = _("Eliminar")
         dialog = Adw.AlertDialog(heading=heading, body=body)
-        dialog.add_response("cancel", "Cancelar")
+        dialog.add_response("cancel", _("Cancelar"))
         dialog.add_response("delete", verb)
         dialog.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
         dialog.connect("response", self._on_delete_confirmed, game, to_trash)
@@ -2053,13 +2103,14 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         try:
             if to_trash:
                 trash.send_to_trash(game.path)
-                self._show_toast(f"Movido a la papelera: {game.path.name}")
-                detail = f"{game.path.name} → papelera"
+                self._show_toast(_("Movido a la papelera: {name}").format(name=game.path.name))
+                detail = _("{name} → papelera").format(name=game.path.name)
             else:
                 trash.delete_permanently(game.path)
-                self._show_toast(f"Eliminado: {game.path.name}")
-                detail = f"{game.path.name} (borrado definitivo)"
-            self.op_log.record(OperationKind.DELETING.label, game.title,
+                self._show_toast(_("Eliminado: {name}").format(name=game.path.name))
+                detail = _("{name} (borrado definitivo)").format(
+                    name=game.path.name)
+            self.op_log.record(OperationKind.DELETING.value, game.title,
                                 oplog.STATUS_OK, detail)
         except trash.TrashUnsupported:
             # La unidad dejó de tener papelera entre la pregunta y el
@@ -2070,8 +2121,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             self._present_delete_dialog(game, to_trash=False)
             return
         except OSError as e:
-            self._show_toast(f"No se pudo eliminar: {e}")
-            self.op_log.record(OperationKind.DELETING.label, game.title,
+            self._show_toast(_("No se pudo eliminar: {error}").format(error=e))
+            self.op_log.record(OperationKind.DELETING.value, game.title,
                                 oplog.STATUS_ERROR, str(e))
         self.rescan_library()
 
@@ -2100,8 +2151,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             version=__version__,
             developer_name="GameFix SPS",
             license_type=Gtk.License.MIT_X11,
-            comments="Gestor de respaldos de Wii (ISO/WBFS) para Linux, "
-                     "inspirado en Wii Backup Manager de Windows.",
+            comments=_("Gestor de respaldos de Wii (ISO/WBFS) para Linux, "
+                       "inspirado en Wii Backup Manager de Windows."),
             website="https://github.com/",
         )
         about.present(self)

@@ -19,6 +19,8 @@ gi.require_version("Gdk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gtk  # noqa: E402
 
+from .i18n import _
+
 # Estructura de nodos CSS de un Gtk.LevelBar continuo:
 #     levelbar > trough > block.filled  (+ block.empty)
 # La clase de estado va en el propio <levelbar> y no en el bloque porque es
@@ -102,10 +104,12 @@ _COLOR_SCHEMES = {
 }
 DEFAULT_COLOR_SCHEME = "system"
 
+# La clave ("system"/"light"/"dark") es lo que se guarda en config.json y
+# no se traduce nunca; lo traducible es solo la etiqueta que se muestra.
 COLOR_SCHEME_LABELS = [
-    ("system", "Sistema"),
-    ("light", "Claro"),
-    ("dark", "Oscuro"),
+    ("system", _("Sistema")),
+    ("light", _("Claro")),
+    ("dark", _("Oscuro")),
 ]
 
 

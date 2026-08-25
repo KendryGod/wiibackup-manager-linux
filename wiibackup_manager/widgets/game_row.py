@@ -9,6 +9,7 @@ from gi.repository import Adw, Gtk, GdkPixbuf, GLib, GObject  # noqa: E402
 
 from .. import gametdb
 from ..library import Game
+from ..i18n import _
 from . import gtk_helpers
 
 COVER_WIDTH = 120
@@ -108,17 +109,17 @@ class GameRow(Adw.ActionRow):
         self.set_activatable(True)
         self.connect("activated", self._on_activated)
 
-    def _on_activated(self, *_):
+    def _on_activated(self, *_args):
         if not self.select_check.get_visible():
             self.emit("detail-requested")
 
     def _build_menu(self):
         from gi.repository import Gio
         menu = Gio.Menu()
-        menu.append("Renombrar a estándar [ID]", "row.rename")
-        menu.append("Convertir ISO ↔ WBFS", "row.convert")
-        menu.append("Verificar integridad", "row.verify")
-        menu.append("Eliminar", "row.delete")
+        menu.append(_("Renombrar a estándar [ID]"), "row.rename")
+        menu.append(_("Convertir ISO ↔ WBFS"), "row.convert")
+        menu.append(_("Verificar integridad"), "row.verify")
+        menu.append(_("Eliminar"), "row.delete")
         return menu
 
     def set_selection_mode(self, enabled: bool):
@@ -268,7 +269,7 @@ def Gio_SimpleActionGroup(row: GameRow):
 
     def make_action(name: str, signal: str):
         action = Gio.SimpleAction.new(name, None)
-        action.connect("activate", lambda *_: row.emit(signal))
+        action.connect("activate", lambda *_a: row.emit(signal))
         group.add_action(action)
 
     make_action("rename", "rename-requested")

@@ -20,6 +20,7 @@ from .disc_header import (
     read_plain_iso_header,
     validate_game_id,
 )
+from .i18n import _, ngettext
 
 VALID_EXTENSIONS = {".iso", ".wbfs", ".ciso", ".wdf"}
 
@@ -286,7 +287,7 @@ def rename_to_standard(game: Game, dry_run: bool = False,
     if dry_run:
         if new_path.exists():
             if on_collision != "suffix":
-                raise FileExistsError(f"Ya existe un archivo en {new_path}")
+                raise FileExistsError(_("Ya existe un archivo en {path}").format(path=new_path))
             new_path = free_variant(new_path)
         return new_path
 
@@ -297,7 +298,7 @@ def rename_to_standard(game: Game, dry_run: bool = False,
         rename_no_replace(game.path, new_path)
     except FileExistsError:
         if on_collision != "suffix":
-            raise FileExistsError(f"Ya existe un archivo en {new_path}")
+            raise FileExistsError(_("Ya existe un archivo en {path}").format(path=new_path))
         # Buscar una variante libre reintentando: si otro proceso se queda
         # con "Juego (2).wbfs" mientras tanto, se sigue con la siguiente.
         base = new_path
@@ -311,7 +312,7 @@ def rename_to_standard(game: Game, dry_run: bool = False,
             break
         else:
             raise FileExistsError(
-                f"No se encontró un nombre libre para {base.name}"
+                _("No se encontró un nombre libre para {name}").format(name=base.name)
             )
     game.path = new_path
     return new_path
@@ -835,7 +836,7 @@ def send_to_wbfs_drive(
                                       overwrite=True)
         if result.returncode != 0:
             raise RuntimeError(
-                result.stderr.strip() or "Error desconocido al convertir con wit")
+                result.stderr.strip() or _("Error desconocido al convertir con wit"))
         guard.commit()
     return dest
 
@@ -885,7 +886,7 @@ def export_games(games, fmt: str = EXPORT_CSV) -> str:
     if fmt == EXPORT_TEXT:
         lineas = [f"{game.title} — {format_size(game.size_bytes)}" for game in games]
         total = sum(game.size_bytes for game in games)
-        noun = "juego" if len(games) == 1 else "juegos"
+        noun = ngettext("juego", "juegos", len(games))
         lineas.append("")
         lineas.append(f"{len(games)} {noun} · {format_size(total)}")
         return "\n".join(lineas) + "\n"
@@ -895,7 +896,8 @@ def export_games(games, fmt: str = EXPORT_CSV) -> str:
     # comas y dos puntos ("Zelda: Skyward Sword"), y el módulo csv ya los
     # entrecomilla solo cuando hace falta.
     writer = csv.writer(buffer)
-    writer.writerow(["Título", "ID", "Formato", "Tamaño", "Tamaño (bytes)"])
+    writer.writerow([_("Título"), _("ID"), _("Formato"), _("Tamaño"),
+                     _("Tamaño (bytes)")])
     for game in games:
         # Los tres campos de texto pasan por `_csv_safe`; los tamaños son
         # números que arma la app, no hace falta.

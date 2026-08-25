@@ -14,6 +14,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk, GLib  # noqa: E402
 
 from .. import gametdb
+from ..i18n import _
 from ..library import Game
 from . import gtk_helpers
 from .game_row import build_cover_widget
@@ -49,11 +50,11 @@ class GameDetailDialog(Adw.Dialog):
         self.info_group = Adw.PreferencesGroup()
         outer.append(self.info_group)
 
-        self._add_row("ID de juego", game.game_id)
-        self._add_row("Formato", game.fmt)
-        self._add_row("Tamaño", f"{game.size_mb:,.0f} MB")
+        self._add_row(_("ID de juego"), game.game_id)
+        self._add_row(_("Formato"), game.fmt)
+        self._add_row(_("Tamaño"), f"{game.size_mb:,.0f} MB")
 
-        self._extra_status_row = Adw.ActionRow(title="Buscando información adicional en GameTDB…")
+        self._extra_status_row = Adw.ActionRow(title=_("Buscando información adicional en GameTDB…"))
         spinner = Gtk.Spinner(spinning=True)
         self._extra_status_row.add_suffix(spinner)
         self.info_group.add(self._extra_status_row)
@@ -62,7 +63,7 @@ class GameDetailDialog(Adw.Dialog):
         # para este juego (la tiene ~el 80% de la base).
         self.synopsis_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
                                      visible=False)
-        synopsis_heading = Gtk.Label(label="Sinopsis", xalign=0)
+        synopsis_heading = Gtk.Label(label=_("Sinopsis"), xalign=0)
         synopsis_heading.add_css_class("heading")
         self.synopsis_box.append(synopsis_heading)
 
@@ -156,7 +157,8 @@ class GameDetailDialog(Adw.Dialog):
 
         if info is None:
             placeholder = Adw.ActionRow(
-                title="No se encontró información adicional en GameTDB para este juego."
+                title=_("No se encontró información adicional en GameTDB "
+                        "para este juego.")
             )
             placeholder.add_css_class("dim-label")
             self.info_group.add(placeholder)
@@ -169,18 +171,18 @@ class GameDetailDialog(Adw.Dialog):
         if extra_title is not None:
             self._add_row(*extra_title)
         if info.genre:
-            self._add_row("Género", info.genre)
+            self._add_row(_("Género"), info.genre)
         if info.players:
-            self._add_row("Jugadores", info.players)
+            self._add_row(_("Jugadores"), info.players)
         if info.release_date:
-            self._add_row("Fecha de lanzamiento", info.release_date)
+            self._add_row(_("Fecha de lanzamiento"), info.release_date)
         if info.publisher:
-            self._add_row("Publisher", info.publisher)
+            self._add_row(_("Publisher"), info.publisher)
         if info.developer:
-            self._add_row("Developer", info.developer)
+            self._add_row(_("Developer"), info.developer)
         if info.controls:
             self._add_row(
-                "Controles compatibles",
+                _("Controles compatibles"),
                 " · ".join(control.describe() for control in info.controls),
                 wrap=True,
             )

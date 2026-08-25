@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from .i18n import _
+
 WII_DISC_MAGIC = b"\x5d\x1c\x9e\xa3"
 HEADER_TITLE_OFFSET = 0x20
 HEADER_TITLE_MAX_LEN = 0x40
@@ -63,7 +65,8 @@ def validate_game_id(game_id: str) -> str:
     normalized = (game_id or "").upper()
     if not _GAME_ID_RE.fullmatch(normalized):
         raise ValueError(
-            f"Game ID inválido: {game_id!r} (se esperaban 6 caracteres A-Z/0-9)"
+            _("Game ID inválido: {game_id!r} (se esperaban 6 caracteres A-Z/0-9)")
+            .format(game_id=game_id)
         )
     return normalized
 

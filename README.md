@@ -199,6 +199,71 @@ done
 gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor
 ```
 
+## Idiomas y traducciones
+
+La app está en **español** e **inglés**, y elige sola según el idioma del
+escritorio. No hay una opción de idioma en Preferencias a propósito: el
+sistema ya sabe en qué idioma trabaja el usuario, y gettext lee esa
+configuración (`LANGUAGE`, `LC_ALL`, `LC_MESSAGES`, `LANG`).
+
+Para forzar un idioma en una corrida suelta:
+
+```bash
+LANGUAGE=en wiibackup-manager     # inglés
+LANGUAGE=es wiibackup-manager     # español
+```
+
+Si el sistema está en un idioma que todavía no está traducido (francés,
+alemán, japonés…), la app queda en español: el idioma del código fuente es
+el español, así que ese es el fallback natural y no hay ningún archivo de
+traducción que mantener para que funcione.
+
+### Contribuir una traducción a otro idioma
+
+La estructura ya está lista; agregar un idioma no toca código Python.
+Ejemplo para francés (`fr`):
+
+```bash
+# 1. Crear el catálogo a partir de la plantilla
+mkdir -p data/locale/fr/LC_MESSAGES
+msginit --input=data/locale/wiibackup-manager.pot \
+        --locale=fr \
+        --output=data/locale/fr/LC_MESSAGES/wiibackup-manager.po
+
+# 2. Traducir: abrir ese .po y completar cada `msgstr ""`.
+#    Se puede editar a mano o con Poedit / Gtranslator / Lokalize.
+
+# 3. Compilar y verificar
+./tools/update-translations.sh
+```
+
+Y agregar una línea en `pyproject.toml`, junto a la del inglés, para que
+el catálogo se instale:
+
+```toml
+"share/locale/fr/LC_MESSAGES" = ["data/locale/fr/LC_MESSAGES/wiibackup-manager.mo"]
+```
+
+Con eso, un sistema en francés abre la app en francés.
+
+**Reglas al traducir:**
+
+- Los `msgid` están **en español**: son las cadenas tal como aparecen en el
+  código, no claves abstractas.
+- Los marcadores entre llaves (`{name}`, `{count}`, `{free:.1f}`) tienen
+  que aparecer **tal cual** en la traducción. Se pueden reordenar dentro de
+  la frase —para eso son marcadores con nombre y no posicionales— pero no
+  se pueden renombrar ni omitir: la app hace `.format()` con esos nombres y
+  uno mal escrito es un error en tiempo de ejecución. `msgfmt --check`
+  (que corre `tools/update-translations.sh`) los valida.
+- Las entradas con `msgid_plural` llevan un `msgstr[N]` por cada forma
+  plural del idioma; `msginit` deja la cantidad correcta según el locale.
+
+**Al cambiar textos de la interfaz** (para quien toque el código): envolver
+la cadena nueva con `_()` —o `ngettext()` si depende de una cantidad—,
+nunca `_(f"...")`, y correr `./tools/update-translations.sh` para que la
+plantilla y los catálogos queden al día.
+
 ## Primeros pasos
 
 1. Abrí el menú **⋯ → Preferencias** y elegí la carpeta donde tenés (o
@@ -308,6 +373,13 @@ protección, y esta versión los cierra. Suma además cuatro funciones
 nuevas y el README completo.
 
 #### Nuevo
+
+- **Interfaz en inglés además de español**, elegida sola según el idioma
+  del sistema (gettext estándar). Un sistema en inglés abre la app en
+  inglés sin configurar nada; uno en un idioma todavía no traducido queda
+  en español. Están traducidas las 255 cadenas de la interfaz, incluidos
+  los mensajes de error y el historial. Ver "Idiomas y traducciones" para
+  agregar otro idioma sin tocar código Python.
 
 - **Eliminar un juego ahora lo manda a la papelera del sistema**, no lo
   borra para siempre. Un borrado por error se deshace desde Archivos como

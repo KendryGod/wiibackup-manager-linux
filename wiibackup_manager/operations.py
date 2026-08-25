@@ -44,6 +44,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
+from .i18n import _
+
 
 class OperationKind(Enum):
     """Tipo de operación, con el texto que se le muestra al usuario.
@@ -64,7 +66,14 @@ class OperationKind(Enum):
 
     @property
     def label(self) -> str:
-        return self.value
+        """El texto para mostrar, traducido al idioma del sistema.
+
+        El VALOR del enum queda siempre en español: es lo que `finish`
+        guarda en el historial y lo que después se traduce al mostrarlo
+        (ver oplog.LogEntry.operation). Si acá se guardara el texto ya
+        traducido, el historial quedaría con entradas en el idioma que
+        estuviera puesto en cada momento."""
+        return _(self.value)
 
 
 # Operaciones de las que solo puede haber UNA a la vez de su mismo tipo,
@@ -293,33 +302,34 @@ class OperationManager:
         all_paths = read_paths | write_paths
         for op in self._active.values():
             if kind in _EXCLUSIVE_KINDS and op.kind is kind:
-                return op, f"ya hay una operación de este tipo en curso ({op.label})"
+                return op, _("ya hay una operación de este tipo en curso ({op})").format(op=op.label)
 
             if wants_bar and op.uses_progress_bar:
-                return op, (
+                return op, _(
                     "hay otra operación larga en curso y las dos comparten la "
-                    f"misma barra de progreso ({op.label})"
-                )
+                    "misma barra de progreso ({op})"
+                ).format(op=op.label)
 
             shared_resource = _resources_overlap(resources, op.resources)
             if shared_resource is not None:
-                return op, (
-                    f"'{shared_resource.name or shared_resource}' ya está en uso "
-                    f"por otra operación ({op.label})"
-                )
+                return op, _(
+                    "'{name}' ya está en uso por otra operación ({op})"
+                ).format(name=shared_resource.name or shared_resource, op=op.label)
 
             invading = (_touching(write_paths, op.resources)
                         or _touching(op.write_paths, resources))
             if invading is not None:
-                return op, (
-                    f"otra operación está usando esa ubicación ({op.label}): "
-                    f"no se puede escribir '{invading.name}' mientras tanto"
-                )
+                return op, _(
+                    "otra operación está usando esa ubicación ({op}): "
+                    "no se puede escribir '{name}' mientras tanto"
+                ).format(op=op.label, name=invading.name)
 
             shared = (op.write_paths & all_paths) | (write_paths & op.paths)
             if shared:
                 name = sorted(shared)[0].name
-                return op, f"'{name}' ya está en uso por otra operación ({op.label})"
+                return op, _(
+                    "'{name}' ya está en uso por otra operación ({op})"
+                ).format(name=name, op=op.label)
 
         return None
 
@@ -437,7 +447,10 @@ class OperationManager:
             return
         if (result is not None and self._log is not None
                 and op.kind is not OperationKind.SCANNING):
-            self._log.record(op.label, result.target, result.status, result.detail)
+            # `op.kind.value`, no `op.label`: al historial va el nombre sin
+            # traducir y la traducción se aplica al mostrarlo.
+            self._log.record(op.kind.value, result.target, result.status,
+                             result.detail)
         self._notify()
 
     # --------------------------------------------------------- Listeners --

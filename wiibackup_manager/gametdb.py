@@ -26,6 +26,7 @@ from typing import Callable, Optional
 
 from . import config
 from .disc_header import is_valid_game_id, validate_game_id
+from .i18n import _
 
 COVER_URL_TEMPLATE = "https://art.gametdb.com/wii/cover/{region}/{game_id}.png"
 # GameTDB no siempre sube la carátula bajo la región "EN": muchos títulos
@@ -311,25 +312,25 @@ _wiitdb_index: Optional[dict[str, ET.Element]] = None
 # advance", que no figuran en su documentación), y mostrar el nombre crudo
 # es preferible a tragarse el dato.
 CONTROL_LABELS = {
-    "wiimote": "Wii Remote",
-    "nunchuk": "Nunchuk",
-    "motionplus": "Wii MotionPlus",
-    "classiccontroller": "Classic Controller",
-    "gamecube": "Mando de GameCube",
-    "wheel": "Wii Wheel",
-    "zapper": "Wii Zapper",
-    "balanceboard": "Wii Balance Board",
-    "wiispeak": "Wii Speak",
-    "microphone": "Micrófono",
-    "guitar": "Guitarra",
-    "drums": "Batería",
-    "dancepad": "Alfombra de baile",
-    "keyboard": "Teclado USB",
-    "nintendods": "Nintendo DS",
-    "udraw": "uDraw GameTablet",
-    "mii": "Mii",
-    "3dglasses": "Gafas 3D",
-    "gameboy advance": "Game Boy Advance",
+    "wiimote": _("Wii Remote"),
+    "nunchuk": _("Nunchuk"),
+    "motionplus": _("Wii MotionPlus"),
+    "classiccontroller": _("Classic Controller"),
+    "gamecube": _("Mando de GameCube"),
+    "wheel": _("Wii Wheel"),
+    "zapper": _("Wii Zapper"),
+    "balanceboard": _("Wii Balance Board"),
+    "wiispeak": _("Wii Speak"),
+    "microphone": _("Micrófono"),
+    "guitar": _("Guitarra"),
+    "drums": _("Batería"),
+    "dancepad": _("Alfombra de baile"),
+    "keyboard": _("Teclado USB"),
+    "nintendods": _("Nintendo DS"),
+    "udraw": _("uDraw GameTablet"),
+    "mii": _("Mii"),
+    "3dglasses": _("Gafas 3D"),
+    "gameboy advance": _("Game Boy Advance"),
 }
 
 
@@ -397,9 +398,9 @@ class GameExtraInfo:
         inglés y sí es información nueva."""
         shown = _normalize_title(displayed_title)
         if self.original_title and _normalize_title(self.original_title) != shown:
-            return ("Título original", self.original_title)
+            return (_("Título original"), self.original_title)
         if self.localized_title and _normalize_title(self.localized_title) != shown:
-            return ("Título traducido", self.localized_title)
+            return (_("Título traducido"), self.localized_title)
         return None
 
 

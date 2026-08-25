@@ -9,6 +9,8 @@ import gi
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio  # noqa: E402
 
+from ..i18n import _
+
 
 def safe_initial_folder(preferred: str | Path | None = None) -> Gio.File:
     """Gio.File para usar como carpeta inicial de un Gtk.FileDialog.
@@ -42,11 +44,11 @@ def confirm_overwrite(parent, body: str, on_overwrite: Callable[[], None]) -> No
     elige "Sobrescribir".
     """
     dialog = Adw.AlertDialog(
-        heading="¿Sobrescribir el archivo existente?",
+        heading=_("¿Sobrescribir el archivo existente?"),
         body=body,
     )
-    dialog.add_response("cancel", "Cancelar")
-    dialog.add_response("overwrite", "Sobrescribir")
+    dialog.add_response("cancel", _("Cancelar"))
+    dialog.add_response("overwrite", _("Sobrescribir"))
     dialog.set_response_appearance("overwrite", Adw.ResponseAppearance.DESTRUCTIVE)
     dialog.connect(
         "response",

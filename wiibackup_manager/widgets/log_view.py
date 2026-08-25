@@ -16,6 +16,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk, GLib, Gio  # noqa: E402
 
 from .. import oplog
+from ..i18n import _
 
 # Ícono y clase de color por estado. Los nombres son íconos simbólicos
 # estándar del tema, presentes en cualquier escritorio con Adwaita.
@@ -44,19 +45,19 @@ class LogView(Gtk.Box):
     def _build_ui(self):
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
                           margin_start=12, margin_end=12, margin_top=12, margin_bottom=8)
-        title = Gtk.Label(label="Historial de operaciones", xalign=0)
+        title = Gtk.Label(label=_("Historial de operaciones"), xalign=0)
         title.add_css_class("heading")
         title.set_hexpand(True)
         header.append(title)
 
-        self._export_button = Gtk.Button(label="Exportar")
-        self._export_button.set_tooltip_text("Guardar el historial en un archivo de texto")
+        self._export_button = Gtk.Button(label=_("Exportar"))
+        self._export_button.set_tooltip_text(_("Guardar el historial en un archivo de texto"))
         self._export_button.connect("clicked", self._on_export_clicked)
         header.append(self._export_button)
 
-        self._clear_button = Gtk.Button(label="Limpiar")
+        self._clear_button = Gtk.Button(label=_("Limpiar"))
         self._clear_button.add_css_class("destructive-action")
-        self._clear_button.set_tooltip_text("Borrar todas las entradas del historial")
+        self._clear_button.set_tooltip_text(_("Borrar todas las entradas del historial"))
         self._clear_button.connect("clicked", self._on_clear_clicked)
         header.append(self._clear_button)
 
@@ -74,9 +75,9 @@ class LogView(Gtk.Box):
         scroller.set_margin_bottom(12)
 
         self.status_page = Adw.StatusPage(
-            title="Todavía no hay operaciones registradas",
-            description="Acá van a aparecer las conversiones, transferencias, "
-                        "importaciones y eliminaciones a medida que las hagas.",
+            title=_("Todavía no hay operaciones registradas"),
+            description=_("Acá van a aparecer las conversiones, transferencias, "
+                          "importaciones y eliminaciones a medida que las hagas."),
             icon_name="document-open-recent-symbolic",
         )
 
@@ -120,7 +121,8 @@ class LogView(Gtk.Box):
         # markup_escape_text porque title/subtitle de Adw.ActionRow se
         # interpretan como markup de Pango, y acá entra tanto el título de
         # un juego como el texto de error que devolvió `wit`.
-        row.set_title(GLib.markup_escape_text(f"{entry.operation}: {entry.target}"))
+        row.set_title(GLib.markup_escape_text(
+            "{op}: {target}".format(op=_(entry.operation), target=entry.target)))
 
         subtitle = f"{entry.when_text()} · {entry.status_label}"
         if entry.detail:
@@ -137,16 +139,16 @@ class LogView(Gtk.Box):
         return row
 
     # ------------------------------------------------------------ Limpiar --
-    def _on_clear_clicked(self, *_):
+    def _on_clear_clicked(self, *_args):
         dialog = Adw.AlertDialog(
-            heading="¿Limpiar el historial?",
-            body="Se van a borrar todas las entradas registradas. "
-                 "Esta acción no se puede deshacer.\n\n"
-                 "No afecta a los juegos ni a los archivos: solo se borra el "
-                 "registro de lo que se hizo.",
+            heading=_("¿Limpiar el historial?"),
+            body=_("Se van a borrar todas las entradas registradas. "
+                   "Esta acción no se puede deshacer.\n\n"
+                   "No afecta a los juegos ni a los archivos: solo se borra el "
+                   "registro de lo que se hizo."),
         )
-        dialog.add_response("cancel", "Cancelar")
-        dialog.add_response("clear", "Limpiar")
+        dialog.add_response("cancel", _("Cancelar"))
+        dialog.add_response("clear", _("Limpiar"))
         dialog.set_response_appearance("clear", Adw.ResponseAppearance.DESTRUCTIVE)
         dialog.connect("response", self._on_clear_confirmed)
         dialog.present(self.get_root())
@@ -155,11 +157,11 @@ class LogView(Gtk.Box):
         if response != "clear":
             return
         self._log.clear()
-        self._show_toast("Historial de operaciones limpiado.")
+        self._show_toast(_("Historial de operaciones limpiado."))
 
     # ----------------------------------------------------------- Exportar --
-    def _on_export_clicked(self, *_):
-        dialog = Gtk.FileDialog(title="Exportar el historial")
+    def _on_export_clicked(self, *_args):
+        dialog = Gtk.FileDialog(title=_("Exportar el historial"))
         dialog.set_initial_name("historial-wiibackup-manager.txt")
         dialog.save(self.get_root(), None, self._on_export_path_chosen)
 
@@ -174,11 +176,11 @@ class LogView(Gtk.Box):
             return
         path = gfile.get_path()
         if not path:
-            self._show_toast("No se pudo exportar: destino inválido.")
+            self._show_toast(_("No se pudo exportar: destino inválido."))
             return
         try:
             Path(path).write_text(self._log.export_text(), encoding="utf-8")
         except OSError as e:
-            self._show_toast(f"No se pudo exportar el historial: {e}")
+            self._show_toast(_("No se pudo exportar el historial: {error}").format(error=e))
             return
-        self._show_toast(f"Historial exportado a {Path(path).name}")
+        self._show_toast(_("Historial exportado a {name}").format(name=Path(path).name))

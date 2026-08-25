@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import config
+from .i18n import _
 
 # Estados posibles de una operación terminada.
 STATUS_OK = "ok"
@@ -34,11 +35,14 @@ STATUS_ERROR = "error"
 STATUS_PARTIAL = "partial"
 STATUS_CANCELLED = "cancelled"
 
+# La clave (STATUS_OK = "ok", …) es lo que se guarda en history.json y no
+# se traduce nunca: cambiar de idioma no puede volver ilegible un historial
+# ya escrito. Traducible es solo la etiqueta que se muestra.
 STATUS_LABELS = {
-    STATUS_OK: "Completada",
-    STATUS_ERROR: "Con error",
-    STATUS_PARTIAL: "Terminada con errores",
-    STATUS_CANCELLED: "Cancelada",
+    STATUS_OK: _("Completada"),
+    STATUS_ERROR: _("Con error"),
+    STATUS_PARTIAL: _("Terminada con errores"),
+    STATUS_CANCELLED: _("Cancelada"),
 }
 
 _VALID_STATUSES = frozenset(STATUS_LABELS)
@@ -60,7 +64,11 @@ class LogEntry:
     """
 
     timestamp: str
-    operation: str          # etiqueta legible ("Convirtiendo", "Eliminando", …)
+    # Nombre de la operación SIN traducir, siempre en español ("Convirtiendo",
+    # "Eliminando", …): es lo que se guarda en el archivo. La traducción se
+    # aplica al mostrarlo, así un historial escrito con el sistema en un
+    # idioma se lee entero en el idioma actual, sin entradas mezcladas.
+    operation: str
     target: str             # el juego, o un resumen ("12 juegos")
     status: str             # uno de STATUS_*
     detail: str = ""        # motivo del error / resumen, vacío si no hay nada que aclarar
@@ -245,15 +253,15 @@ class OperationLog:
         """El historial como texto plano, una línea por operación, de la
         más reciente a la más vieja. Texto y no JSON: lo que se exporta es
         para leer o mandar cuando algo falló, no para volver a importar."""
-        lines = ["Historial de operaciones — WiiBackup Manager", ""]
+        lines = [_("Historial de operaciones — WiiBackup Manager"), ""]
         for entry in self.entries():
             line = (f"{entry.when_text()}  [{entry.status_label}]  "
-                    f"{entry.operation}: {entry.target}")
+                    f"{_(entry.operation)}: {entry.target}")
             if entry.detail:
                 line += f"  — {entry.detail}"
             lines.append(line)
         if len(lines) == 2:
-            lines.append("(sin operaciones registradas)")
+            lines.append(_("(sin operaciones registradas)"))
         return "\n".join(lines) + "\n"
 
     # ----------------------------------------------------------- Listeners --

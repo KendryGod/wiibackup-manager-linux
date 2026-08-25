@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .disc_header import DiscInfo, is_valid_game_id, validate_game_id
+from .i18n import _
 
 # Algunas builds de `wit` colorean su salida con secuencias ANSI aunque la
 # salida esté redirigida a una pipe (no es una terminal), así que no podemos
@@ -263,7 +264,8 @@ def _timeout_result(
         returncode=1,
         stdout=exc.stdout or "",
         stderr=(exc.stderr or "")
-        + f"\n`wit` no respondió en {timeout:.0f}s: se lo dio por colgado y se canceló la operación.",
+        + "\n" + _("`wit` no respondió en {seconds:.0f}s: se lo dio por colgado "
+                     "y se canceló la operación.").format(seconds=timeout),
     )
 
 
@@ -408,17 +410,17 @@ def _run_with_progress(
                         last_progress_at = now
                     if (inactivity_timeout is not None
                             and (now - last_progress_at) >= inactivity_timeout):
-                        timeout_reason = (
-                            f"`wit` no escribió un solo byte en "
-                            f"{inactivity_timeout / 60:.0f} minutos: se lo dio por "
-                            "colgado y se canceló la operación."
-                        )
+                        timeout_reason = _(
+                            "`wit` no escribió un solo byte en {minutes:.0f} "
+                            "minutos: se lo dio por colgado y se canceló la "
+                            "operación."
+                        ).format(minutes=inactivity_timeout / 60)
                     elif (absolute_timeout is not None
                             and (now - start) >= absolute_timeout):
-                        timeout_reason = (
-                            f"`wit` lleva más de {absolute_timeout / 3600:.0f} horas "
-                            "sin terminar: se canceló la operación."
-                        )
+                        timeout_reason = _(
+                            "`wit` lleva más de {hours:.0f} horas sin terminar: "
+                            "se canceló la operación."
+                        ).format(hours=absolute_timeout / 3600)
                     if timeout_reason is not None:
                         _terminate_process_group(proc)
                         break
@@ -558,7 +560,7 @@ def convert(
         raise WitNotFoundError(binary)
 
     if cancel is not None and cancel.cancelled:
-        raise OperationCancelled("Operación cancelada antes de arrancar `wit`.")
+        raise OperationCancelled(_("Operación cancelada antes de arrancar `wit`."))
 
     # wit infiere el formato de salida por la extensión de --dest, así que
     # nos aseguramos de que dest tenga la extensión correcta antes de llamar.
@@ -618,7 +620,7 @@ def _run_cancellable(
       hijo directo: cualquier nieto quedaba vivo, posiblemente escribiendo
       todavía en el destino."""
     if cancel is not None and cancel.cancelled:
-        raise OperationCancelled("Operación cancelada antes de arrancar `wit`.")
+        raise OperationCancelled(_("Operación cancelada antes de arrancar `wit`."))
 
     proc = subprocess.Popen(
         [binary, *args],
@@ -631,7 +633,7 @@ def _run_cancellable(
         # La cancelación llegó entre el chequeo y el Popen: `attach` ya lo
         # mató, solo queda recogerlo para no dejar un zombi.
         proc.wait()
-        raise OperationCancelled("Operación cancelada por el usuario.")
+        raise OperationCancelled(_("Operación cancelada por el usuario."))
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
@@ -650,7 +652,7 @@ def _run_cancellable(
             cancel.detach(proc)
 
     if cancel is not None and cancel.cancelled:
-        raise OperationCancelled("Operación cancelada por el usuario.")
+        raise OperationCancelled(_("Operación cancelada por el usuario."))
     return subprocess.CompletedProcess(
         args=[binary, *args], returncode=proc.returncode,
         stdout=stdout, stderr=stderr,

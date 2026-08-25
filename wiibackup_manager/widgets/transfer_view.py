@@ -17,6 +17,7 @@ from gi.repository import Adw, Gtk, GLib  # noqa: E402
 from .. import config, drives, gametdb, library, oplog, wit_wrapper
 from ..operations import OperationBusy, OperationKind, OperationOutcome
 from ..library import Game
+from ..i18n import _
 from . import gtk_helpers
 from .game_row import build_cover_widget
 
@@ -120,8 +121,8 @@ class TransferView(Gtk.Box):
     def _build_ui(self):
         # --- Sección de destino ---
         dest_group = Adw.PreferencesGroup(
-            title="Destino",
-            description="Elegí el disco, USB, SD o carpeta donde copiar los juegos.",
+            title=_("Destino"),
+            description=_("Elegí el disco, USB, SD o carpeta donde copiar los juegos."),
         )
         dest_group.set_margin_start(12)
         dest_group.set_margin_end(12)
@@ -136,25 +137,26 @@ class TransferView(Gtk.Box):
         dest_buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
                                 margin_start=12, margin_end=12, margin_bottom=8, margin_top=8)
         refresh_drives_btn = Gtk.Button(icon_name="view-refresh-symbolic")
-        refresh_drives_btn.set_tooltip_text("Volver a detectar unidades")
-        refresh_drives_btn.connect("clicked", lambda *_: self._refresh_drives())
-        add_folder_btn = Gtk.Button(label="Agregar carpeta")
+        refresh_drives_btn.set_tooltip_text(_("Volver a detectar unidades"))
+        refresh_drives_btn.connect("clicked", lambda *_a: self._refresh_drives())
+        add_folder_btn = Gtk.Button(label=_("Agregar carpeta"))
         add_folder_btn.connect("clicked", self._on_add_folder)
         dest_buttons.append(refresh_drives_btn)
         dest_buttons.append(add_folder_btn)
 
         # Guardar el destino elegido con un nombre corto ("HDD principal",
         # "SD cliente") para no volver a navegar carpetas la próxima vez.
-        self.save_preset_btn = Gtk.Button(label="Guardar destino")
+        self.save_preset_btn = Gtk.Button(label=_("Guardar destino"))
         self.save_preset_btn.set_tooltip_text(
-            "Guardar el destino elegido como acceso rápido, con un nombre."
+            _("Guardar el destino elegido como acceso rápido, con un nombre.")
         )
         self.save_preset_btn.connect("clicked", self._on_save_preset)
         dest_buttons.append(self.save_preset_btn)
 
-        self.eject_button = Gtk.Button(label="Expulsar unidad")
+        self.eject_button = Gtk.Button(label=_("Expulsar unidad"))
         self.eject_button.set_tooltip_text(
-            "Desmontar de forma segura la unidad seleccionada antes de desconectarla."
+            _("Desmontar de forma segura la unidad seleccionada antes de "
+              "desconectarla.")
         )
         self.eject_button.set_sensitive(False)
         self.eject_button.connect("clicked", self._on_eject_clicked)
@@ -166,7 +168,7 @@ class TransferView(Gtk.Box):
         # los juegos elegidos, y la barra es la lectura de un vistazo de
         # cuán llena está la unidad.
         self.dest_space_label = Gtk.Label(
-            label="Elegí un destino para ver el espacio disponible.", xalign=0
+            label=_("Elegí un destino para ver el espacio disponible."), xalign=0
         )
         self.dest_space_label.add_css_class("dim-label")
 
@@ -199,13 +201,13 @@ class TransferView(Gtk.Box):
         # --- Sección de juegos ---
         games_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
                                 margin_start=12, margin_end=12, margin_top=4, margin_bottom=4)
-        games_label = Gtk.Label(label="Juegos", xalign=0)
+        games_label = Gtk.Label(label=_("Juegos"), xalign=0)
         games_label.add_css_class("heading")
         games_label.set_hexpand(True)
-        select_all_btn = Gtk.Button(label="Seleccionar todos")
-        select_all_btn.connect("clicked", lambda *_: self._set_all_selected(True))
-        deselect_all_btn = Gtk.Button(label="Deseleccionar todos")
-        deselect_all_btn.connect("clicked", lambda *_: self._set_all_selected(False))
+        select_all_btn = Gtk.Button(label=_("Seleccionar todos"))
+        select_all_btn.connect("clicked", lambda *_a: self._set_all_selected(True))
+        deselect_all_btn = Gtk.Button(label=_("Deseleccionar todos"))
+        deselect_all_btn.connect("clicked", lambda *_a: self._set_all_selected(False))
         games_header.append(games_label)
         games_header.append(select_all_btn)
         games_header.append(deselect_all_btn)
@@ -231,12 +233,12 @@ class TransferView(Gtk.Box):
 
         action_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
                               margin_start=12, margin_end=12, margin_top=8, margin_bottom=12)
-        self.transfer_button = Gtk.Button(label="Transferir seleccionados")
+        self.transfer_button = Gtk.Button(label=_("Transferir seleccionados"))
         self.transfer_button.add_css_class("suggested-action")
         self.transfer_button.connect("clicked", self._on_transfer_clicked)
         action_box.append(self.transfer_button)
 
-        self.cancel_button = Gtk.Button(label="Cancelar", visible=False)
+        self.cancel_button = Gtk.Button(label=_("Cancelar"), visible=False)
         self.cancel_button.connect("clicked", self._on_cancel_clicked)
         action_box.append(self.cancel_button)
 
@@ -269,8 +271,8 @@ class TransferView(Gtk.Box):
             )
         self.transfer_button.set_sensitive(blocker is None)
         self.transfer_button.set_tooltip_text(
-            f"Hay una operación en curso: {blocker.label}. Esperá a que termine."
-            if blocker else None
+            _("Hay una operación en curso: {op}. Esperá a que termine.")
+            .format(op=blocker.label) if blocker else None
         )
         return False
 
@@ -317,7 +319,8 @@ class TransferView(Gtk.Box):
         for drive in auto_drives:
             if drive.mount_point in preset_paths:
                 continue
-            subtitle = f"{drive.free_gb:.1f} GB libres de {drive.total_gb:.1f} GB · {drive.mount_point}"
+            subtitle = _("{free:.1f} GB libres de {total:.1f} GB · {path}").format(
+                free=drive.free_gb, total=drive.total_gb, path=drive.mount_point)
             row = Adw.ActionRow(title=drive.name, subtitle=subtitle)
             row.dest_path = drive.mount_point
             row.is_manual = False
@@ -349,7 +352,7 @@ class TransferView(Gtk.Box):
             self.dest_list.unselect_all()
             self._update_dest_space_label()
             self._update_eject_button()
-            self._show_toast("El destino elegido ya no está disponible y se quitó de la lista.")
+            self._show_toast(_("El destino elegido ya no está disponible y se quitó de la lista."))
 
     def _build_preset_row(self, preset: dict):
         """Fila de un destino guardado. Si la ruta no está disponible ahora
@@ -370,11 +373,13 @@ class TransferView(Gtk.Box):
                 usage = shutil.disk_usage(path)
                 libres = usage.free / (1024 ** 3)
                 total = usage.total / (1024 ** 3)
-                row.set_subtitle(f"{libres:.1f} GB libres de {total:.1f} GB · {path}")
+                row.set_subtitle(
+                    _("{free:.1f} GB libres de {total:.1f} GB · {path}").format(
+                        free=libres, total=total, path=path))
             except OSError:
                 row.set_subtitle(str(path))
         else:
-            row.set_subtitle(f"No disponible ahora · {path}")
+            row.set_subtitle(_("No disponible ahora · {path}").format(path=path))
             # Apagada: así no se puede elegir un destino que no está, que
             # es lo que terminaba en un error feo al tocar Transferir.
             row.set_sensitive(False)
@@ -382,31 +387,31 @@ class TransferView(Gtk.Box):
 
         quitar = Gtk.Button(icon_name="user-trash-symbolic", valign=Gtk.Align.CENTER)
         quitar.add_css_class("flat")
-        quitar.set_tooltip_text("Quitar este acceso rápido")
-        quitar.connect("clicked", lambda *_: self._on_delete_preset(preset))
+        quitar.set_tooltip_text(_("Quitar este acceso rápido"))
+        quitar.connect("clicked", lambda *_a: self._on_delete_preset(preset))
         # El botón va fuera del estado de la fila: un destino que no está
         # disponible es justamente el que uno quiere poder borrar.
         quitar.set_sensitive(True)
         row.add_suffix(quitar)
         return row
 
-    def _on_save_preset(self, *_):
+    def _on_save_preset(self, *_args):
         if self._dest_path is None:
-            self._show_toast("Elegí primero un destino de la lista para guardarlo.")
+            self._show_toast(_("Elegí primero un destino de la lista para guardarlo."))
             return
         path = self._dest_path
 
         dialog = Adw.AlertDialog(
-            heading="Guardar este destino",
-            body=f"Se va a guardar como acceso rápido:\n{path}",
+            heading=_("Guardar este destino"),
+            body=_("Se va a guardar como acceso rápido:\n{path}").format(path=path),
         )
         entry = Gtk.Entry(text=path.name or str(path),
                            placeholder_text="Ej.: HDD principal, SD cliente")
         entry.set_margin_start(12); entry.set_margin_end(12)
         entry.set_margin_top(8); entry.set_margin_bottom(4)
         dialog.set_extra_child(entry)
-        dialog.add_response("cancel", "Cancelar")
-        dialog.add_response("save", "Guardar")
+        dialog.add_response("cancel", _("Cancelar"))
+        dialog.add_response("save", _("Guardar"))
         dialog.set_default_response("save")
         dialog.set_response_appearance("save", Adw.ResponseAppearance.SUGGESTED)
         dialog.connect("response", self._on_save_preset_response, entry, path)
@@ -421,7 +426,7 @@ class TransferView(Gtk.Box):
         self.settings.dest_presets = presets
         self._save_settings()
         self._refresh_drives()
-        self._show_toast(f"Destino guardado como '{nombre}'.")
+        self._show_toast(_("Destino guardado como '{name}'.").format(name=nombre))
 
     def _on_delete_preset(self, preset: dict):
         self.settings.dest_presets = [
@@ -429,14 +434,15 @@ class TransferView(Gtk.Box):
         ]
         self._save_settings()
         self._refresh_drives()
-        self._show_toast(f"Se quitó el acceso rápido '{preset.get('name', '')}'.")
+        self._show_toast(_("Se quitó el acceso rápido '{name}'.")
+                         .format(name=preset.get("name", "")))
 
     def _save_settings(self):
         error = config.try_save(self.settings)
         if error:
             # No se pierde lo que ya está en pantalla: la lista en memoria
             # queda igual, solo no sobrevive al próximo arranque.
-            self._show_toast(f"No se pudo guardar la configuración: {error}")
+            self._show_toast(_("No se pudo guardar la configuración: {error}").format(error=error))
 
     def _poll_drives(self):
         """Sondeo periódico (mismo patrón que la detección de la Biblioteca
@@ -499,18 +505,19 @@ class TransferView(Gtk.Box):
         ratio = min(max(ratio, 0.0), 1.0)
         self.dest_space_bar.add_css_class(self._usage_css_class(ratio))
         self.dest_space_bar.set_value(ratio)
-        self.dest_space_bar.set_tooltip_text(f"{ratio * 100:.0f}% del destino ocupado")
+        self.dest_space_bar.set_tooltip_text(
+            _("{percent:.0f}% del destino ocupado").format(percent=ratio * 100))
         self.dest_space_bar.set_visible(True)
 
     def _update_dest_space_label(self):
         if self._dest_path is None:
-            self.dest_space_label.set_label("Elegí un destino para ver el espacio disponible.")
+            self.dest_space_label.set_label(_("Elegí un destino para ver el espacio disponible."))
             self._set_usage_bar(None)
             return
         try:
             usage = shutil.disk_usage(self._dest_path)
         except OSError:
-            self.dest_space_label.set_label("No se pudo leer el espacio disponible en el destino.")
+            self.dest_space_label.set_label(_("No se pudo leer el espacio disponible en el destino."))
             self._set_usage_bar(None)
             return
         free_gb = usage.free / (1024 ** 3)
@@ -521,9 +528,11 @@ class TransferView(Gtk.Box):
         # es "cuánto del disco no puedo usar", así que se calcula sobre lo
         # que NO está libre y no sobre `usage.used`.
         ratio = (usage.total - usage.free) / usage.total if usage.total else None
-        percent_text = f" · {ratio * 100:.0f}% usado" if ratio is not None else ""
+        percent_text = (_(" · {percent:.0f}% usado").format(percent=ratio * 100)
+                        if ratio is not None else "")
         self.dest_space_label.set_label(
-            f"Espacio en destino: {free_gb:.1f} GB libres de {total_gb:.1f} GB{percent_text}"
+            _("Espacio en destino: {free:.1f} GB libres de {total:.1f} GB{percent}")
+            .format(free=free_gb, total=total_gb, percent=percent_text)
         )
         self._set_usage_bar(ratio)
 
@@ -531,16 +540,17 @@ class TransferView(Gtk.Box):
         if self._dest_path is not None and drives.is_mount_point(self._dest_path):
             self.eject_button.set_sensitive(True)
             self.eject_button.set_tooltip_text(
-                "Desmontar de forma segura la unidad seleccionada antes de desconectarla."
+                _("Desmontar de forma segura la unidad seleccionada antes de "
+                  "desconectarla.")
             )
         else:
             self.eject_button.set_sensitive(False)
             self.eject_button.set_tooltip_text(
-                "El destino elegido no es una unidad montada (es una carpeta local): "
-                "no hay nada que expulsar."
+                _("El destino elegido no es una unidad montada (es una carpeta "
+                  "local): no hay nada que expulsar.")
             )
 
-    def _on_eject_clicked(self, *_):
+    def _on_eject_clicked(self, *_args):
         if self._dest_path is None or not drives.is_mount_point(self._dest_path):
             return
         dest_path = self._dest_path
@@ -552,8 +562,9 @@ class TransferView(Gtk.Box):
         ocupada = self.ops.is_resource_busy(dest_path)
         if ocupada is not None:
             self._show_toast(
-                f"No se puede expulsar ahora: hay una operación en curso sobre "
-                f"esa unidad ({ocupada.label}). Esperá a que termine o cancelala."
+                _("No se puede expulsar ahora: hay una operación en curso sobre "
+                  "esa unidad ({op}). Esperá a que termine o cancelala.")
+                .format(op=ocupada.label)
             )
             return
         self.eject_button.set_sensitive(False)
@@ -576,8 +587,8 @@ class TransferView(Gtk.Box):
             self._update_eject_button()
         return False
 
-    def _on_add_folder(self, *_):
-        dialog = Gtk.FileDialog(title="Elegí la carpeta destino")
+    def _on_add_folder(self, *_args):
+        dialog = Gtk.FileDialog(title=_("Elegí la carpeta destino"))
         dialog.set_initial_folder(gtk_helpers.safe_initial_folder())
         dialog.select_folder(self.get_root(), None, self._on_folder_picked)
 
@@ -614,7 +625,7 @@ class TransferView(Gtk.Box):
             # Tildar o destildar cambia qué archivos tocaría la
             # transferencia, y con eso si choca o no con lo que esté
             # corriendo: hay que revisar el botón.
-            row.check.connect("toggled", lambda *_: self._update_operation_ui())
+            row.check.connect("toggled", lambda *_a: self._update_operation_ui())
             self.game_list.append(row)
             self._game_rows.append(row)
             row.load_cover_async()
@@ -628,14 +639,14 @@ class TransferView(Gtk.Box):
             row.check.set_active(value)
 
     # -------------------------------------------------------- Transferir --
-    def _on_transfer_clicked(self, *_):
+    def _on_transfer_clicked(self, *_args):
         if self._dest_path is None:
-            self._show_toast("Elegí primero una unidad o carpeta destino.")
+            self._show_toast(_("Elegí primero una unidad o carpeta destino."))
             return
 
         selected = self._selected_games()
         if not selected:
-            self._show_toast("No hay juegos seleccionados.")
+            self._show_toast(_("No hay juegos seleccionados."))
             return
 
         # El chequeo de espacio NO se hace acá: calcular cuánto va a ocupar
@@ -656,9 +667,10 @@ class TransferView(Gtk.Box):
             if dest is not None and dest.exists():
                 gtk_helpers.confirm_overwrite(
                     self.get_root(),
-                    f"Ya existe un archivo en:\n{dest}\n\n"
-                    f"Enviar '{selected[0].title}' lo va a reemplazar. "
-                    "Esta acción no se puede deshacer.",
+                    _("Ya existe un archivo en:\n{dest}\n\n"
+                      "Enviar '{title}' lo va a reemplazar. "
+                      "Esta acción no se puede deshacer.")
+                    .format(dest=dest, title=selected[0].title),
                     lambda: self._start_transfer(selected, dest_root, overwrite=True),
                 )
                 return
@@ -678,7 +690,7 @@ class TransferView(Gtk.Box):
                 resources=[dest_root],
             )
         except OperationBusy as e:
-            self._show_toast(f"No se puede ahora: {e.detail}.")
+            self._show_toast(_("No se puede ahora: {detail}.").format(detail=e.detail))
             return
 
         wit_binary = self.settings.wit_binary
@@ -690,7 +702,8 @@ class TransferView(Gtk.Box):
         self.cancel_button.set_visible(True)
         self.cancel_button.set_sensitive(True)
         self.transfer_progress.set_fraction(0)
-        self.transfer_progress.set_text(f"0/{len(selected)} transferidos")
+        self.transfer_progress.set_text(
+            _("0/{total} transferidos").format(total=len(selected)))
         self.transfer_progress.set_visible(True)
 
         total = len(selected)
@@ -808,19 +821,19 @@ class TransferView(Gtk.Box):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_cancel_clicked(self, *_):
+    def _on_cancel_clicked(self, *_args):
         # Mata el `wit` (o corta la copia) que esté corriendo ahora mismo,
         # no solo evita que arranque el próximo juego.
         self._cancel_token.cancel()
         self.cancel_button.set_sensitive(False)
-        self._show_toast("Cancelando la transferencia…")
+        self._show_toast(_("Cancelando la transferencia…"))
 
     def _show_planning(self):
         """Mientras el worker calcula cuánto ocupa cada juego, la ventana
         tiene que seguir viva y decir qué está haciendo."""
         self.transfer_progress.set_visible(True)
         self.transfer_progress.set_fraction(0)
-        self.transfer_progress.set_text("Calculando espacio necesario…")
+        self.transfer_progress.set_text(_("Calculando espacio necesario…"))
         return False
 
     def _update_progress(self, done: int, total: int, title: str,
@@ -844,12 +857,16 @@ class TransferView(Gtk.Box):
         if bytes_written > 0 and elapsed > 1:
             speed = bytes_written / elapsed
             remaining = max(total_bytes - bytes_done, 0)
-            eta_text = f" · ~{library.format_eta(remaining / speed)} restantes" if speed > 0 else ""
+            eta_text = (_(" · ~{eta} restantes")
+                        .format(eta=library.format_eta(remaining / speed))
+                        if speed > 0 else "")
         elif total > 1:
-            eta_text = " · calculando tiempo restante…"
+            eta_text = _(" · calculando tiempo restante…")
         else:
             eta_text = ""
-        self.transfer_progress.set_text(f"{done}/{total} · {title}{eta_text}")
+        self.transfer_progress.set_text(
+            _("{done}/{total} · {title}{eta}").format(
+                done=done, total=total, title=title, eta=eta_text))
         return False
 
     def _on_transfer_done(self, ok_count: int, err_count: int, cancelled: bool = False,
@@ -862,12 +879,15 @@ class TransferView(Gtk.Box):
         error_msgs = error_msgs or []
         detail_parts = [f"{ok_count} ok"]
         if skipped_count:
-            detail_parts.append(f"{skipped_count} ya estaban en el destino")
+            detail_parts.append(
+                _("{n} ya estaban en el destino").format(n=skipped_count))
         if err_count:
             detalle = "; ".join(error_msgs[:3])
             mas = f" (+{len(error_msgs) - 3} más)" if len(error_msgs) > 3 else ""
-            detail_parts.append(f"{err_count} con error: {detalle}{mas}"
-                                 if detalle else f"{err_count} con error")
+            detail_parts.append(
+                _("{n} con error: {detail}{more}").format(
+                    n=err_count, detail=detalle, more=mas)
+                if detalle else _("{n} con error").format(n=err_count))
         if cancelled:
             status = oplog.STATUS_CANCELLED
         elif not err_count:
@@ -882,15 +902,20 @@ class TransferView(Gtk.Box):
         self.cancel_button.set_visible(False)
         self.transfer_progress.set_visible(False)
         self._update_dest_space_label()
-        skipped_text = f", {skipped_count} ya estaban en el destino" if skipped_count else ""
+        skipped_text = (_(", {n} ya estaban en el destino").format(n=skipped_count)
+                        if skipped_count else "")
         if cancelled:
-            msg = (f"Transferencia cancelada: {ok_count} ok, {err_count} con error"
-                   f"{skipped_text} antes de cancelar.")
+            msg = _("Transferencia cancelada: {ok} ok, {err} con error"
+                    "{skipped} antes de cancelar.").format(
+                        ok=ok_count, err=err_count, skipped=skipped_text)
         elif err_count or skipped_count:
             motivo = f" ({'; '.join(error_msgs[:2])})" if error_msgs else ""
-            msg = (f"Transferencia terminada: {ok_count} ok, "
-                   f"{err_count} con error{skipped_text}.{motivo}")
+            msg = _("Transferencia terminada: {ok} ok, {err} con error"
+                    "{skipped}.{reason}").format(
+                        ok=ok_count, err=err_count, skipped=skipped_text,
+                        reason=motivo)
         else:
-            msg = f"Transferencia terminada: {ok_count} juego(s) copiados ✓"
+            msg = _("Transferencia terminada: {ok} juego(s) copiados ✓").format(
+                ok=ok_count)
         self._show_toast(msg)
         return False
