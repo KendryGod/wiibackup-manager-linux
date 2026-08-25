@@ -307,6 +307,22 @@ versión anterior encontraron caminos de código que habían quedado sin la
 protección, y esta versión los cierra. Suma además cuatro funciones
 nuevas y el README completo.
 
+#### Nuevo
+
+- **Eliminar un juego ahora lo manda a la papelera del sistema**, no lo
+  borra para siempre. Un borrado por error se deshace desde Archivos como
+  con cualquier otro archivo, en vez de obligar a volver a copiar el disco
+  original. Vale para el borrado individual y para el lote.
+  - Usa `Gio.File.trash()`, la misma API que Archivos (Nautilus): escribe
+    el `.trashinfo` con la ruta original, así que "Restaurar" devuelve el
+    juego a la carpeta de la biblioteca.
+  - Si el juego está en una unidad **sin papelera posible** (montada de
+    solo lectura, o donde no se puede crear el directorio de papelera), la
+    app lo detecta ANTES de borrar y el diálogo avisa que esa acción no se
+    va a poder deshacer, en vez de prometer una papelera que no existe. En
+    una selección mezclada dice cuántos van a cada lado.
+  - La pestaña Log distingue los dos casos.
+
 #### Corregido
 
 - **La app no se abría desde el menú/dock del escritorio.** El `.desktop`

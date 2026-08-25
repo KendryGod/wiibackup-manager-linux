@@ -11,7 +11,7 @@ gi.require_version("Adw", "1")
 gi.require_version("Gdk", "4.0")
 from gi.repository import Adw, Gtk, GLib, Gio, Gdk  # noqa: E402
 
-from . import __version__, config, library, operations, oplog, styles, wit_wrapper
+from . import __version__, config, library, operations, oplog, styles, trash, wit_wrapper
 from .disc_header import UNKNOWN_GAME_ID
 from .operations import OperationBusy, OperationKind, OperationOutcome
 
@@ -427,7 +427,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
     def _batch_outcome(target: str, ok: int, errors: list[str],
                         skipped: list[str] | None = None,
                         cancelled: bool = False,
-                        notes: list[str] | None = None) -> OperationOutcome:
+                        notes: list[str] | None = None,
+                        summary_note: str = "") -> OperationOutcome:
         """Traduce el recuento de un lote al resultado que va al historial.
 
         Cancelado gana sobre todo lo demás (lo pidió el usuario, no es un
@@ -440,7 +441,14 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         # ocupado). Van al MISMO resumen y no a entradas sueltas: una
         # acción del usuario, una entrada de historial.
         notes = notes or []
+        # `summary_note` describe CÓMO se hizo el lote entero, no una
+        # desviación: "fueron a la papelera". Va al detalle pero no toca el
+        # estado, al revés que `notes`. Sin esa distinción, borrar juegos de
+        # una unidad sin papelera -que es exactamente lo que el usuario
+        # confirmó- quedaba anotado como "Terminada con errores".
         detail_parts = [f"{ok} ok"]
+        if summary_note:
+            detail_parts.append(summary_note)
         if skipped:
             detail_parts.append(f"{len(skipped)} omitido(s)")
         if notes:
@@ -520,7 +528,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
     # ------------------------------------------------------ Acciones en lote --
     def _run_batch(self, games: list[Game], title: str, action_fn,
-                    kind: OperationKind, cancel_message: str = "Cancelando…"):
+                    kind: OperationKind, cancel_message: str = "Cancelando…",
+                    summary_note: str = ""):
         """Corre `action_fn(game, cancel)` para cada juego en un hilo
         aparte, mostrando progreso, botón de cancelar y un resumen final de
         éxitos/omitidos/errores. Se reusa para verificar y eliminar en lote.
@@ -597,19 +606,21 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                     errors.append(f"{game.title}: {e}")
                 GLib.idle_add(self.progress_bar.set_fraction, i / max(total, 1))
             GLib.idle_add(self._on_batch_done, title, ok, errors, skipped, op,
-                          self._describe_target(games), cancelled, notes)
+                          self._describe_target(games), cancelled, notes,
+                          summary_note)
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_batch_done(self, title: str, ok: int, errors: list[str],
                         skipped: list[str] | None = None, op=None,
                         target: str = "", cancelled: bool = False,
-                        notes: list[str] | None = None):
+                        notes: list[str] | None = None,
+                        summary_note: str = ""):
         # Terminar la operación ANTES del rescan de abajo: si no, el escaneo
         # chocaría con ella y quedaría postergado. El resultado que se le
         # pasa acá es lo que queda anotado en la pestaña Log.
         self.ops.finish(op, self._batch_outcome(target, ok, errors, skipped,
-                                                 cancelled, notes))
+                                                 cancelled, notes, summary_note))
         skipped = skipped or []
         notes = notes or []
         self._hide_progress()
@@ -1093,18 +1104,39 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         names = "\n".join(g.path.name for g in games[:8])
         if len(games) > 8:
             names += "\n…"
+        # Una selección puede mezclar unidades (la biblioteca en el disco y
+        # un juego suelto en un pendrive de solo lectura), así que se
+        # pregunta por cada archivo y el diálogo dice exactamente cuáles
+        # se van a poder recuperar y cuáles no.
+        permanentes = {g.path for g in games if not trash.can_trash(g.path)}
+        if not permanentes:
+            heading = "¿Mover a la papelera los juegos seleccionados?"
+            cierre = ("Van a la papelera del sistema. Podés recuperarlos "
+                      "desde ahí.")
+            verb = "Mover a la papelera"
+        elif len(permanentes) == len(games):
+            heading = "¿Eliminar definitivamente los juegos seleccionados?"
+            cierre = ("La unidad donde están no tiene papelera, así que esta "
+                      "acción no se puede deshacer.")
+            verb = "Eliminar"
+        else:
+            heading = "¿Eliminar los juegos seleccionados?"
+            cierre = (f"{len(games) - len(permanentes)} van a la papelera y se "
+                      f"pueden recuperar. Los otros {len(permanentes)} están en "
+                      "una unidad sin papelera: esos se borran definitivamente.")
+            verb = "Eliminar"
         dialog = Adw.AlertDialog(
-            heading="¿Eliminar los juegos seleccionados?",
-            body=f"Se van a borrar {len(games)} archivo(s):\n{names}\n\n"
-                 "Esta acción no se puede deshacer.",
+            heading=heading,
+            body=f"{len(games)} archivo(s):\n{names}\n\n{cierre}",
         )
         dialog.add_response("cancel", "Cancelar")
-        dialog.add_response("delete", "Eliminar")
+        dialog.add_response("delete", verb)
         dialog.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
-        dialog.connect("response", self._on_batch_delete_confirmed, games)
+        dialog.connect("response", self._on_batch_delete_confirmed, games, permanentes)
         dialog.present(self)
 
-    def _on_batch_delete_confirmed(self, dialog, response, games: list[Game]):
+    def _on_batch_delete_confirmed(self, dialog, response, games: list[Game],
+                                    permanentes: set):
         if response != "delete":
             return
         # Igual que en el borrado individual: revalidar después del diálogo.
@@ -1116,10 +1148,28 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             # Borrar un archivo es instantáneo: no hay nada que cortar a
             # mitad, cancelar solo evita que se sigan borrando los que
             # faltaban.
-            g.path.unlink()
+            #
+            # `permanentes` viene de lo que se le mostró al usuario en el
+            # diálogo, no se vuelve a preguntar acá: si la unidad perdió la
+            # papelera en el medio, `send_to_trash` levanta y el juego
+            # queda contado como error en el resumen. Borrarlo igual sería
+            # hacer algo distinto de lo que se confirmó.
+            if g.path in permanentes:
+                trash.delete_permanently(g.path)
+                return
+            trash.send_to_trash(g.path)
 
+        a_papelera = len(games) - len(permanentes)
+        if not permanentes:
+            nota = "a la papelera"
+        elif a_papelera == 0:
+            nota = "borrado definitivo (unidad sin papelera)"
+        else:
+            nota = (f"{a_papelera} a la papelera, {len(permanentes)} "
+                    "borrado(s) definitivamente (unidad sin papelera)")
         self._run_batch(games, "Eliminando", delete_one, OperationKind.DELETING,
-                         cancel_message="Cancelando el borrado…")
+                         cancel_message="Cancelando el borrado…",
+                         summary_note=nota)
 
     # -------------------------------------------------------- Library --
     @staticmethod
@@ -1968,17 +2018,31 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         game = row.game
         if self._reject_if_busy(OperationKind.DELETING, write=[game.path]):
             return
-        dialog = Adw.AlertDialog(
-            heading="¿Eliminar este juego?",
-            body=f"Se borrará el archivo:\n{game.path.name}\n\nEsta acción no se puede deshacer.",
-        )
+        # Lo que se le promete al usuario depende de si esa unidad tiene
+        # papelera: prometer que se puede deshacer y después borrar de
+        # verdad sería peor que no ofrecer la papelera.
+        self._present_delete_dialog(game, trash.can_trash(game.path))
+
+    def _present_delete_dialog(self, game: Game, to_trash: bool):
+        if to_trash:
+            heading = "¿Mover este juego a la papelera?"
+            body = (f"El archivo:\n{game.path.name}\n\nva a la papelera del "
+                    "sistema. Podés recuperarlo desde ahí.")
+            verb = "Mover a la papelera"
+        else:
+            heading = "¿Eliminar este juego definitivamente?"
+            body = (f"Se borrará el archivo:\n{game.path.name}\n\nLa unidad "
+                    "donde está no tiene papelera, así que esta acción no se "
+                    "puede deshacer.")
+            verb = "Eliminar"
+        dialog = Adw.AlertDialog(heading=heading, body=body)
         dialog.add_response("cancel", "Cancelar")
-        dialog.add_response("delete", "Eliminar")
+        dialog.add_response("delete", verb)
         dialog.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
-        dialog.connect("response", self._on_delete_confirmed, game)
+        dialog.connect("response", self._on_delete_confirmed, game, to_trash)
         dialog.present(self)
 
-    def _on_delete_confirmed(self, dialog, response, game: Game):
+    def _on_delete_confirmed(self, dialog, response, game: Game, to_trash: bool):
         if response != "delete":
             return
         # Revalidar: entre que se abrió el diálogo y el usuario confirmó
@@ -1987,10 +2051,24 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         if self._reject_if_busy(OperationKind.DELETING, write=[game.path]):
             return
         try:
-            game.path.unlink()
-            self._show_toast(f"Eliminado: {game.path.name}")
+            if to_trash:
+                trash.send_to_trash(game.path)
+                self._show_toast(f"Movido a la papelera: {game.path.name}")
+                detail = f"{game.path.name} → papelera"
+            else:
+                trash.delete_permanently(game.path)
+                self._show_toast(f"Eliminado: {game.path.name}")
+                detail = f"{game.path.name} (borrado definitivo)"
             self.op_log.record(OperationKind.DELETING.label, game.title,
-                                oplog.STATUS_OK, game.path.name)
+                                oplog.STATUS_OK, detail)
+        except trash.TrashUnsupported:
+            # La unidad dejó de tener papelera entre la pregunta y el
+            # borrado (se remontó de solo lectura, por ejemplo). No se
+            # borra igual por las dudas: lo que el usuario aceptó era otra
+            # cosa, así que se le vuelve a preguntar diciendo la verdad.
+            self.rescan_library()
+            self._present_delete_dialog(game, to_trash=False)
+            return
         except OSError as e:
             self._show_toast(f"No se pudo eliminar: {e}")
             self.op_log.record(OperationKind.DELETING.label, game.title,
