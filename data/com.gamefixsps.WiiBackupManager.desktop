@@ -2,7 +2,13 @@
 Type=Application
 Name=WiiBackup Manager
 Comment=Gestor de respaldos ISO/WBFS de Wii
-Exec=wiibackup-manager
+# Se invoca el modulo con el interprete del sistema en vez del script de
+# consola `wiibackup-manager`: con `pip install --user` ese script queda en
+# ~/.local/bin, que no esta en el PATH de la sesion grafica (GNOME arranca
+# con PATH=/usr/local/bin:/usr/bin), asi que el launcher no lo encontraba.
+# `python3` si esta siempre en el PATH y resuelve el paquete por sys.path,
+# sin rutas absolutas atadas a un usuario concreto.
+Exec=python3 -m wiibackup_manager
 Icon=com.gamefixsps.WiiBackupManager
 Terminal=false
 Categories=Utility;Game;

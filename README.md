@@ -154,6 +154,12 @@ source ~/.bashrc
 
 (Si usás zsh en vez de bash, cambiá `~/.bashrc` por `~/.zshrc`.)
 
+Ese ajuste del PATH hace falta **solo para escribir `wiibackup-manager` en
+la terminal**. El lanzador del escritorio no depende de él: el `.desktop`
+usa `Exec=python3 -m wiibackup_manager`, y `python3` siempre está en el
+PATH mínimo con el que arranca la sesión gráfica (en GNOME suele ser solo
+`/usr/local/bin:/usr/bin`, sin `~/.local/bin`).
+
 Después de instalar, la app también aparece en el menú de aplicaciones con
 su ícono. Si el ícono no se ve, refrescá la caché de íconos:
 
@@ -300,6 +306,17 @@ rondas de revisión externa sobre los arreglos de pérdida de datos de la
 versión anterior encontraron caminos de código que habían quedado sin la
 protección, y esta versión los cierra. Suma además cuatro funciones
 nuevas y el README completo.
+
+#### Corregido
+
+- **La app no se abría desde el menú/dock del escritorio.** El `.desktop`
+  traía `Exec=wiibackup-manager`, que depende de encontrar el script de
+  consola por PATH; con `pip install --user` ese script queda en
+  `~/.local/bin`, que no está en el PATH con el que arranca la sesión
+  gráfica, así que el lanzador fallaba en silencio aunque el `.desktop` y
+  los íconos estuvieran bien instalados. Ahora invoca el módulo con el
+  intérprete del sistema (`Exec=python3 -m wiibackup_manager`), que
+  funciona en cualquier máquina sin hardcodear la ruta de un usuario.
 
 #### Corregido (crítico — pérdida de datos)
 
