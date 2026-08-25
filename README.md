@@ -3,6 +3,7 @@
 Gestor de respaldos de Wii para Linux, inspirado en **Wii Backup Manager**
 de Windows. Hecho con GTK4 + libadwaita para verse nativo en Fedora/GNOME.
 
+[![CI](https://github.com/KendryGod/wiibackup-manager-linux/actions/workflows/ci.yml/badge.svg)](https://github.com/KendryGod/wiibackup-manager-linux/actions/workflows/ci.yml)
 ![Estado](https://img.shields.io/badge/estado-alpha-orange)
 ![Licencia](https://img.shields.io/badge/licencia-MIT-blue)
 ![Versión](https://img.shields.io/badge/versión-0.1.6-green)
@@ -199,6 +200,45 @@ done
 gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor
 ```
 
+## Pruebas
+
+```bash
+pip install --user pytest
+python3 -m pytest
+```
+
+La suite cubre la lógica que no necesita GTK —nombres de archivo,
+escaneo, renombrado sin pisar archivos, reglas de conflicto entre
+operaciones, historial, configuración, papelera, parseo de la salida de
+`wit` y los catálogos de traducción— más un **smoke test** que levanta la
+aplicación completa (CSS, ventana, las tres pestañas, escaneo inicial) y
+comprueba que llega a mostrarse.
+
+El smoke test necesita un display. En una terminal sin sesión gráfica se
+saltea solo; para correr únicamente el resto:
+
+```bash
+python3 -m pytest -m "not gui"
+```
+
+No se ejecuta `wit` de verdad en ningún test: se prueba lo que la app hace
+alrededor del proceso (parsear su salida, matarlo al cancelar, limpiar sus
+temporales), que es donde estuvieron los bugs.
+
+### Integración continua
+
+Cada push y cada pull request corren la suite en GitHub Actions
+(`.github/workflows/ci.yml`) sobre Ubuntu con GTK4 y libadwaita del
+sistema: las pruebas de lógica primero, después el smoke test bajo Xvfb y
+un bus de sesión propio, y por último se construye el paquete y se
+verifica que el `.desktop`, los íconos y los catálogos de traducción
+queden instalados donde corresponde. Si algo falla, el check queda en rojo
+—el badge de arriba lo refleja— antes de poder mergear.
+
+El smoke test corre con `WBM_REQUIRE_GUI=1`, que hace que **falle** en vez
+de saltearse si el display no está disponible: sin eso, un Xvfb roto
+dejaría el check en verde sin haber arrancado la app nunca.
+
 ## Idiomas y traducciones
 
 La app está en **español** e **inglés**, y elige sola según el idioma del
@@ -373,6 +413,11 @@ protección, y esta versión los cierra. Suma además cuatro funciones
 nuevas y el README completo.
 
 #### Nuevo
+
+- **Pruebas automatizadas y CI.** 140 pruebas sobre la lógica del
+  proyecto más un smoke test que arranca la aplicación de verdad, y un
+  workflow de GitHub Actions que las corre en cada push y cada pull
+  request. Ver "Pruebas".
 
 - **Interfaz en inglés además de español**, elegida sola según el idioma
   del sistema (gettext estándar). Un sistema en inglés abre la app en
