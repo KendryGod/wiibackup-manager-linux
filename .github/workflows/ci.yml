@@ -75,10 +75,22 @@ jobs:
           python3 -m build --wheel
           python3 -m pip install --break-system-packages --no-deps \
             --prefix="$RUNNER_TEMP/prefijo" dist/*.whl
-          echo "--- archivos de datos instalados ---"
-          find "$RUNNER_TEMP/prefijo/share" -type f | sort
-          test -f "$RUNNER_TEMP/prefijo/share/applications/com.gamefixsps.WiiBackupManager.desktop"
-          test -f "$RUNNER_TEMP/prefijo/share/locale/en/LC_MESSAGES/wiibackup-manager.mo"
+
+      # Los data_files NO caen en <prefijo>/share: Debian y Ubuntu parchean
+      # sysconfig con el esquema "posix_local", que intercala un local/ en
+      # el prefijo (<prefijo>/local/share, <prefijo>/local/lib/.../dist-packages).
+      # No es culpa de --break-system-packages, que solo desactiva la
+      # protección de PEP 668. En vez de hardcodear ese local/ -- que en
+      # Fedora o Arch no existe -- le preguntamos a sysconfig la misma ruta
+      # de datos que usó pip, con el mismo prefijo.
+      - name: Verificar los archivos de datos instalados
+        run: |
+          DATOS=$(python3 -c "import os, sysconfig; p = os.environ['RUNNER_TEMP'] + '/prefijo'; print(sysconfig.get_path('data', vars={'base': p, 'platbase': p}))")
+          echo "--- archivos de datos instalados en $DATOS ---"
+          find "$DATOS/share" -type f | sort
+          test -f "$DATOS/share/applications/com.gamefixsps.WiiBackupManager.desktop"
+          test -f "$DATOS/share/locale/en/LC_MESSAGES/wiibackup-manager.mo"
+          test -f "$DATOS/share/icons/hicolor/256x256/apps/com.gamefixsps.WiiBackupManager.png"
 
       # El .desktop tiene que ser válido para que el escritorio lo tome, y
       # su Exec no puede volver a depender del PATH del usuario.
