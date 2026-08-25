@@ -73,7 +73,7 @@ jobs:
         run: |
           python3 -m pip install --break-system-packages --user build
           python3 -m build --wheel
-          python3 -m pip install --break-system-packages --user --no-deps \
+          python3 -m pip install --break-system-packages --no-deps \
             --prefix="$RUNNER_TEMP/prefijo" dist/*.whl
           echo "--- archivos de datos instalados ---"
           find "$RUNNER_TEMP/prefijo/share" -type f | sort
