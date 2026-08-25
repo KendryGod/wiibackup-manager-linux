@@ -405,6 +405,55 @@ def _copy_with_progress(
     progress_cb(written)
 
 
+def copy_atomic(src: Path, dest: Path) -> None:
+    """Copia `src` encima de `dest` sin que exista un instante en que
+    `dest` esté a medio escribir. Es `_copy_with_progress` sin progreso ni
+    cancelación: para quien quiere solo la garantía de atomicidad.
+
+    Se usa donde el usuario YA confirmó que quiere pisar ese archivo. Que
+    haya dado el permiso no significa que quiera perder las dos copias si
+    la escritura se corta a mitad, que es lo que pasa con `shutil.copy2`:
+    abre el destino con "wb" y lo vacía en el acto."""
+    _copy_with_progress(src, dest, lambda _n: None)
+
+
+def copy_no_replace(src: Path, dest: Path) -> None:
+    """Copia `src` a `dest` sin pisar un archivo ajeno.
+
+    Es a `copy_atomic` lo que `rename_no_replace` es a `Path.rename`, y
+    existe por el mismo motivo: el patrón "si no existe, copiar" tiene una
+    ventana entre las dos cosas. En la importación esa ventana es larga de
+    verdad -los destinos se planifican en el hilo de GTK y la copia
+    arranca después, tras identificar cada archivo con `wit`- así que
+    alcanza con que otro programa, un script o una segunda instancia de
+    esta app cree un archivo con ese nombre en el medio para que la copia
+    se lo lleve puesto sin preguntar.
+
+    El nombre se reserva primero con O_CREAT|O_EXCL, que es atómico y
+    falla con `FileExistsError` si alguien llegó antes, y recién después
+    se copia el contenido encima de esa reserva propia. Quien llama decide
+    qué hacer con esa colisión tardía (buscar otro nombre, avisar); lo que
+    no puede pasar es que se pise en silencio.
+
+    La garantía llega hasta donde llega la de `rename_no_replace`: cubre
+    las carreras de la propia app y el uso normal de otros programas, y no
+    cubre a alguien que borre o reemplace justamente nuestra reserva entre
+    el O_CREAT|O_EXCL y el movimiento final."""
+    fd = os.open(dest, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    os.close(fd)
+    try:
+        copy_atomic(src, dest)
+    except BaseException:
+        # La copia no llegó a completarse, así que lo que hay en `dest` es
+        # la reserva vacía y no el archivo de nadie: se saca para no dejar
+        # un archivo de 0 bytes ocupando el nombre.
+        try:
+            os.unlink(dest)
+        except OSError:
+            pass
+        raise
+
+
 class DestinationExistsError(FileExistsError):
     """El archivo destino en la unidad WBFS ya existe y no se pidió
     sobrescribirlo. Es una condición esperable (el juego ya está en la

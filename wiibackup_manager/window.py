@@ -49,6 +49,13 @@ from .widgets import gtk_helpers
 from .widgets.preferences_dialog import PreferencesDialog
 from .widgets.transfer_view import TransferView
 
+# Cuántas variantes de nombre se prueban cuando el destino planificado
+# aparece ocupado recién a la hora de copiar. Es una carrera con un
+# proceso externo: si alguien se queda con cien nombres seguidos mientras
+# copiamos, no es una colisión sino algo raro, y conviene informar el
+# error en vez de seguir probando para siempre.
+_MAX_COLISIONES_IMPORT = 100
+
 
 class WiiBackupWindow(Adw.ApplicationWindow):
     def __init__(self, app: Adw.Application):
@@ -1559,8 +1566,6 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         nombre se resuelven acá antes de tocar el disco: preguntando si es
         un solo archivo, y con un nombre alternativo si es un lote.
         `overwrite=True` es la respuesta afirmativa de esa pregunta."""
-        import shutil as _shutil
-
         dest_dir = Path(self.settings.library_path)
         try:
             dest_dir.mkdir(parents=True, exist_ok=True)
@@ -1628,6 +1633,44 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             errors: list[str] = []
             total = len(plan)
 
+            def copiar(src: Path, dest: Path) -> Path:
+                """Copia `src` a `dest` y devuelve dónde terminó de verdad.
+
+                El plan se arma en el hilo de GTK y la copia arranca acá,
+                después de identificar cada archivo con `wit`: entre una
+                cosa y la otra pasa tiempo real, y un proceso EXTERNO a la
+                app (otro programa, un script, otra instancia) puede haber
+                creado un archivo con ese nombre. `copy_no_replace` reserva
+                el nombre de forma atómica y avisa en vez de pisarlo, así
+                que esa colisión tardía se trata como lo que es: una
+                colisión nueva, que se resuelve con un nombre alternativo,
+                igual que las que se detectan al planificar.
+
+                Con `overwrite` el usuario ya confirmó pisar ESE archivo,
+                así que ahí sí se reemplaza — pero con `copy_atomic`, que
+                no deja el destino a medio escribir si la copia se corta."""
+                if overwrite:
+                    library.copy_atomic(src, dest)
+                    return dest
+                # El destino alternativo no está declarado en la
+                # operación (el plan no lo preveía), así que el detector de
+                # conflictos no lo cubre. Es aceptable: es un archivo que
+                # nadie más conoce todavía, y la alternativa -pisar lo que
+                # apareció- es peor.
+                destino = dest
+                for _intento in range(_MAX_COLISIONES_IMPORT):
+                    try:
+                        library.copy_no_replace(src, destino)
+                    except FileExistsError:
+                        # Se lo ganaron en el medio: se busca la próxima
+                        # variante libre y se reintenta.
+                        destino = self._free_import_dest(dest, set())
+                        continue
+                    if destino != dest:
+                        renamed.append(destino.name)
+                    return destino
+                raise FileExistsError(dest)
+
             for i, (src, dest) in enumerate(plan, start=1):
                 GLib.idle_add(self.progress_bar.set_fraction, i / max(total, 1))
 
@@ -1646,7 +1689,14 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
                 if not self._is_same_file(src, dest):
                     try:
-                        _shutil.copy2(src, dest)
+                        dest = copiar(src, dest)
+                    except FileExistsError:
+                        errors.append(
+                            f"{game.title}: apareció otro archivo llamado "
+                            f"'{dest.name}' en la biblioteca y no se encontró "
+                            "un nombre libre; no se copió nada"
+                        )
+                        continue
                     except OSError as e:
                         errors.append(f"{game.title}: no se pudo copiar ({e.strerror or e})")
                         continue
