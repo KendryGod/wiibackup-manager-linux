@@ -947,6 +947,11 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                     bytes_other += salidas[id(game)]
                 else:
                     try:
+                        # Sin `overwrite`: acá el lote ya saltea el juego
+                        # si el destino existe (ver el `if` de arriba), así
+                        # que no hay nada que pisar. Si algo apareciera con
+                        # ese nombre entre el chequeo y esta línea, `wit`
+                        # falla y se informa, que es justo lo que se quiere.
                         result = wit_wrapper.convert(game.path, dest, target_ext.strip("."),
                                                       wit_binary, bytes_progress_cb=on_progress,
                                                       cancel=cancel)
@@ -1875,10 +1880,13 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 # termina bien. Ver library.DestinationGuard.
                 with library.DestinationGuard(
                         dest, enabled=bool(library.wbfs_group(dest))) as guard:
+                    # `overwrite=True` explícito: el usuario ya confirmó
+                    # pisar el destino y el guard de arriba tiene el
+                    # respaldo apartado para devolverlo si esto sale mal.
                     result = wit_wrapper.convert(game.path, dest, target_ext.strip("."),
                                                   self.settings.wit_binary,
                                                   bytes_progress_cb=on_progress,
-                                                  cancel=cancel)
+                                                  cancel=cancel, overwrite=True)
                     ok = result.returncode == 0
                     if ok:
                         guard.commit()

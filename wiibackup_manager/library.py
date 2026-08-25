@@ -825,8 +825,14 @@ def send_to_wbfs_drive(
     # Si había algo en el destino, se lo aparta antes de dejar que `wit`
     # escriba: si la conversión falla o se cancela, vuelve a su lugar.
     with DestinationGuard(dest, enabled=bool(wbfs_group(dest))) as guard:
+        # `overwrite=True` explícito: quien llama ya decidió pisar (lo
+        # exige el `overwrite` de esta función) y el guard de arriba tiene
+        # el respaldo apartado, así que si `wit` se encuentra algo con el
+        # nombre final es basura de un intento anterior, no el juego del
+        # usuario.
         result = wit_wrapper.convert(game.path, dest, "WBFS", wit_binary, split=split,
-                                      bytes_progress_cb=bytes_progress_cb, cancel=cancel)
+                                      bytes_progress_cb=bytes_progress_cb, cancel=cancel,
+                                      overwrite=True)
         if result.returncode != 0:
             raise RuntimeError(
                 result.stderr.strip() or "Error desconocido al convertir con wit")

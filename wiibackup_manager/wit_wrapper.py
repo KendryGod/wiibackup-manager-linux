@@ -512,6 +512,7 @@ def convert(
     cancel: Optional[CancellationToken] = None,
     inactivity_timeout: Optional[float] = WIT_INACTIVITY_TIMEOUT,
     absolute_timeout: Optional[float] = WIT_ABSOLUTE_TIMEOUT,
+    overwrite: bool = False,
 ) -> subprocess.CompletedProcess:
     """Convierte src -> dest. target_format: 'WBFS' o 'ISO'.
 
@@ -534,6 +535,16 @@ def convert(
     soporta archivos grandes no tiene costo: el archivo sale igual,
     entero.
 
+    `overwrite=True` le pasa `--overwrite` a `wit`, o sea que si el destino
+    ya existe lo reemplaza sin vuelta atrás. El default es False a
+    propósito: antes `--overwrite` iba SIEMPRE, de forma incondicional, y
+    eso funcionaba solo porque todos los que llaman hoy se ocupan del
+    destino existente por su cuenta (apartándolo con un
+    `library.DestinationGuard`, o directamente salteando el archivo). Era
+    una trampa esperando a que alguien llamara a `convert()` sin ese
+    cuidado y perdiera un juego sin enterarse; con el default en False, el
+    que quiera pisar tiene que decirlo.
+
     `cancel`, si se pasa, permite matar el `wit` en curso desde otro hilo
     (el botón "Cancelar" de la interfaz): en ese caso se levanta
     `OperationCancelled` y se limpian los temporales que quedaron a medio
@@ -551,7 +562,9 @@ def convert(
 
     # wit infiere el formato de salida por la extensión de --dest, así que
     # nos aseguramos de que dest tenga la extensión correcta antes de llamar.
-    args = [binary, "COPY", "--overwrite"]
+    args = [binary, "COPY"]
+    if overwrite:
+        args.append("--overwrite")
     if split:
         args += ["--split-size", _SPLIT_SIZE_ARG]
     args += [str(src), "--dest", str(dest)]
