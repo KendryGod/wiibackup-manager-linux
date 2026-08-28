@@ -207,6 +207,17 @@ pip install --user pytest
 python3 -m pytest
 ```
 
+Varios tests escriben archivos reales bajo `tmp_path` (juegos de prueba,
+ZIPs, ISOs sintéticas), que pytest deja en `/tmp/pytest-of-$USER/`.
+`pytest.ini` ya limita cuánto se acumula ahí (`tmp_path_retention_count`
++ `tmp_path_retention_policy`, ver ese archivo), pero en una máquina con
+`/tmp` chico (por ejemplo un tmpfs de pocos GB) igual conviene limpiarlo
+de vez en cuando a mano si se corre la suite muy seguido:
+
+```bash
+rm -rf /tmp/pytest-of-*
+```
+
 La suite cubre la lógica que no necesita GTK —nombres de archivo,
 escaneo, renombrado sin pisar archivos, reglas de conflicto entre
 operaciones, historial, configuración, papelera, parseo de la salida de
