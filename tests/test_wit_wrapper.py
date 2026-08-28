@@ -55,6 +55,17 @@ def test_find_id6_line_ignora_lo_que_no_es_un_id6():
     assert wit_wrapper._find_id6_line("../../  4482  PAL  falso") is None
 
 
+# ------------------------------------------------------------ Consola --
+@pytest.mark.parametrize("game_id,esperado", [
+    ("GZ2E01", "gc"),      # GameCube: primer carácter 'G'
+    ("gz2e01", "gc"),      # minúsculas: se normaliza igual que un game_id
+    ("RMCE01", "wii"),
+    ("SBQE01", "wii"),
+])
+def test_console_for_id(game_id, esperado):
+    assert wit_wrapper.console_for_id(game_id) == esperado
+
+
 # ------------------------------------------------------- Cancelación --
 def test_token_arranca_sin_cancelar():
     assert not wit_wrapper.CancellationToken().cancelled

@@ -159,6 +159,90 @@ def test_wbfs_dest_path_rechaza_un_id_que_se_escaparia_de_la_carpeta(make_game, 
         library.wbfs_dest_path(juego, tmp_path)
 
 
+# --------------------------------------------------------- GameCube --
+def test_gc_dest_path_usa_la_estructura_de_nintendont(make_game, tmp_path):
+    juego = make_game(name="juego.iso", game_id="GZ2E01",
+                      title="Twilight Princess", console="gc")
+    destino = library.gc_dest_path(juego, tmp_path)
+    assert destino == tmp_path / "games" / "Twilight Princess [GZ2E01]" / "game.iso"
+
+
+def test_gc_dest_path_conserva_la_extension_ciso(make_game, tmp_path):
+    juego = make_game(name="juego.ciso", game_id="GZ2E01",
+                      title="Twilight Princess", console="gc")
+    destino = library.gc_dest_path(juego, tmp_path)
+    assert destino.name == "game.ciso"
+
+
+def test_gc_dest_path_disco_2_va_a_la_misma_carpeta_como_disc2(make_game, tmp_path):
+    disco1 = make_game(name="d1.iso", game_id="GZ2E01", title="RE4",
+                       console="gc", disc_number=0)
+    disco2 = make_game(name="d2.iso", game_id="GZ2E01", title="RE4",
+                       console="gc", disc_number=1)
+    dest1 = library.gc_dest_path(disco1, tmp_path)
+    dest2 = library.gc_dest_path(disco2, tmp_path)
+    assert dest1.parent == dest2.parent
+    assert dest1.name == "game.iso"
+    assert dest2.name == "disc2.iso"
+
+
+def test_gc_dest_path_rechaza_un_id_invalido(make_game, tmp_path):
+    juego = make_game(game_id="../../x", console="gc")
+    with pytest.raises(ValueError):
+        library.gc_dest_path(juego, tmp_path)
+
+
+def test_game_dest_path_enruta_segun_consola(make_game, tmp_path):
+    wii = make_game(game_id="RMCP01", console="wii")
+    gc = make_game(name="gc.iso", game_id="GZ2E01", console="gc")
+    assert library.game_dest_path(wii, tmp_path) == library.wbfs_dest_path(wii, tmp_path)
+    assert library.game_dest_path(gc, tmp_path) == library.gc_dest_path(gc, tmp_path)
+
+
+def test_estimate_transfer_size_gc_es_el_tamano_de_origen(make_game):
+    """GameCube nunca se convierte -Nintendont lee ISO/CISO tal cual-, así
+    que no corresponde el margen de conversión a WBFS ni preguntarle a
+    `wit`: lo que se escribe es exactamente lo que pesa el archivo."""
+    juego = make_game(game_id="GZ2E01", console="gc", size=12345)
+    assert library.estimate_transfer_size(juego) == juego.size_bytes
+
+
+def test_send_to_wbfs_drive_gc_no_evalua_needs_wbfs_split(make_game, tmp_path, monkeypatch):
+    """El camino de GameCube en `send_to_wbfs_drive` corta antes de llegar
+    a la lógica de split de FAT32 (que es cosa de Wii/`wit`): ni siquiera
+    debería preguntarle a `drives.needs_wbfs_split` por el filesystem del
+    destino."""
+    def _no_deberia_llamarse(*_a, **_k):
+        raise AssertionError(
+            "needs_wbfs_split no debería evaluarse para un juego de GameCube")
+    monkeypatch.setattr(library.drives, "needs_wbfs_split", _no_deberia_llamarse)
+
+    juego = make_game(name="juego.iso", game_id="GZ2E01", title="Twilight Princess",
+                      console="gc", contenido=b"contenido de prueba gc")
+
+    destino = library.send_to_wbfs_drive(juego, tmp_path)
+
+    assert destino == library.gc_dest_path(juego, tmp_path)
+    assert destino.read_bytes() == b"contenido de prueba gc"
+
+
+def test_send_to_wbfs_drive_gc_nunca_divide_el_archivo(make_game, tmp_path, monkeypatch):
+    """Aunque el destino sea (o parezca) FAT32, un juego de GameCube tiene
+    que llegar entero: a diferencia de Wii, acá no hay conversión por
+    `wit` ni `--split-size` de por medio, es una copia de archivo tal
+    cual. `needs_wbfs_split` se fuerza a True para simular el peor caso
+    (FAT32 real) y confirmar que igual no divide nada."""
+    monkeypatch.setattr(library.drives, "needs_wbfs_split", lambda path: True)
+
+    juego = make_game(name="juego.iso", game_id="GZ2E01", title="Twilight Princess",
+                      console="gc", contenido=b"contenido de prueba gc")
+
+    destino = library.send_to_wbfs_drive(juego, tmp_path)
+
+    assert destino.read_bytes() == b"contenido de prueba gc"
+    assert not destino.with_suffix(".wbf1").exists()
+
+
 # ----------------------------------------------------------- Escaneo --
 def test_find_game_files_encuentra_por_extension(tmp_path):
     (tmp_path / "a.iso").write_bytes(b"x")
@@ -210,6 +294,24 @@ def test_identify_file_ignora_extensiones_ajenas(tmp_path):
     otro = tmp_path / "notas.txt"
     otro.write_bytes(b"x")
     assert library.identify_file(otro) is None
+
+
+def test_identify_file_detecta_gamecube_por_header(tmp_path, iso_bytes):
+    iso = tmp_path / "sin-nombre.iso"
+    iso.write_bytes(iso_bytes(game_id=b"GZ2E01", title=b"TWILIGHT PRINCESS",
+                              console="gc"))
+    juego = library.identify_file(iso)
+    assert juego is not None
+    assert juego.game_id == "GZ2E01"
+    assert juego.console == "gc"
+    assert juego.disc_number == 0
+
+
+def test_identify_file_propaga_el_numero_de_disco_de_gamecube(tmp_path, iso_bytes):
+    iso = tmp_path / "disco2.iso"
+    iso.write_bytes(iso_bytes(game_id=b"GZ2E01", console="gc", disc_number=1))
+    juego = library.identify_file(iso)
+    assert juego.disc_number == 1
 
 
 # ---------------------------------------------------------- Exportar --

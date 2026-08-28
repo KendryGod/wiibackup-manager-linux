@@ -33,7 +33,7 @@ def make_game(tmp_path):
     detectar colisiones, escanear) toca el filesystem de verdad, que es
     justamente donde estaban los bugs de pérdida de datos."""
     def _make(name="Juego.iso", game_id="RMCP01", title="Mario Kart Wii",
-              size=1024, fmt=None, contenido=None):
+              size=1024, fmt=None, contenido=None, console="wii", disc_number=0):
         path = tmp_path / name
         path.write_bytes(contenido if contenido is not None else b"\0" * size)
         return Game(
@@ -43,19 +43,28 @@ def make_game(tmp_path):
             fmt=fmt or path.suffix.lstrip(".").upper(),
             size_bytes=path.stat().st_size,
             identified_by="iso",
+            console=console,
+            disc_number=disc_number,
         )
     return _make
 
 
 @pytest.fixture
 def iso_bytes():
-    """Bytes de una ISO de Wii plana mínima pero válida: el header real
-    que parsea `disc_header.read_plain_iso_header`."""
-    def _make(game_id=b"RMCP01", title=b"MARIO KART WII", magic=True):
+    """Bytes de una ISO de Wii (o GameCube, con `console="gc"`) plana
+    mínima pero válida: el header real que parsea
+    `disc_header.read_plain_iso_header`. `disc_number` es el byte crudo
+    del offset 0x06 (0 = disco 1, 1 = disco 2, ...)."""
+    def _make(game_id=b"RMCP01", title=b"MARIO KART WII", magic=True,
+              console="wii", disc_number=0):
         buf = bytearray(0x100)
         buf[0:6] = game_id
+        buf[6] = disc_number
         if magic:
-            buf[0x18:0x1C] = (0x5D1C9EA3).to_bytes(4, "big")
+            if console == "gc":
+                buf[0x1C:0x20] = (0xC2339F3D).to_bytes(4, "big")
+            else:
+                buf[0x18:0x1C] = (0x5D1C9EA3).to_bytes(4, "big")
         buf[0x20:0x20 + len(title)] = title
         return bytes(buf)
     return _make
