@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import shutil
 import threading
-import time
 from pathlib import Path
 
 import gi
@@ -14,9 +13,9 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk, GLib  # noqa: E402
 
-from .. import config, drives, gametdb, library, oplog, wit_wrapper
-from ..operations import OperationBusy, OperationKind, OperationOutcome
+from .. import config, drives, gametdb, library
 from ..library import Game
+from ..queue_manager import JobStatus, TransferJob, TransferQueue
 from ..i18n import _
 from . import gtk_helpers
 from .game_row import build_cover_widget
@@ -56,9 +55,9 @@ class TransferGameRow(Adw.ActionRow):
         Biblioteca hacía como mucho 6."""
         game_id, region = self.game.game_id, self._cover_region
         gametdb.fetch_cover_async(
-            game_id, region,
-            lambda path: GLib.idle_add(self._apply_cover,
-                                        str(path) if path else None, game_id, region),
+            game_id, region, console=self.game.console,
+            on_done=lambda path: GLib.idle_add(self._apply_cover,
+                                                str(path) if path else None, game_id, region),
         )
 
     def _apply_cover(self, path: str | None, game_id: str | None = None,
@@ -83,6 +82,130 @@ class TransferGameRow(Adw.ActionRow):
         return False
 
 
+# Cómo se ve cada estado de la cola. En un solo lugar y no repartido en
+# `if`s por todo `JobRow.refresh`: el día que se agregue un estado, lo que
+# falta se ve de una.
+#
+# El icono va a la izquierda y la clase CSS pinta la fila entera. Ninguna
+# de las dos cosas es decorativa: son las que dejan barrer una cola de 40
+# filas y encontrar la que falló sin leer subtítulo por subtítulo (y las
+# que hacen que eso funcione también para quien no distingue el rojo del
+# verde, porque la forma del icono cambia además del color).
+_JOB_APPEARANCE = {
+    JobStatus.PENDING: ("content-loading-symbolic", "dim-label"),
+    JobStatus.RUNNING: ("folder-download-symbolic", None),
+    JobStatus.DONE: ("emblem-ok-symbolic", "success"),
+    JobStatus.SKIPPED: ("object-select-symbolic", "dim-label"),
+    JobStatus.ERROR: ("dialog-error-symbolic", "error"),
+    JobStatus.CANCELLED: ("process-stop-symbolic", "dim-label"),
+}
+
+_JOB_CSS_CLASSES = ("success", "error", "dim-label")
+
+
+class JobRow(Adw.ActionRow):
+    """Una tarea de la cola, dibujada.
+
+    Es deliberadamente tonta: no sabe copiar, no sabe cancelar y no decide
+    nada. Lee un `TransferJob` y se pinta; el botón "X" le avisa a la cola,
+    que es la única que cambia estados. Esa separación es lo que evita el
+    bug clásico de este tipo de listas -la fila que se pinta "cancelado" al
+    apretar el botón mientras `wit` sigue escribiendo por atrás.
+
+    Todo lo que muestra sale de campos que ya vienen calculados por
+    `queue_manager` (`speed_text` incluido): la fila no hace cuentas de
+    velocidad ni de tiempo restante, porque los datos para hacerlas (bytes
+    escritos, cuándo arrancó de verdad) viven en el hilo de la cola."""
+
+    def __init__(self, job: TransferJob, on_cancel):
+        super().__init__()
+        self.job = job
+        self._on_cancel = on_cancel
+
+        self.set_title(GLib.markup_escape_text(job.game.title))
+        self.set_title_lines(1)
+        self.set_subtitle_lines(2)
+
+        self._icon = Gtk.Image.new_from_icon_name("content-loading-symbolic")
+        self.add_prefix(self._icon)
+
+        # Ancho fijo: si la barra se estirara con el ancho disponible, cada
+        # fila tendría una barra de un largo distinto según lo largo que
+        # fuera el título del juego, y comparar el avance de una tarea con
+        # la de abajo se volvería imposible.
+        self.progress = Gtk.ProgressBar(valign=Gtk.Align.CENTER,
+                                         width_request=160)
+        self.add_suffix(self.progress)
+
+        self.cancel_button = Gtk.Button(icon_name="window-close-symbolic",
+                                         valign=Gtk.Align.CENTER)
+        self.cancel_button.add_css_class("flat")
+        self.cancel_button.add_css_class("destructive-action")
+        self.cancel_button.set_tooltip_text(_("Cancelar esta transferencia"))
+        self.cancel_button.connect("clicked", self._on_cancel_clicked)
+        self.add_suffix(self.cancel_button)
+
+        self.refresh()
+
+    def _on_cancel_clicked(self, *_args):
+        # Se apaga en el acto pero NO se cambia el estado de la fila: matar
+        # el `wit` en curso lleva un instante, y quien manda a repintar es
+        # la cola cuando la tarea realmente muere. Apagarlo evita el doble
+        # click, que es lo único que hay que resolver acá.
+        self.cancel_button.set_sensitive(False)
+        self._on_cancel(self.job)
+
+    def refresh(self):
+        """Vuelve a pintar la fila con el estado actual de la tarea. La
+        llama la vista desde el callback de la cola, o sea siempre en el
+        hilo de GTK."""
+        job = self.job
+        icon, css = _JOB_APPEARANCE.get(job.status, ("content-loading-symbolic", None))
+        self._icon.set_from_icon_name(icon)
+        for clase in _JOB_CSS_CLASSES:
+            self.remove_css_class(clase)
+        if css:
+            self.add_css_class(css)
+
+        self.set_subtitle(GLib.markup_escape_text(self._subtitle()))
+
+        # La barra solo tiene sentido mientras hay algo que medir. En una
+        # tarea que falló o se canceló, una barra a medio llenar es ruido:
+        # lo que hay que leer ahí es el motivo, no cuánto había avanzado.
+        en_curso = job.status in (JobStatus.PENDING, JobStatus.RUNNING)
+        self.progress.set_visible(en_curso or job.status is JobStatus.DONE)
+        self.progress.set_fraction(1.0 if job.status is JobStatus.DONE
+                                    else job.progress)
+        # `is_final` es de la cola, no de la fila: una tarea terminada no se
+        # puede cancelar, y el botón desaparece en vez de quedar gris para
+        # no dejar 40 botones muertos en pantalla.
+        self.cancel_button.set_visible(not job.is_final)
+
+    def _subtitle(self) -> str:
+        job = self.job
+        if job.status is JobStatus.ERROR:
+            # El motivo primero y completo: es el único estado donde el
+            # texto importa más que el resto de la fila.
+            return _("Error: {detail}").format(
+                detail=job.error_msg or _("falló la copia"))
+        if job.status is JobStatus.DONE:
+            return _("{status} · {size} en {elapsed}").format(
+                status=job.status.label,
+                size=library.format_size(job.output_bytes),
+                elapsed=library.format_eta(job.elapsed))
+        if job.status is JobStatus.RUNNING:
+            partes = [job.status.label, f"{int(job.progress * 100)}%"]
+            if job.speed_text:
+                partes.append(job.speed_text)
+            return " · ".join(partes)
+        if job.status is JobStatus.PENDING and job.speed_text:
+            # Acá `speed_text` no trae velocidad sino el motivo de la espera
+            # ("En espera: Convirtiendo"), que es justo lo que hay que
+            # mostrar para que la fila quieta no parezca colgada.
+            return job.speed_text
+        return job.status.label
+
+
 class TransferView(Gtk.Box):
     def __init__(self, settings, show_toast_cb, ops=None):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -99,11 +222,18 @@ class TransferView(Gtk.Box):
         self._games: list[Game] = []
         self._game_rows: list[TransferGameRow] = []
         self._dest_path: Path | None = None
-        # Token de cancelación de la transferencia en curso: además de la
-        # bandera "no sigas con el próximo juego", guarda el proceso de
-        # `wit` que está corriendo para poder matarlo al cancelar (ver
-        # `wit_wrapper.CancellationToken`).
-        self._cancel_token = wit_wrapper.CancellationToken()
+        # La cola: el motor de las transferencias. Esta vista no copia
+        # nada, solo encola y dibuja lo que la cola le va contando (ver
+        # queue_manager.py). Los dos callbacks llegan ya en el hilo de GTK.
+        self.queue = TransferQueue(self.ops,
+                                    on_job_changed=self._on_job_changed,
+                                    on_queue_idle=self._on_queue_idle)
+        # Fila por id de tarea. Es un dict y no una lista porque el callback
+        # llega con un `TransferJob` suelto y hay que encontrar su fila en
+        # tiempo constante: con una cola de 200 juegos y un aviso de
+        # progreso cada 100 ms, buscar linealmente sería recorrer la lista
+        # entera diez veces por segundo.
+        self._job_rows: dict[int, JobRow] = {}
         # Snapshot de los puntos de montaje detectados en el último refresco,
         # para que el sondeo periódico solo repueble la lista cuando algo
         # cambió de verdad (unidad nueva, expulsada, o carpeta manual que
@@ -225,12 +355,61 @@ class TransferView(Gtk.Box):
         scroller.set_margin_bottom(8)
         self.append(scroller)
 
-        # --- Progreso + acción ---
-        self.transfer_progress = Gtk.ProgressBar(visible=False, show_text=True)
-        self.transfer_progress.set_margin_start(12)
-        self.transfer_progress.set_margin_end(12)
-        self.append(self.transfer_progress)
+        # --- Cola de transferencia ---
+        #
+        # Reemplaza a la barra de progreso única que había acá. Una sola
+        # barra para N juegos obligaba a promediar tamaños distintos (un
+        # número que no describe nada de lo que está pasando) y dejaba un
+        # único "Cancelar" que mataba el lote entero. Ahora cada tarea es
+        # una fila con su barra y su "X".
+        #
+        # La sección arranca escondida y aparece con la primera tarea: una
+        # caja vacía anunciando "Cola de transferencia" le comería espacio a
+        # la lista de juegos, que es lo que el usuario mira antes de
+        # transferir nada.
+        self.queue_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4,
+                                  visible=False)
+        self.queue_box.append(Gtk.Separator(margin_top=4))
 
+        queue_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+                                margin_start=12, margin_end=12, margin_top=4)
+        self.queue_label = Gtk.Label(label=_("Cola de transferencia"), xalign=0)
+        self.queue_label.add_css_class("heading")
+        self.queue_label.set_hexpand(True)
+        queue_header.append(self.queue_label)
+
+        self.clear_done_button = Gtk.Button(label=_("Limpiar terminadas"))
+        self.clear_done_button.set_tooltip_text(
+            _("Sacar de la lista las tareas ya completadas, canceladas o con "
+              "error. No toca lo que está copiando."))
+        self.clear_done_button.connect("clicked", self._on_clear_finished)
+        queue_header.append(self.clear_done_button)
+
+        self.cancel_all_button = Gtk.Button(label=_("Cancelar todo"))
+        self.cancel_all_button.add_css_class("destructive-action")
+        self.cancel_all_button.connect("clicked", self._on_cancel_all)
+        queue_header.append(self.cancel_all_button)
+        self.queue_box.append(queue_header)
+
+        self.queue_list = Gtk.ListBox()
+        self.queue_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.queue_list.add_css_class("boxed-list")
+
+        # Alto acotado (no `vexpand`): la cola no puede crecer hasta tapar
+        # la lista de juegos, y con 40 tareas encoladas el usuario tiene que
+        # seguir pudiendo elegir más. Scrollea adentro suyo.
+        queue_scroller = Gtk.ScrolledWindow()
+        queue_scroller.set_child(self.queue_list)
+        queue_scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        queue_scroller.set_min_content_height(120)
+        queue_scroller.set_max_content_height(240)
+        queue_scroller.set_propagate_natural_height(True)
+        queue_scroller.set_margin_start(12)
+        queue_scroller.set_margin_end(12)
+        self.queue_box.append(queue_scroller)
+        self.append(self.queue_box)
+
+        # --- Acción ---
         action_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
                               margin_start=12, margin_end=12, margin_top=8, margin_bottom=12)
         self.transfer_button = Gtk.Button(label=_("Transferir seleccionados"))
@@ -238,42 +417,33 @@ class TransferView(Gtk.Box):
         self.transfer_button.connect("clicked", self._on_transfer_clicked)
         action_box.append(self.transfer_button)
 
-        self.cancel_button = Gtk.Button(label=_("Cancelar"), visible=False)
-        self.cancel_button.connect("clicked", self._on_cancel_clicked)
-        action_box.append(self.cancel_button)
-
+        # Nota: acá NO va un "Cancelar" global. Cancelar de a una es el
+        # botón de cada fila, y cancelar todo vive junto a la cola, que es
+        # lo que ese botón afecta.
         self.append(action_box)
 
         self._refresh_drives()
         self._update_operation_ui()
 
     def _update_operation_ui(self):
-        """Apaga el botón de transferir solo si ESTA transferencia no puede
-        arrancar ahora, no porque haya cualquier cosa en curso.
+        """Refresca lo que depende de qué está pasando en el sistema.
 
-        Antes miraba `busy_label()`: una verificación suelta de un juego
-        que ni siquiera está en la selección dejaba el botón gris. Ahora se
-        le pregunta al gestor por la operación concreta, con los archivos
-        elegidos, igual que hacen los botones de la Biblioteca. Una
-        conversión o una importación siguen apagándolo: comparten la barra
-        de progreso con la transferencia y no pueden convivir (ver
-        `_SHARED_PROGRESS_KINDS` en operations.py).
+        Antes esto apagaba el botón "Transferir seleccionados" cuando había
+        una operación en conflicto. Con la cola eso dejó de tener sentido, y
+        no por comodidad: **encolar nunca puede fallar**. Si hay una
+        conversión andando sobre uno de los juegos elegidos, la tarea entra
+        igual y se queda esperando su turno diciendo por qué (ver
+        `TransferQueue._acquire_operation`). Un botón gris obligaba al
+        usuario a quedarse mirando la pantalla para reintentar; la cola
+        espera sola, que es exactamente para lo que sirve una cola.
 
-        El `is_busy()` de arranque evita resolver las rutas de toda la
-        selección en el caso normal: esto se recalcula en cada casilla que
-        el usuario toca."""
-        blocker = None
-        if self.ops.is_busy():
-            blocker = self.ops.conflict_for(
-                OperationKind.TRANSFERRING,
-                read=[game.path for game in self._selected_games()],
-                resources=[self._dest_path] if self._dest_path is not None else [],
-            )
-        self.transfer_button.set_sensitive(blocker is None)
-        self.transfer_button.set_tooltip_text(
-            _("Hay una operación en curso: {op}. Esperá a que termine.")
-            .format(op=blocker.label) if blocker else None
-        )
+        Lo que sí sigue dependiendo del estado global es expulsar la unidad.
+
+        Se llama desde tres lados: al construir la vista, cada vez que el
+        `OperationManager` avisa un cambio (reenviado con `GLib.idle_add`,
+        porque ese aviso puede venir de cualquier hilo) y desde el callback
+        de la cola."""
+        self._update_eject_button()
         return False
 
     # ------------------------------------------------------------ Destino --
@@ -538,8 +708,23 @@ class TransferView(Gtk.Box):
 
     def _update_eject_button(self):
         if self._dest_path is not None and drives.is_mount_point(self._dest_path):
-            self.eject_button.set_sensitive(True)
+            # Una unidad con trabajo encolado no se expulsa, aunque en este
+            # instante no se esté escribiendo un solo byte.
+            #
+            # El `OperationManager` solo conoce la tarea que está copiando
+            # AHORA: entre una tarea y la siguiente hay un pestañeo en el
+            # que no hay ninguna operación declarada, y ese hueco alcanza
+            # para que un click desmonte el pendrive justo antes de que la
+            # próxima tarea empiece a escribirle. `is_writing_to` mira la
+            # cola entera -lo que está copiando y lo que espera- y tapa el
+            # hueco. El gestor sigue siendo la otra mitad de la guarda: es
+            # el que cubre lo que escribe la Biblioteca, que la cola no ve.
+            ocupada = (self.queue.is_writing_to(self._dest_path)
+                       or self.ops.is_resource_busy(self._dest_path) is not None)
+            self.eject_button.set_sensitive(not ocupada)
             self.eject_button.set_tooltip_text(
+                _("No se puede expulsar mientras haya transferencias en curso "
+                  "o en cola hacia esta unidad.") if ocupada else
                 _("Desmontar de forma segura la unidad seleccionada antes de "
                   "desconectarla.")
             )
@@ -559,6 +744,16 @@ class TransferView(Gtk.Box):
         # archivo cortado por la mitad y puede romper el filesystem del
         # pendrive. El gestor sabe qué unidades están ocupadas porque cada
         # transferencia declara su destino como recurso.
+        # Revalidar al apretar, no solo al pintar el botón: entre que el
+        # botón quedó habilitado y el click puede haber arrancado una tarea
+        # de la cola.
+        if self.queue.is_writing_to(dest_path):
+            self._show_toast(
+                _("No se puede expulsar ahora: la cola todavía tiene "
+                  "transferencias hacia esa unidad. Cancelalas o esperá a que "
+                  "terminen.")
+            )
+            return
         ocupada = self.ops.is_resource_busy(dest_path)
         if ocupada is not None:
             self._show_toast(
@@ -649,19 +844,19 @@ class TransferView(Gtk.Box):
             self._show_toast(_("No hay juegos seleccionados."))
             return
 
-        # El chequeo de espacio NO se hace acá: calcular cuánto va a ocupar
-        # cada juego implica preguntarle a `wit` por cada uno, y con un
-        # lote grande (o un archivo dañado) eso congelaría la ventana. Lo
-        # hace el worker antes de copiar nada, mostrando "Calculando…".
         dest_root = self._dest_path
 
-        # Con un solo juego (flujo individual) se pregunta antes de pisar
-        # un destino que ya existe, igual que al convertir. En lote no
-        # tiene sentido preguntar por cada uno: el worker los omite y los
-        # informa aparte en el resumen final.
+        # Con un solo juego se pregunta antes de pisar un destino que ya
+        # existe, igual que al convertir. En lote no: la cola marca esos
+        # como "Ya estaba en el destino" y sigue, que es mejor que frenar
+        # 40 juegos con un diálogo por cada uno.
+        #
+        # `dest.exists()` es una lectura de metadatos sobre una ruta que el
+        # usuario acaba de elegir: es lo bastante barata como para hacerla
+        # en el hilo de GTK sin que se note.
         if len(selected) == 1:
             try:
-                dest = library.wbfs_dest_path(selected[0], dest_root)
+                dest = library.game_dest_path(selected[0], dest_root)
             except ValueError:
                 dest = None
             if dest is not None and dest.exists():
@@ -671,251 +866,183 @@ class TransferView(Gtk.Box):
                       "Enviar '{title}' lo va a reemplazar. "
                       "Esta acción no se puede deshacer.")
                     .format(dest=dest, title=selected[0].title),
-                    lambda: self._start_transfer(selected, dest_root, overwrite=True),
+                    lambda: self._enqueue(selected, dest_root, overwrite=True),
                 )
                 return
 
-        self._start_transfer(selected, dest_root)
+        self._enqueue(selected, dest_root)
 
-    def _start_transfer(self, selected: list[Game], dest_root: Path, overwrite: bool = False):
-        # Se declara el destino, no solo el origen: los archivos que se van
-        # a escribir y la unidad entera como recurso ocupado. Eso es lo que
-        # hace que "Expulsar unidad" se niegue mientras dure la copia, en
-        # vez de desmontar el pendrive abajo de `wit`.
-        try:
-            op = self.ops.start(
-                OperationKind.TRANSFERRING,
-                read=[g.path for g in selected],
-                write=library.wbfs_dest_paths(selected, dest_root),
-                resources=[dest_root],
-            )
-        except OperationBusy as e:
-            self._show_toast(_("No se puede ahora: {detail}.").format(detail=e.detail))
+    def _enqueue(self, selected: list[Game], dest_root: Path, overwrite: bool = False):
+        """Manda los juegos elegidos a la cola. Vuelve enseguida.
+
+        Lo único que pasa en el hilo de GTK es descartar duplicados y
+        mostrar el aviso; medir los tamaños (que le pregunta a `wit` por
+        cada juego) va a un hilo de fondo, y encolar lo hace ese mismo hilo
+        al terminar. Es la diferencia entre poder seguir usando la ventana
+        mientras se planifica un lote de 200 juegos y no poder."""
+        nuevos = self._descartar_encolados(selected, dest_root)
+        if not nuevos:
+            self._show_toast(
+                _("Esos juegos ya están en la cola o ya se copiaron a este "
+                  "destino. Usá 'Limpiar terminadas' para volver a enviarlos."))
             return
+        if len(nuevos) < len(selected):
+            self._show_toast(
+                _("{n} juego(s) ya estaban en la cola o ya se copiaron: se "
+                  "encolaron solo los que faltaban.")
+                .format(n=len(selected) - len(nuevos)))
 
         wit_binary = self.settings.wit_binary
-        # Token nuevo por transferencia: no arrastra el estado de una
-        # cancelación anterior.
-        cancel = wit_wrapper.CancellationToken()
-        self._cancel_token = cancel
-        self.transfer_button.set_sensitive(False)
-        self.cancel_button.set_visible(True)
-        self.cancel_button.set_sensitive(True)
-        self.transfer_progress.set_fraction(0)
-        self.transfer_progress.set_text(
-            _("0/{total} transferidos").format(total=len(selected)))
-        self.transfer_progress.set_visible(True)
-
-        total = len(selected)
-        # El total en bytes lo calcula el worker (`plan_transfer`): es el
-        # tamaño de SALIDA, no el de los archivos de origen.
-        # Igual que en la Biblioteca: el título si es uno solo, el recuento
-        # si es un lote. Se calcula acá (no en el worker) porque `selected`
-        # es la lista con la que arrancó la transferencia.
-        target = (selected[0].title if len(selected) == 1
-                  else f"{len(selected)} juegos")
 
         def worker():
-            # Paso previo, ya fuera del hilo de GTK: cuánto va a ocupar
-            # cada juego en el destino y si entra todo.
-            GLib.idle_add(self._show_planning)
-            plan = library.plan_transfer(selected, wit_binary)
-            total_bytes_salida = sum(item.output_bytes for item in plan)
-            libres_ahora = library.free_space(dest_root)
-            if libres_ahora is not None and total_bytes_salida > libres_ahora:
-                GLib.idle_add(
-                    self._on_transfer_done, 0, len(plan), False, 0, op, target,
-                    [f"No entra en el destino: se necesitan "
-                     f"{library.format_size(total_bytes_salida)} y hay "
-                     f"{library.format_size(libres_ahora)} libres (faltan "
-                     f"{library.format_size(total_bytes_salida - libres_ahora)}). "
-                     "Liberá espacio o elegí menos juegos."])
-                return
+            # `plan_transfer_fast` y no `plan_transfer`: mide todos los
+            # juegos en paralelo (ver library.py). Lo que se gana acá es que
+            # las filas de la cola aparezcan casi en el acto en vez de
+            # después de N invocaciones de `wit` encadenadas.
+            #
+            # Si la medición fallara entera, `add_jobs` acepta `Game`
+            # pelados y la cola mide cada uno justo antes de copiarlo: se
+            # pierde la barra de progreso fina de esa tarea, no la
+            # transferencia.
+            try:
+                items = library.plan_transfer_fast(nuevos, wit_binary)
+            except Exception:
+                items = nuevos
+            # `add_jobs` es thread-safe y las filas las crea el callback
+            # (que sí llega por `GLib.idle_add`), así que se puede llamar
+            # derecho desde acá.
+            self.queue.add_jobs(items, dest_root, wit_binary=wit_binary,
+                                overwrite=overwrite)
 
-            ok_count = 0
-            err_count = 0
-            skipped_count = 0
-            # Motivos concretos, no solo la cuenta: "1 con error" no le
-            # dice a nadie qué pasó ni con cuál juego.
-            error_msgs: list[str] = []
-            # Tres contadores en vez de uno: antes se sumaba el tamaño del
-            # juego al progreso pasara lo que pasara, así que un juego que
-            # fallaba o que ya estaba en el destino contaba como copiado y
-            # la velocidad (y con ella el tiempo restante) salía inflada.
-            # `bytes_written` es lo único que se escribió de verdad y es lo
-            # que se usa para medir velocidad; la barra avanza con todo lo
-            # ya resuelto, que es lo que el usuario entiende por "cuánto
-            # falta del lote".
-            bytes_written = 0
-            bytes_failed = 0
-            bytes_skipped = 0
-            start_time = time.monotonic()
-            cancelled = False
-            for i, item in enumerate(plan, start=1):
-                game = item.game
-                if cancel.cancelled:
-                    cancelled = True
-                    break
-                base_bytes_done = bytes_written + bytes_failed + bytes_skipped
+        threading.Thread(target=worker, daemon=True,
+                         name="transfer-plan").start()
 
-                def on_game_progress(current: int, _base=base_bytes_done, _item=item,
-                                      _written=bytes_written):
-                    # Tope al 97% del tamaño esperado de ESTE juego: es una
-                    # estimación por tamaño de archivo, y wit puede seguir
-                    # cerrando/renombrando un instante más después de
-                    # escribir el último byte. Sin este margen la barra
-                    # llegaría al 100% y se quedaría ahí "clavada" un rato
-                    # antes de que el juego realmente termine.
-                    est = min(current, int(_item.output_bytes * 0.97))
-                    GLib.idle_add(self._update_progress, i, total, _item.game.title,
-                                  _base + est, _written + est, total_bytes_salida,
-                                  start_time)
+    # Estados que NO bloquean volver a encolar el mismo juego: el que falló
+    # y el que se canceló son justamente los que uno quiere reintentar sin
+    # tener que limpiar la cola primero.
+    _REINTENTABLES = (JobStatus.ERROR, JobStatus.CANCELLED)
 
-                GLib.idle_add(self._update_progress, i, total, game.title,
-                              bytes_written + bytes_failed + bytes_skipped,
-                              bytes_written, total_bytes_salida, start_time)
-                # El espacio libre cambia a medida que se copia: revisar
-                # antes de CADA juego evita quedarse sin lugar a mitad de
-                # la escritura y dejar un archivo cortado en la unidad.
-                necesario = item.output_bytes
-                libres = library.free_space(dest_root)
-                if libres is not None and necesario > libres:
-                    err_count += 1
-                    bytes_failed += item.output_bytes
-                    error_msgs.append(
-                        f"{game.title}: no entra en el destino "
-                        f"(necesita {library.format_size(necesario)}, "
-                        f"quedan {library.format_size(libres)})"
-                    )
-                    continue
+    def _descartar_encolados(self, selected: list[Game], dest_root: Path) -> list[Game]:
+        """Saca los juegos que esta cola ya resolvió (o está por resolver)
+        hacia el mismo destino.
 
-                try:
-                    library.send_to_wbfs_drive(game, dest_root, wit_binary,
-                                                bytes_progress_cb=on_game_progress,
-                                                overwrite=overwrite, cancel=cancel)
-                    ok_count += 1
-                    bytes_written += item.output_bytes
-                except wit_wrapper.OperationCancelled:
-                    # Cancelado a mitad de ESTE juego: no es un error, y no
-                    # se sigue con los que faltaban.
-                    cancelled = True
-                    break
-                except library.DestinationExistsError:
-                    # El juego ya está en la unidad: ni éxito ni error, se
-                    # cuenta aparte y se informa en el resumen final.
-                    skipped_count += 1
-                    bytes_skipped += item.output_bytes
-                except Exception as e:
-                    if cancel.cancelled:
-                        # El fallo es consecuencia de haber matado a `wit`
-                        # al cancelar, no un error real de la copia.
-                        cancelled = True
-                        break
-                    # Un juego que falla no frena el resto: se cuenta como
-                    # error y se sigue con el siguiente de la selección.
-                    err_count += 1
-                    bytes_failed += item.output_bytes
-                    error_msgs.append(f"{game.title}: {e}")
-            GLib.idle_add(self._on_transfer_done, ok_count, err_count, cancelled,
-                          skipped_count, op, target, error_msgs)
+        Sin esto, tocar "Transferir seleccionados" dos veces -o volver a la
+        pestaña y tocarlo de nuevo sin destildar nada- encola el lote entero
+        otra vez y la cola lo copia dos veces, obedientemente. Antes lo
+        tapaba el botón apagado mientras duraba la transferencia; ahora el
+        botón no se apaga nunca, así que la regla tiene que estar escrita
+        acá.
 
-        threading.Thread(target=worker, daemon=True).start()
+        La regla no es "está en la cola" sino "ya se ocupó de esto", y la
+        diferencia importa: en un lote largo, para cuando el usuario toca el
+        botón de nuevo hay juegos que YA terminaron, y con la regla ingenua
+        volverían a encolarse los 20 primeros. Lo que sí se deja reintentar
+        es lo que salió mal (error o cancelado), que es el caso donde volver
+        a tocar el botón es exactamente lo que uno quiere que pase.
 
-    def _on_cancel_clicked(self, *_args):
-        # Mata el `wit` (o corta la copia) que esté corriendo ahora mismo,
-        # no solo evita que arranque el próximo juego.
-        self._cancel_token.cancel()
-        self.cancel_button.set_sensitive(False)
-        self._show_toast(_("Cancelando la transferencia…"))
+        Para forzar una recopia de algo ya completado está "Limpiar
+        terminadas": vacía esta memoria y el juego vuelve a ser encolable."""
+        resueltos = {(job.game.path, job.dest_root)
+                     for job in self.queue.jobs
+                     if job.status not in self._REINTENTABLES}
+        return [g for g in selected if (g.path, dest_root) not in resueltos]
 
-    def _show_planning(self):
-        """Mientras el worker calcula cuánto ocupa cada juego, la ventana
-        tiene que seguir viva y decir qué está haciendo."""
-        self.transfer_progress.set_visible(True)
-        self.transfer_progress.set_fraction(0)
-        self.transfer_progress.set_text(_("Calculando espacio necesario…"))
-        return False
+    # ------------------------------------------------------ Avisos de la cola --
+    def _on_job_changed(self, job: TransferJob):
+        """Único punto por el que la cola toca la interfaz. Llega siempre en
+        el hilo de GTK: lo garantiza `queue_manager` envolviendo cada aviso
+        en `GLib.idle_add`.
 
-    def _update_progress(self, done: int, total: int, title: str,
-                          bytes_done: int, bytes_written: int,
-                          total_bytes: int, start_time: float):
-        # Fracción por bytes reales (no por "juegos completados"): con un
-        # solo juego grande, `done` no cambia hasta que termina, así que
-        # basarse solo en eso deja la barra clavada en 0% durante toda la
-        # copia/conversión. Con total_bytes en 0 (no debería pasar, pero
-        # por las dudas) cae al cálculo viejo por cantidad de juegos.
-        if total_bytes > 0:
-            fraction = min(bytes_done / total_bytes, 0.99)
+        Crea la fila la primera vez que ve una tarea y la refresca después.
+        Que sea el mismo camino para las dos cosas evita el desfase clásico:
+        una fila creada al encolar y actualizada por otro lado que se pierde
+        el primer cambio de estado si llegó antes de que la fila existiera."""
+        if not gtk_helpers.widget_is_alive(self):
+            return
+        row = self._job_rows.get(job.id)
+        if row is None:
+            row = JobRow(job, self._on_job_cancel_requested)
+            self._job_rows[job.id] = row
+            self.queue_list.append(row)
         else:
-            fraction = (done - 1) / max(total, 1)
-        self.transfer_progress.set_fraction(fraction)
-        elapsed = time.monotonic() - start_time
-        # La velocidad sale SOLO de lo que se escribió de verdad: contar
-        # los bytes de un juego que falló, o de uno que ya estaba en el
-        # destino y se saltó en un instante, daba una velocidad inventada
-        # y un tiempo restante demasiado optimista.
-        if bytes_written > 0 and elapsed > 1:
-            speed = bytes_written / elapsed
-            remaining = max(total_bytes - bytes_done, 0)
-            eta_text = (_(" · ~{eta} restantes")
-                        .format(eta=library.format_eta(remaining / speed))
-                        if speed > 0 else "")
-        elif total > 1:
-            eta_text = _(" · calculando tiempo restante…")
-        else:
-            eta_text = ""
-        self.transfer_progress.set_text(
-            _("{done}/{total} · {title}{eta}").format(
-                done=done, total=total, title=title, eta=eta_text))
-        return False
+            row.refresh()
 
-    def _on_transfer_done(self, ok_count: int, err_count: int, cancelled: bool = False,
-                           skipped_count: int = 0, op=None, target: str = "",
-                           error_msgs: list | None = None):
-        # El resultado que se le pasa a `finish` es lo que queda anotado en
-        # la pestaña Log. Cancelado gana sobre el resto (lo pidió el
-        # usuario); un lote con parte copiada y parte fallada queda como
-        # "parcial", que no es lo mismo que no haber copiado nada.
-        error_msgs = error_msgs or []
-        detail_parts = [f"{ok_count} ok"]
-        if skipped_count:
-            detail_parts.append(
-                _("{n} ya estaban en el destino").format(n=skipped_count))
-        if err_count:
-            detalle = "; ".join(error_msgs[:3])
-            mas = f" (+{len(error_msgs) - 3} más)" if len(error_msgs) > 3 else ""
-            detail_parts.append(
-                _("{n} con error: {detail}{more}").format(
-                    n=err_count, detail=detalle, more=mas)
-                if detalle else _("{n} con error").format(n=err_count))
-        if cancelled:
-            status = oplog.STATUS_CANCELLED
-        elif not err_count:
-            status = oplog.STATUS_OK
-        elif ok_count:
-            status = oplog.STATUS_PARTIAL
-        else:
-            status = oplog.STATUS_ERROR
-        self.ops.finish(op, OperationOutcome(status=status, target=target,
-                                              detail=" · ".join(detail_parts)))
-        self.transfer_button.set_sensitive(True)
-        self.cancel_button.set_visible(False)
-        self.transfer_progress.set_visible(False)
+        self._update_queue_header()
+        # Una tarea que termina cambia el espacio libre del destino y puede
+        # liberar la unidad para expulsarla.
+        if job.is_final:
+            self._update_dest_space_label()
+        self._update_eject_button()
+
+    def _on_job_cancel_requested(self, job: TransferJob):
+        if not self.queue.cancel_job(job.id):
+            # Terminó entre que se dibujó el botón y el click. No es un
+            # error: la fila ya muestra el estado final.
+            return
+        self._show_toast(_("Cancelando '{title}'…").format(title=job.game.title))
+
+    def _on_queue_idle(self, summary):
+        """La cola se quedó sin trabajo: un solo resumen de la tanda.
+
+        Un toast por juego terminado sería insoportable con 40 juegos, y no
+        hace falta: el avance de cada uno ya se ve en su fila."""
+        if not gtk_helpers.widget_is_alive(self):
+            return
         self._update_dest_space_label()
-        skipped_text = (_(", {n} ya estaban en el destino").format(n=skipped_count)
-                        if skipped_count else "")
-        if cancelled:
-            msg = _("Transferencia cancelada: {ok} ok, {err} con error"
-                    "{skipped} antes de cancelar.").format(
-                        ok=ok_count, err=err_count, skipped=skipped_text)
-        elif err_count or skipped_count:
-            motivo = f" ({'; '.join(error_msgs[:2])})" if error_msgs else ""
-            msg = _("Transferencia terminada: {ok} ok, {err} con error"
-                    "{skipped}.{reason}").format(
-                        ok=ok_count, err=err_count, skipped=skipped_text,
-                        reason=motivo)
-        else:
-            msg = _("Transferencia terminada: {ok} juego(s) copiados ✓").format(
-                ok=ok_count)
-        self._show_toast(msg)
-        return False
+        self._update_eject_button()
+        self._update_queue_header()
+
+        partes = [_("{n} copiados").format(n=summary.done)]
+        if summary.skipped:
+            partes.append(_("{n} ya estaban en el destino").format(n=summary.skipped))
+        if summary.errors:
+            partes.append(_("{n} con error").format(n=summary.errors))
+        if summary.cancelled:
+            partes.append(_("{n} cancelados").format(n=summary.cancelled))
+        # El detalle de CADA error queda en su fila (y en el historial): acá
+        # va la cuenta, y "revisá la cola" para saber dónde mirar.
+        cola = _(" · revisá la cola para ver el detalle") if summary.errors else ""
+        self._show_toast(_("Cola terminada: {detail}.{tail}").format(
+            detail=", ".join(partes), tail=cola))
+
+    def _update_queue_header(self):
+        """Muestra u oculta la sección de la cola y actualiza su encabezado.
+
+        El recuento va en el título ("Cola de transferencia — 3 en curso, 12
+        terminadas") en vez de en una etiqueta aparte para no sumar otra
+        línea de texto a una pantalla que ya tiene bastante."""
+        jobs = self.queue.jobs
+        self.queue_box.set_visible(bool(jobs))
+        if not jobs:
+            return
+        pendientes = sum(1 for j in jobs if not j.is_final)
+        terminadas = len(jobs) - pendientes
+        partes = []
+        if pendientes:
+            partes.append(_("{n} en cola").format(n=pendientes))
+        if terminadas:
+            partes.append(_("{n} terminadas").format(n=terminadas))
+        self.queue_label.set_label(
+            _("Cola de transferencia — {detail}").format(detail=", ".join(partes))
+            if partes else _("Cola de transferencia"))
+        self.cancel_all_button.set_sensitive(bool(pendientes))
+        self.clear_done_button.set_sensitive(bool(terminadas))
+
+    def _on_clear_finished(self, *_args):
+        for job in self.queue.clear_finished():
+            row = self._job_rows.pop(job.id, None)
+            if row is not None:
+                self.queue_list.remove(row)
+        self._update_queue_header()
+
+    def _on_cancel_all(self, *_args):
+        frenadas = self.queue.cancel_all()
+        if frenadas:
+            self._show_toast(_("Cancelando {n} transferencia(s)…").format(n=frenadas))
+
+    def shutdown(self):
+        """Corta la cola al cerrar la ventana: cancela lo que esté copiando
+        y mata el `wit` en curso. El hilo de la cola es daemon, así que sin
+        esto el proceso igual terminaría, pero dejando un `wit` a medio
+        escribir sobre una unidad que el usuario está por desenchufar."""
+        self.queue.shutdown()

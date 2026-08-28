@@ -1,6 +1,7 @@
 """Escaneo de la biblioteca y modelo de datos de un juego."""
 from __future__ import annotations
 
+import concurrent.futures
 import csv
 import io
 import os
@@ -17,6 +18,7 @@ from .disc_header import (
     UNKNOWN_GAME_ID,
     DiscInfo,
     is_valid_game_id,
+    read_ciso_disc_number,
     read_plain_iso_header,
     validate_game_id,
 )
@@ -65,6 +67,8 @@ class Game:
     fmt: str  # "ISO" | "WBFS" | "CISO" | "WDF" | "?"
     size_bytes: int
     identified_by: str  # "iso" | "wit" | "unknown"
+    console: str = "wii"  # "wii" | "gc"
+    disc_number: int = 0  # 0 = disco 1, 1 = disco 2, ... (ver disc_header)
 
     @property
     def size_mb(self) -> float:
@@ -83,10 +87,11 @@ def _format_from_suffix(path: Path) -> str:
 
 
 def identify_file(path: Path, wit_binary: str = "wit") -> Optional[Game]:
-    """Identifica un único archivo de juego, probando primero el parseo
-    directo (rápido, sin dependencias) y usando `wit` como respaldo para
-    formatos envueltos (WBFS, CISO, WDF)."""
-    if path.suffix.lower() not in VALID_EXTENSIONS:
+    """Identifica un único archivo de juego (Wii o GameCube), probando
+    primero el parseo directo (rápido, sin dependencias) y usando `wit`
+    como respaldo para formatos envueltos (WBFS, CISO, WDF)."""
+    suffix = path.suffix.lower()
+    if suffix not in VALID_EXTENSIONS:
         return None
     try:
         size = path.stat().st_size
@@ -97,7 +102,7 @@ def identify_file(path: Path, wit_binary: str = "wit") -> Optional[Game]:
 
     info: Optional[DiscInfo] = None
 
-    if path.suffix.lower() == ".iso":
+    if suffix == ".iso":
         info = read_plain_iso_header(path)
 
     if info is None and wit_wrapper.is_available(wit_binary):
@@ -105,6 +110,14 @@ def identify_file(path: Path, wit_binary: str = "wit") -> Optional[Game]:
             info = wit_wrapper.identify(path, wit_binary)
         except wit_wrapper.WitNotFoundError:
             info = None
+
+    # El número de disco de una ISO plana ya viene en `info` (se leyó junto
+    # con el resto del header). Para CISO, `wit` no lo expone en ningún
+    # comando parseable: se lee directo del archivo con el mismo criterio
+    # de "0 si no se puede confiar" que usa `read_plain_iso_header`.
+    disc_number = info.disc_number if info is not None else 0
+    if suffix == ".ciso":
+        disc_number = read_ciso_disc_number(path)
 
     # Punto único donde nace el game_id de un `Game`: si lo que devolvió el
     # header (o `wit`) no es un ID6 válido, el archivo se trata como no
@@ -118,6 +131,8 @@ def identify_file(path: Path, wit_binary: str = "wit") -> Optional[Game]:
             fmt=_format_from_suffix(path),
             size_bytes=size,
             identified_by="unknown",
+            console=info.console if info is not None else "wii",
+            disc_number=disc_number,
         )
 
     return Game(
@@ -127,6 +142,8 @@ def identify_file(path: Path, wit_binary: str = "wit") -> Optional[Game]:
         fmt=_format_from_suffix(path),
         size_bytes=size,
         identified_by=info.source,
+        console=info.console,
+        disc_number=disc_number,
     )
 
 
@@ -481,6 +498,43 @@ def wbfs_dest_path(game: Game, drive_root: Path) -> Path:
     return Path(drive_root) / "wbfs" / game_id / f"{game_id}.wbfs"
 
 
+def gc_dest_path(game: Game, drive_root: Path) -> Path:
+    """Ruta final que va a ocupar `game` dentro de `drive_root`, en la
+    estructura que espera Nintendont para juegos de GameCube:
+
+        games/Título del juego [ID6]/game.ext
+
+    A diferencia de un WBFS de Wii, acá Nintendont identifica el juego por
+    la CARPETA, no por el nombre del archivo, y la extensión se conserva
+    tal cual (.iso o .ciso): Nintendont lee esos dos formatos directo, sin
+    pasar por `wit` (ver `send_to_wbfs_drive`).
+
+    Soporte multidisco: si `game.disc_number` dice que es el segundo disco
+    (o el tercero, ...) el archivo se llama 'discN.ext' en vez de
+    'game.ext', DENTRO DE LA MISMA CARPETA que el disco 1 -misma carpeta
+    porque Nintendont los busca ahí, no en carpetas separadas-, siempre que
+    los dos discos se hayan importado con el mismo título (si el título
+    difiere -typo, otra fuente- van a parar a carpetas distintas y
+    Nintendont no los va a poder ver como un solo juego; eso lo tiene que
+    resolver quien importa, no esta función)."""
+    game_id = validate_game_id(game.game_id)
+    folder = sanitize_filename(f"{game.title} [{game_id}]")
+    ext = game.path.suffix.lower()
+    filename = f"disc{game.disc_number + 1}{ext}" if game.disc_number else f"game{ext}"
+    return Path(drive_root) / "games" / folder / filename
+
+
+def game_dest_path(game: Game, drive_root: Path) -> Path:
+    """Ruta final de `game` dentro de `drive_root`, delegando en la
+    estructura que corresponda según la consola: `wbfs_dest_path` para Wii,
+    `gc_dest_path` para GameCube. Es el único punto que hace falta tocar
+    para saber "dónde va a parar esto", tanto para copiar de verdad como
+    para chequear de antemano si el destino ya existe."""
+    if game.console == "gc":
+        return gc_dest_path(game, drive_root)
+    return wbfs_dest_path(game, drive_root)
+
+
 # Un disco de Wii de una capa son 4.7 GB; los de doble capa, 8.5 GB. Se
 # usan como cota superior cuando no hay forma de saber el tamaño real.
 _WII_SINGLE_LAYER_BYTES = 4_699_979_776
@@ -514,7 +568,16 @@ def estimate_transfer_size(game: Game, wit_binary: str = "wit") -> int:
     se puede, se cae a la cota que corresponda: para ISO/WBFS el propio
     tamaño del archivo sigue siendo una cota superior razonable; para los
     formatos compactos, el tamaño de un disco de una capa, que es lo
-    mínimo honesto que se puede afirmar sin abrir el archivo."""
+    mínimo honesto que se puede afirmar sin abrir el archivo.
+
+    Un juego de GameCube nunca se convierte -Nintendont lee ISO y CISO tal
+    cual, ver `send_to_wbfs_drive`- así que lo que va a ocupar en el
+    destino es exactamente lo que pesa el archivo de origen, ni más ni
+    menos: no hace falta (ni corresponde) preguntarle a `wit` ni aplicar
+    el margen de `_WBFS_OVERHEAD`, que es un ajuste de la conversión a
+    WBFS."""
+    if game.console == "gc":
+        return game.size_bytes
     real = wit_wrapper.iso_size_bytes(game.path, wit_binary)
     if real:
         return int(real * _WBFS_OVERHEAD)
@@ -548,11 +611,88 @@ def plan_transfer(games, wit_binary: str = "wit") -> list:
     OJO: esto puede tardar. Le pregunta a `wit` por cada juego (barato,
     milisegundos) pero con un archivo dañado o una unidad lenta puede
     demorar, así que va SIEMPRE en un hilo de fondo: llamarlo desde el
-    hilo de GTK congela la ventana entera."""
+    hilo de GTK congela la ventana entera.
+
+    Para un lote grande conviene `plan_transfer_fast`, que hace exactamente
+    lo mismo pero preguntándole a varios `wit` a la vez. Esta versión
+    secuencial se mantiene porque para uno o dos juegos no hay nada que
+    ganar armando un pool de hilos."""
     return [
         TransferItem(game=game, source_bytes=game.size_bytes,
                      output_bytes=estimate_transfer_size(game, wit_binary))
         for game in games
+    ]
+
+
+# Cuántos `wit` se lanzan a la vez para medir tamaños. Cada uno lee el
+# header del archivo y sale (milisegundos de CPU, casi todo espera de I/O),
+# así que el cuello de botella real es el disco, no el procesador: cuatro
+# alcanzan para tapar la latencia de un USB lento sin llenar la unidad de
+# lecturas que compiten entre sí. Es medir, no copiar; la copia sigue
+# siendo estrictamente de a uno (ver queue_manager.TransferQueue).
+DEFAULT_PLAN_WORKERS = 4
+
+
+def plan_transfer_fast(games, wit_binary: str = "wit",
+                       max_workers: int = DEFAULT_PLAN_WORKERS) -> list:
+    """Igual que `plan_transfer` pero midiendo los juegos en paralelo.
+
+    Planificar un lote de 200 juegos son 200 invocaciones de `wit` una
+    detrás de otra: cada una es barata, pero encadenadas se sienten, y
+    mientras tanto la interfaz solo puede decir "calculando…". Acá las
+    consultas van a un `ThreadPoolExecutor` chico, que es exactamente el
+    caso para el que sirve un pool de hilos en Python: el trabajo pesado
+    lo hace un subproceso y el hilo se pasa la vida esperando I/O, así que
+    el GIL no lo estorba.
+
+    Dos garantías que importan más que la velocidad:
+
+    - **El orden se respeta.** La lista devuelta sigue el orden de
+      `games`, no el orden en que fueron terminando los hilos. Ese orden
+      es el que después ve el usuario en la cola de transferencia, y que
+      cambiara según qué archivo respondiera primero sería desconcertante.
+    - **Un `wit` que falla no voltea la planificación.** Si la consulta de
+      un juego revienta (archivo dañado, unidad que se desconectó, `wit`
+      que no está), ese juego cae a `game.size_bytes` como respaldo y el
+      resto del lote sigue su curso. Es la misma cota que usa el camino
+      secuencial cuando `wit` no contesta.
+
+    Sigue siendo una función bloqueante: se la llama desde un hilo de
+    fondo, nunca desde el hilo de GTK."""
+    games = list(games)
+    if not games:
+        return []
+
+    # Ni más hilos que juegos (un pool de 4 para 1 juego es solo overhead)
+    # ni menos de uno (`max_workers=0` es un ValueError de la stdlib, y
+    # llegar a cero por un cálculo de otra capa no debería romper el plan).
+    workers = max(1, min(int(max_workers), len(games)))
+
+    # Se indexa por posición y no se usa `executor.map`: map propaga la
+    # primera excepción y aborta el resto, y acá justamente queremos que un
+    # juego problemático no arrastre a los demás.
+    sizes: list[Optional[int]] = [None] * len(games)
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="plan-transfer") as pool:
+        futures = {
+            pool.submit(estimate_transfer_size, game, wit_binary): index
+            for index, game in enumerate(games)
+        }
+        for future in concurrent.futures.as_completed(futures):
+            index = futures[future]
+            try:
+                sizes[index] = future.result()
+            except Exception:
+                # A propósito sin distinguir el tipo: cualquier cosa que
+                # salga mal midiendo un juego se resuelve igual, con el
+                # respaldo de abajo. El error real, si lo hay, va a volver
+                # a aparecer -y con contexto- cuando se intente copiarlo.
+                sizes[index] = None
+
+    return [
+        TransferItem(game=game, source_bytes=game.size_bytes,
+                     output_bytes=sizes[index] or game.size_bytes)
+        for index, game in enumerate(games)
     ]
 
 
@@ -741,16 +881,18 @@ class DestinationGuard:
 
 
 def wbfs_dest_paths(games, drive_root: Path) -> list:
-    """Las rutas que van a ocupar `games` dentro de `drive_root`.
+    """Las rutas que van a ocupar `games` dentro de `drive_root`, sea cual
+    sea su consola (ver `game_dest_path`): a pesar del nombre -que se
+    mantiene por compatibilidad con quien ya la llama- no es solo para Wii.
 
     Se saltean los juegos cuyo Game ID no sea válido: para esos no hay
-    ruta que calcular (los rechaza `wbfs_dest_path`) y la transferencia
+    ruta que calcular (los rechaza `game_dest_path`) y la transferencia
     los va a reportar como error igual. Se usa para declararle al
     OperationManager qué archivos va a escribir la transferencia."""
     destinos = []
     for game in games:
         try:
-            destinos.append(wbfs_dest_path(game, drive_root))
+            destinos.append(game_dest_path(game, drive_root))
         except ValueError:
             continue
     return destinos
@@ -770,6 +912,12 @@ def send_to_wbfs_drive(
     tal cual; para cualquier otro formato (ISO/CISO/WDF), o si el destino
     puede necesitar dividir el archivo, se delega en `wit`, que es quien
     sabe empaquetar (y, si hace falta, partir) el WBFS correctamente.
+
+    Si `game.console == "gc"` el destino es el que arma `gc_dest_path`
+    (estructura de Nintendont) y SIEMPRE se copia directo con
+    `_copy_with_progress`: Nintendont lee ISO y CISO de GameCube tal cual,
+    así que no hay nada que convertir ni ninguna razón para pasar por
+    `wit` (que además no sabe empaquetar GameCube en WBFS).
 
     FAT32 tiene un límite duro de ~4GiB por archivo, y hay discos Wii
     dual-layer que lo superan: si el filesystem del destino no se puede
@@ -794,13 +942,18 @@ def send_to_wbfs_drive(
     if cancel is not None and cancel.cancelled:
         raise wit_wrapper.OperationCancelled("Transferencia cancelada por el usuario.")
 
-    dest = wbfs_dest_path(game, drive_root)
+    dest = game_dest_path(game, drive_root)
     dest_dir = dest.parent
 
     if not overwrite and dest.exists():
         raise DestinationExistsError(dest)
 
     dest_dir.mkdir(parents=True, exist_ok=True)
+
+    if game.console == "gc":
+        _copy_with_progress(game.path, dest,
+                            bytes_progress_cb or (lambda _n: None), cancel)
+        return dest
 
     split = drives.needs_wbfs_split(dest_dir)
 

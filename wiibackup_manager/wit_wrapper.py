@@ -454,6 +454,20 @@ def _run_with_progress(
         )
 
 
+def console_for_id(game_id: str) -> str:
+    """"wii" o "gc" según el primer carácter del Game ID.
+
+    Nintendo reservó 'G' como primer carácter de ID4 para GameCube (ej.
+    "GZ2E01", Twilight Princess GC); los discos de Wii arrancan con otras
+    letras ('R', 'S', 'W', ...). `wit LIST` no expone la consola como
+    columna propia (se confirmó corriendo `wit LIST --long`: solo trae
+    ID6/MiB/Región/Título), así que para lo que identifica `wit` -formatos
+    envueltos como WBFS/CISO/WDF- esta es la señal disponible. Para ISO
+    plana no hace falta: `disc_header.read_plain_iso_header` ya lee el
+    magic word real del disco, que es la fuente de verdad."""
+    return "gc" if game_id[:1].upper() == "G" else "wii"
+
+
 def _find_id6_line(output: str) -> Optional[tuple[str, str]]:
     """Busca, entre las líneas de salida de `wit LIST`, la fila de datos de
     un disco y devuelve (game_id, title).
@@ -500,7 +514,8 @@ def identify(path: Path, binary: str = "wit") -> Optional[DiscInfo]:
     if found is None:
         return None
     game_id, title = found
-    return DiscInfo(game_id=game_id, title=title, source="wit")
+    return DiscInfo(game_id=game_id, title=title, source="wit",
+                     console=console_for_id(game_id))
 
 
 def convert(
@@ -734,5 +749,6 @@ def list_wbfs_container(path: Path, binary: str = "wit") -> list[DiscInfo]:
         title = parts[3].strip()
         if not title:
             continue
-        games.append(DiscInfo(game_id=validate_game_id(game_id), title=title, source="wit"))
+        games.append(DiscInfo(game_id=validate_game_id(game_id), title=title, source="wit",
+                              console=console_for_id(game_id)))
     return games

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 import os
+import sys
 import threading
 import time
 import urllib.request
@@ -28,7 +29,23 @@ from . import config
 from .disc_header import is_valid_game_id, validate_game_id
 from .i18n import _
 
-COVER_URL_TEMPLATE = "https://art.gametdb.com/wii/cover/{region}/{game_id}.png"
+# Una plantilla por consola, aunque hoy las dos apunten al mismo lugar:
+# se probó en serio contra el servidor (pedidos reales, no documentación)
+# que GameTDB NO separa las carátulas por consola bajo art.gametdb.com —
+# tanto Wii como GameCube se sirven bajo /wii/cover/{region}/{id6}.png. La
+# ruta /gc/cover/... que este diccionario usaba antes daba 404 SIEMPRE
+# (confirmado con GZ2E01 y GMSE01, dos juegos de GameCube distintos), así
+# que ninguna carátula de GameCube se llegaba a descargar. Se deja la
+# entrada "gc" como clave separada -en vez de borrar el dict y usar un
+# solo template- por dos motivos: si GameTDB alguna vez separa de verdad
+# por consola alcanza con cambiar un valor acá, y `console` sigue siendo
+# la clave de `cover_cache_path` para no mezclar en una sola carpeta la
+# caché de las dos consolas.
+COVER_URL_TEMPLATES = {
+    "wii": "https://art.gametdb.com/wii/cover/{region}/{game_id}.png",
+    "gc": "https://art.gametdb.com/wii/cover/{region}/{game_id}.png",
+}
+DEFAULT_CONSOLE = "wii"
 # GameTDB no siempre sube la carátula bajo la región "EN": muchos títulos
 # NTSC-U (p.ej. SMNE01, New Super Mario Bros. Wii) sólo existen bajo "US".
 # Probamos la región pedida y después esta lista de respaldo, en orden.
@@ -38,8 +55,8 @@ REQUEST_TIMEOUT = 5
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
 
-def cover_cache_path(game_id: str, region: str = "EN") -> Path:
-    """Ruta del PNG cacheado para `game_id` en esa región.
+def cover_cache_path(game_id: str, region: str = "EN", console: str = DEFAULT_CONSOLE) -> Path:
+    """Ruta del PNG cacheado para `game_id` en esa región y consola.
 
     La región va en el nombre del archivo, no solo en la clave de
     deduplicación en memoria: guardándolo como "RMCE01.png" a secas, la
@@ -48,6 +65,14 @@ def cover_cache_path(game_id: str, region: str = "EN") -> Path:
     caché contestaba que ya la tenía y nunca se bajaba la nueva. El
     selector de región no hacía nada después del primer uso.
 
+    La consola NO se agrega al nombre cuando es "wii" (el respaldo), a
+    propósito: es la consola con la que esta app trabajó siempre, y
+    agregarle un sufijo a todos esos nombres invalidaría de un saque la
+    caché de disco de cualquiera que ya la tuviera poblada. Para GameCube
+    sí hace falta: un ID6 es, en teoría, un espacio de nombres por
+    consola, así que sin el sufijo una carátula de GameCube podría
+    convivir (mal) con una de Wii que casualmente comparta ID.
+
     Levanta ValueError si el ID no es un ID6 válido: acá el ID se
     convierte en nombre de archivo dentro de la caché (y más abajo en
     parte de una URL), así que no puede venir crudo del header de un
@@ -55,7 +80,8 @@ def cover_cache_path(game_id: str, region: str = "EN") -> Path:
     letras y números por el mismo motivo."""
     safe_region = "".join(ch for ch in (region or DEFAULT_COVER_REGION)
                            if ch.isalnum()).upper() or DEFAULT_COVER_REGION
-    return config.COVERS_DIR / f"{validate_game_id(game_id)}.{safe_region}.png"
+    suffix = "" if console == DEFAULT_CONSOLE else f".{console}"
+    return config.COVERS_DIR / f"{validate_game_id(game_id)}.{safe_region}{suffix}.png"
 
 
 # Último bloque de todo PNG bien formado (longitud 0 + "IEND" + su CRC,
@@ -129,8 +155,31 @@ def _store_cover(cache_path: Path, data: bytes) -> bool:
         return False
 
 
-def get_cover_path(game_id: str, region: str = "EN", force: bool = False) -> Optional[Path]:
+def _log_cover_fetch_failed(game_id: str, console: str,
+                            errors: list[tuple[str, str]]) -> None:
+    """Avisa por stderr cuando NINGUNA región consiguió la carátula por algo
+    que no sea "esta región no la tiene" (404, el caso normal y silencioso:
+    la mayoría de los juegos solo están en una o dos regiones).
+
+    Sin esto, un problema real -URL rota, sin red, GameTDB caído- se ve
+    exactamente igual que un juego sin carátula: es lo que pasó con
+    `COVER_URL_TEMPLATES["gc"]` apuntando a una ruta que daba 404 siempre,
+    y no había forma de distinguirlo desde ningún lado hasta que alguien
+    probó la URL a mano."""
+    detail = "; ".join(f"{region}: {reason}" for region, reason in errors)
+    print(f"[wiibackup-manager] no se pudo bajar la carátula de {game_id} "
+          f"(consola={console}): {detail}", file=sys.stderr)
+
+
+def get_cover_path(game_id: str, region: str = "EN", force: bool = False,
+                   console: str = DEFAULT_CONSOLE) -> Optional[Path]:
     """Devuelve la ruta local de la carátula, descargándola si hace falta.
+
+    `console` selecciona la plantilla de `COVER_URL_TEMPLATES` (hoy la misma
+    URL para "wii" y "gc", ver el comentario ahí) y, sobre todo, en qué
+    archivo de caché queda guardada (ver `cover_cache_path`): lo que importa
+    de verdad es no mezclar en un mismo nombre de caché la carátula de un
+    juego de Wii y la de uno de GameCube que casualmente compartan ID6.
 
     Devuelve None si no se pudo obtener de ninguna región, incluido el caso
     de un juego sin identificar ("??????") o con un ID que no es un ID6
@@ -140,7 +189,7 @@ def get_cover_path(game_id: str, region: str = "EN", force: bool = False) -> Opt
     if not is_valid_game_id(game_id):
         return None
     game_id = validate_game_id(game_id)
-    cache_path = cover_cache_path(game_id, region)
+    cache_path = cover_cache_path(game_id, region, console)
     if cache_path.exists():
         if not force and _is_valid_cached_cover(cache_path):
             return cache_path
@@ -155,19 +204,37 @@ def get_cover_path(game_id: str, region: str = "EN", force: bool = False) -> Opt
     config.COVERS_DIR.mkdir(parents=True, exist_ok=True)
 
     regions_to_try = [region] + [r for r in COVER_FALLBACK_REGIONS if r != region]
+    url_template = COVER_URL_TEMPLATES.get(console, COVER_URL_TEMPLATES[DEFAULT_CONSOLE])
+
+    # Solo se acumulan acá los fallos que NO son un 404 (ver
+    # `_log_cover_fetch_failed`): un 404 significa "GameTDB no tiene la
+    # carátula en esta región", que es el resultado normal para la mayoría
+    # de las regiones de fallback y no algo que valga la pena avisar.
+    errors: list[tuple[str, str]] = []
 
     for r in regions_to_try:
-        url = COVER_URL_TEMPLATE.format(region=r, game_id=game_id)
+        url = url_template.format(region=r, game_id=game_id)
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "wiibackup-manager-linux"})
             with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
-                if resp.status == 200:
-                    data = resp.read()
-                    if data.startswith(PNG_MAGIC) and _store_cover(cache_path, data):
-                        return cache_path
-        except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError):
-            continue
+                if resp.status != 200:
+                    errors.append((r, f"status HTTP {resp.status}"))
+                    continue
+                data = resp.read()
+                if not data.startswith(PNG_MAGIC):
+                    errors.append((r, "la respuesta no es un PNG"))
+                    continue
+                if _store_cover(cache_path, data):
+                    return cache_path
+                errors.append((r, "el PNG descargado no se pudo decodificar/guardar"))
+        except urllib.error.HTTPError as e:
+            if e.code != 404:
+                errors.append((r, f"HTTP {e.code}"))
+        except (urllib.error.URLError, OSError, TimeoutError) as e:
+            errors.append((r, str(e)))
 
+    if errors:
+        _log_cover_fetch_failed(game_id, console, errors)
     return None
 
 
@@ -201,9 +268,13 @@ CoverCallback = Callable[[Optional[Path]], None]
 
 
 def fetch_cover_async(game_id: str, region: str = "EN",
-                      on_done: Optional[CoverCallback] = None) -> None:
+                      on_done: Optional[CoverCallback] = None,
+                      console: str = DEFAULT_CONSOLE) -> None:
     """Pide la carátula de `game_id` y llama a `on_done(path_o_None)` al
     terminar.
+
+    `console` ("wii" o "gc") decide de qué carpeta de GameTDB se pide (ver
+    `get_cover_path`); quien llama lo saca de `game.console`.
 
     Ojo: `on_done` se llama desde un hilo del pool (o desde el hilo que
     llama, si la carátula ya estaba en caché), así que quien toque widgets
@@ -221,12 +292,12 @@ def fetch_cover_async(game_id: str, region: str = "EN",
         return
 
     game_id = validate_game_id(game_id)
-    cached = cover_cache_path(game_id, region)
+    cached = cover_cache_path(game_id, region, console)
     if _is_valid_cached_cover(cached):
         on_done(cached)
         return
 
-    key = (game_id, region)
+    key = (game_id, region, console)
     with _inflight_lock:
         waiting = _inflight.get(key)
         if waiting is not None:
@@ -240,9 +311,9 @@ def fetch_cover_async(game_id: str, region: str = "EN",
 
 
 def _run_cover_job(key: tuple) -> None:
-    game_id, region = key
+    game_id, region, console = key
     try:
-        path = get_cover_path(game_id, region)
+        path = get_cover_path(game_id, region, console=console)
     except Exception:
         path = None
     with _inflight_lock:

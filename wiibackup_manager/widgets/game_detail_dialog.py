@@ -99,7 +99,7 @@ class GameDetailDialog(Adw.Dialog):
 
         self.set_child(toolbar_view)
 
-        self._load_cover_async(cover_region)
+        self._load_cover_async(cover_region, game.console)
         self._load_extra_info_async()
 
     def _add_row(self, label: str, value: str, wrap: bool = False):
@@ -113,13 +113,14 @@ class GameDetailDialog(Adw.Dialog):
         return row
 
     # ------------------------------------------------------------ Carátula --
-    def _load_cover_async(self, cover_region: str):
+    def _load_cover_async(self, cover_region: str, console: str = "wii"):
         # Mismo pool compartido que la Biblioteca y Transferir: si la
         # carátula de este juego ya se está descargando para una fila, este
         # panel se cuelga de esa descarga en vez de pedirla de nuevo.
+        # `console` decide si se pide a la carpeta /wii/ o /gc/ de GameTDB.
         gametdb.fetch_cover_async(
-            self.game.game_id, cover_region,
-            lambda path: GLib.idle_add(self._apply_cover, str(path) if path else None),
+            self.game.game_id, cover_region, console=console,
+            on_done=lambda path: GLib.idle_add(self._apply_cover, str(path) if path else None),
         )
 
     def _apply_cover(self, path: str | None):

@@ -262,6 +262,13 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self.view_stack.add_titled_with_icon(self.log_view, "log", _("Log"),
                                               "document-open-recent-symbolic")
 
+        # Cerrar la ventana corta la cola de transferencias. El hilo de la
+        # cola es daemon, así que el proceso terminaría igual, pero
+        # terminaría con un `wit` a mitad de una escritura sobre el
+        # pendrive: pedirle que pare (y que mate a `wit`) antes de irse
+        # deja la unidad en un estado predecible.
+        self.connect("close-request", self._on_close_request)
+
         toolbar_view.set_content(self.view_stack)
 
         if not wit_wrapper.is_available(self.settings.wit_binary):
@@ -681,7 +688,10 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         if not folder:
             return
         dest_root = Path(folder.get_path())
-        if any(g.fmt.upper() != "WBFS" for g in games) and \
+        # GameCube nunca pasa por `wit` (se copia tal cual, ver
+        # `library.send_to_wbfs_drive`): la falta de `wit` solo bloquea a
+        # los juegos de Wii que no sean ya WBFS.
+        if any(g.fmt.upper() != "WBFS" and g.console != "gc" for g in games) and \
                 not wit_wrapper.is_available(self.settings.wit_binary):
             self._show_toast(
                 _("No se encontró 'wit'; no se puede convertir a WBFS los que "
@@ -695,7 +705,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         # informa aparte en el resumen final.
         if len(games) == 1:
             try:
-                dest = library.wbfs_dest_path(games[0], dest_root)
+                dest = library.game_dest_path(games[0], dest_root)
             except ValueError:
                 dest = None
             if dest is not None and dest.exists():
@@ -2156,6 +2166,10 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             website="https://github.com/",
         )
         about.present(self)
+
+    def _on_close_request(self, *_args) -> bool:
+        self.transfer_view.shutdown()
+        return False  # False = seguir con el cierre normal
 
     def _show_toast(self, message: str):
         self._toast_overlay.add_toast(Adw.Toast(title=message, timeout=3))

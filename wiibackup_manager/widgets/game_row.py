@@ -188,9 +188,9 @@ class GameRow(Adw.ActionRow):
         # respuesta puede estar mostrando otro juego. Ver `_is_stale`.
         game_id, region = self.game.game_id, self.cover_region
         gametdb.fetch_cover_async(
-            game_id, region,
-            lambda path: GLib.idle_add(self._apply_cover,
-                                        str(path) if path else None, game_id, region),
+            game_id, region, console=self.game.console,
+            on_done=lambda path: GLib.idle_add(self._apply_cover,
+                                                str(path) if path else None, game_id, region),
         )
 
     def _is_stale(self, game_id: str | None, region: str | None) -> bool:
