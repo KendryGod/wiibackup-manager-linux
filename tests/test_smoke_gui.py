@@ -77,13 +77,23 @@ def test_la_ventana_se_arma_y_se_muestra(gtk, tmp_path, monkeypatch):
             GLib.timeout_add(2500, self._revisar, win)
 
         def _revisar(self, win):
-            resultado["titulo"] = win.get_title()
-            resultado["visible"] = win.get_visible()
-            resultado["pestañas"] = [
-                win.view_stack.get_page(win.view_stack.get_child_by_name(n)).get_title()
-                for n in ("library", "transfer", "log")
-            ]
-            self.quit()
+            # `finally: self.quit()` es a propósito: una excepción acá
+            # (por ejemplo un atributo que ya no existe) no puede dejar el
+            # bucle de GLib corriendo hasta el timeout de guardia de 60s
+            # -mejor que el test falle en el acto con su traceback real.
+            try:
+                resultado["titulo"] = win.get_title()
+                resultado["visible"] = win.get_visible()
+                # Las 4 páginas del sidebar (Juegos/Cola de Tareas/Modo
+                # Fábrica/Ajustes) tienen que existir dentro del stack de
+                # contenido, cada una con su propia fila en el sidebar.
+                resultado["paginas"] = {
+                    pid for pid in ("juegos", "cola", "fabrica", "ajustes")
+                    if win._content_stack.get_child_by_name(pid) is not None
+                }
+                resultado["filas_sidebar"] = [pid for pid, _icon, _lbl in win._sidebar_items]
+            finally:
+                self.quit()
             return False
 
     # Un timeout de guardia: si la app se cuelga, el test tiene que fallar
@@ -96,7 +106,8 @@ def test_la_ventana_se_arma_y_se_muestra(gtk, tmp_path, monkeypatch):
     assert not resultado.get("colgada"), "la app no terminó de arrancar"
     assert resultado.get("visible") is True
     assert "WiiBackup Manager" in resultado.get("titulo", "")
-    assert resultado.get("pestañas") == ["Biblioteca", "Transferir", "Log"]
+    assert resultado.get("paginas") == {"juegos", "cola", "fabrica", "ajustes"}
+    assert resultado.get("filas_sidebar") == ["juegos", "cola", "fabrica", "ajustes"]
 
 
 def test_la_ventana_tambien_arranca_en_ingles(gtk, tmp_path, monkeypatch):
@@ -140,15 +151,23 @@ def test_la_ventana_tambien_arranca_en_ingles(gtk, tmp_path, monkeypatch):
             GLib.timeout_add(2500, self._revisar, win)
 
         def _revisar(self, win):
-            resultado["pestañas"] = [
-                win.view_stack.get_page(win.view_stack.get_child_by_name(n)).get_title()
-                for n in ("library", "transfer", "log")
-            ]
-            resultado["vacio"] = win.status_page.get_title()
-            self.quit()
+            try:
+                resultado["paginas"] = {
+                    pid for pid in ("juegos", "cola", "fabrica", "ajustes")
+                    if win._content_stack.get_child_by_name(pid) is not None
+                }
+                resultado["vacio"] = win.status_page.get_title()
+            finally:
+                self.quit()
             return False
+
+    # Misma guardia que en el test anterior: sin esto, una excepción
+    # dentro de `_revisar` deja el bucle de GLib corriendo para siempre
+    # (no hay timeout de guardia acá arriba que lo corte).
+    GLib.timeout_add_seconds(60, lambda: (resultado.setdefault("colgada", True), False)[1])
 
     App().run([])
 
-    assert resultado.get("pestañas") == ["Library", "Transfer", "Log"]
+    assert not resultado.get("colgada"), "la app no terminó de arrancar"
+    assert resultado.get("paginas") == {"juegos", "cola", "fabrica", "ajustes"}
     assert resultado.get("vacio") == "No games yet"

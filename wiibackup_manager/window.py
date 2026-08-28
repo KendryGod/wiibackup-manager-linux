@@ -11,7 +11,7 @@ gi.require_version("Adw", "1")
 gi.require_version("Gdk", "4.0")
 from gi.repository import Adw, Gtk, GLib, Gio, Gdk  # noqa: E402
 
-from . import __version__, config, library, operations, oplog, styles, trash, wit_wrapper
+from . import __version__, config, drives, library, operations, oplog, styles, trash, wit_wrapper
 from .disc_header import UNKNOWN_GAME_ID
 from .i18n import _, ngettext
 from .operations import OperationBusy, OperationKind, OperationOutcome
@@ -118,26 +118,119 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
     # ---------------------------------------------------------------- UI --
     def _build_ui(self):
+        """Arma la ventana: un `Adw.NavigationSplitView` con 4 destinos en
+        el sidebar (Juegos, Cola de Tareas, Modo Fábrica, Ajustes), cada
+        uno con su propio `Adw.ToolbarView`/header, intercambiados dentro
+        de `self._content_stack`.
+
+        `_build_juegos_page` es, adentro, EXACTAMENTE el contenido que
+        tenía la única ventana de antes (mismos widgets, mismos nombres de
+        atributo): el resto de la clase -escaneo, lotes, importar, etc.-
+        no sabe ni le importa que ahora vive dentro de una página del
+        sidebar en vez de ser el contenido entero de la ventana."""
         self._toast_overlay = Adw.ToastOverlay()
         self.set_content(self._toast_overlay)
 
+        self.split_view = Adw.NavigationSplitView()
+        self._toast_overlay.set_child(self.split_view)
+
+        self._content_stack = Gtk.Stack()
+        self._content_nav_page = Adw.NavigationPage(
+            title=_("Juegos"), child=self._content_stack)
+        self.split_view.set_content(self._content_nav_page)
+
+        self._add_action("preferences", self._on_preferences)
+        self._add_action("about", self._on_about)
+        self._add_action("add-files", self._on_add_files)
+        self._add_action("add-folder", self._on_add_folder)
+        self._add_action("rename-all", self._on_rename_all)
+        self._add_action("export-csv", lambda: self._on_export(library.EXPORT_CSV))
+        self._add_action("export-text", lambda: self._on_export(library.EXPORT_TEXT))
+
+        # Las páginas se construyen ANTES que el sidebar: seleccionar la
+        # primera fila del sidebar dispara `_on_sidebar_row_selected`, que
+        # necesita que "juegos" ya exista dentro de `self._content_stack`.
+        self._build_juegos_page()
+        self._build_cola_page()
+        self._build_modo_fabrica_page()
+        self._build_ajustes_page()
+        self._build_sidebar()
+
+        # Cerrar la ventana corta la cola de transferencias. El hilo de la
+        # cola es daemon, así que el proceso terminaría igual, pero
+        # terminaría con un `wit` a mitad de una escritura sobre el
+        # pendrive: pedirle que pare (y que mate a `wit`) antes de irse
+        # deja la unidad en un estado predecible.
+        self.connect("close-request", self._on_close_request)
+
+    # ------------------------------------------------------------ Sidebar --
+    def _build_sidebar(self):
+        sidebar_toolbar = Adw.ToolbarView()
+        sidebar_header = Adw.HeaderBar()
+        sidebar_header.set_title_widget(Adw.WindowTitle(title="WiiBackup Manager"))
+        # Los botones de la ventana (cerrar/min/max) quedan solo en el
+        # header de la página de contenido, para no duplicarlos: acá y
+        # allá se verían dos juegos de controles a la vez.
+        sidebar_header.set_show_end_title_buttons(False)
+        sidebar_toolbar.add_top_bar(sidebar_header)
+
+        # (id de página, ícono simbólico, etiqueta). Un solo lugar: de acá
+        # sale tanto la fila del sidebar como el título que se le pone a
+        # `self._content_nav_page` al elegirla.
+        self._sidebar_items = [
+            ("juegos", "applications-games-symbolic", _("Juegos")),
+            ("cola", "emblem-synchronizing-symbolic", _("Cola de Tareas")),
+            ("fabrica", "drive-removable-media-symbolic", _("Modo Fábrica")),
+            ("ajustes", "emblem-system-symbolic", _("Ajustes")),
+        ]
+
+        self._sidebar_list = Gtk.ListBox()
+        # Clase de GTK/libadwaita hecha justo para esto: el mismo look que
+        # el sidebar de Archivos o Configuración de GNOME.
+        self._sidebar_list.add_css_class("navigation-sidebar")
+        self._sidebar_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        for page_id, icon_name, label in self._sidebar_items:
+            row = Gtk.ListBoxRow()
+            row.page_id = page_id
+            box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12,
+                          margin_start=10, margin_end=10, margin_top=10,
+                          margin_bottom=10)
+            box.append(Gtk.Image.new_from_icon_name(icon_name))
+            row_label = Gtk.Label(label=label, xalign=0)
+            row_label.set_hexpand(True)
+            box.append(row_label)
+            row.set_child(box)
+            self._sidebar_list.append(row)
+        self._sidebar_list.connect("row-selected", self._on_sidebar_row_selected)
+
+        sidebar_toolbar.set_content(self._sidebar_list)
+        sidebar_page = Adw.NavigationPage(title="WiiBackup Manager",
+                                          child=sidebar_toolbar)
+        self.split_view.set_sidebar(sidebar_page)
+
+        self._sidebar_list.select_row(self._sidebar_list.get_row_at_index(0))
+
+    def _on_sidebar_row_selected(self, _listbox, row):
+        if row is None:
+            return
+        self._content_stack.set_visible_child_name(row.page_id)
+        label = next(lbl for pid, _icon, lbl in self._sidebar_items
+                     if pid == row.page_id)
+        self._content_nav_page.set_title(label)
+        # En pantallas angostas el split view colapsa a una sola columna
+        # (sidebar O contenido): elegir un destino tiene que llevar al
+        # contenido, si no la fila se ve "seleccionada" pero la pantalla
+        # sigue mostrando el sidebar.
+        if self.split_view.get_collapsed():
+            self.split_view.set_show_content(True)
+
+    # -------------------------------------------------------- Página: Juegos --
+    def _build_juegos_page(self):
         toolbar_view = Adw.ToolbarView()
-        self._toast_overlay.set_child(toolbar_view)
 
         header = Adw.HeaderBar()
+        header.set_title_widget(Adw.WindowTitle(title=_("Juegos")))
         toolbar_view.add_top_bar(header)
-
-        # El stack de vistas se crea acá porque el switcher del header lo
-        # necesita (Adw.ViewSwitcher se ata a un Adw.ViewStack), pero
-        # se llena de contenido más abajo.
-        self.view_stack = Adw.ViewStack()
-
-        # Switcher tipo "pill" siempre arriba, integrado en el header
-        # (como en Archivos/Configuración de GNOME), sin comportamiento
-        # adaptativo hacia una barra inferior.
-        self.title_widget = Adw.ViewSwitcher(stack=self.view_stack,
-                                              policy=Adw.ViewSwitcherPolicy.WIDE)
-        header.set_title_widget(self.title_widget)
 
         self._add_button = add_button = Gtk.MenuButton(icon_name="list-add-symbolic")
         add_button.set_tooltip_text(_("Agregar juegos (ISO/WBFS)"))
@@ -170,14 +263,6 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         menu.append(_("Acerca de"), "win.about")
         menu_button.set_menu_model(menu)
         header.pack_end(menu_button)
-
-        self._add_action("preferences", self._on_preferences)
-        self._add_action("about", self._on_about)
-        self._add_action("add-files", self._on_add_files)
-        self._add_action("add-folder", self._on_add_folder)
-        self._add_action("rename-all", self._on_rename_all)
-        self._add_action("export-csv", lambda: self._on_export(library.EXPORT_CSV))
-        self._add_action("export-text", lambda: self._on_export(library.EXPORT_TEXT))
 
         # Barra de búsqueda
         self.search_entry = Gtk.SearchEntry(placeholder_text=_("Buscar por título o ID…"))
@@ -251,25 +336,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         drop_target.connect("drop", self._on_files_dropped)
         self.stack.add_controller(drop_target)
 
-        self.view_stack.add_titled_with_icon(content_box, "library", _("Biblioteca"),
-                                              "view-list-symbolic")
-
-        self.transfer_view = TransferView(self.settings, self._show_toast, self.ops)
-        self.view_stack.add_titled_with_icon(self.transfer_view, "transfer", _("Transferir"),
-                                              "drive-removable-media-symbolic")
-
-        self.log_view = LogView(self.op_log, self._show_toast)
-        self.view_stack.add_titled_with_icon(self.log_view, "log", _("Log"),
-                                              "document-open-recent-symbolic")
-
-        # Cerrar la ventana corta la cola de transferencias. El hilo de la
-        # cola es daemon, así que el proceso terminaría igual, pero
-        # terminaría con un `wit` a mitad de una escritura sobre el
-        # pendrive: pedirle que pare (y que mate a `wit`) antes de irse
-        # deja la unidad en un estado predecible.
-        self.connect("close-request", self._on_close_request)
-
-        toolbar_view.set_content(self.view_stack)
+        toolbar_view.set_content(content_box)
 
         if not wit_wrapper.is_available(self.settings.wit_binary):
             banner = Adw.Banner(
@@ -323,6 +390,266 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self._selection_bar.set_revealed(False)
         toolbar_view.add_bottom_bar(self._selection_bar)
         self._update_selection_bar()
+
+        self._content_stack.add_named(toolbar_view, "juegos")
+
+    # --------------------------------------------------- Página: Cola de Tareas --
+    def _build_cola_page(self):
+        toolbar_view = Adw.ToolbarView()
+        header = Adw.HeaderBar()
+        header.set_title_widget(Adw.WindowTitle(title=_("Cola de Tareas")))
+        toolbar_view.add_top_bar(header)
+
+        # `TransferView` es el mismo widget que antes vivía en la pestaña
+        # "Transferir": nada de su lógica cambió, solo dónde se lo monta y
+        # cómo se llama la fila del sidebar que lleva hasta acá.
+        self.transfer_view = TransferView(self.settings, self._show_toast, self.ops)
+        toolbar_view.set_content(self.transfer_view)
+
+        self._content_stack.add_named(toolbar_view, "cola")
+
+    # ----------------------------------------------------- Página: Modo Fábrica --
+    def _build_modo_fabrica_page(self):
+        toolbar_view = Adw.ToolbarView()
+        header = Adw.HeaderBar()
+        header.set_title_widget(Adw.WindowTitle(title=_("Modo Fábrica")))
+        toolbar_view.add_top_bar(header)
+
+        warning = Adw.Banner(
+            title=_("Formatear borra TODO el contenido del disco elegido, sin "
+                    "posibilidad de recuperarlo."),
+            revealed=True,
+        )
+        toolbar_view.add_top_bar(warning)
+
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+
+        group = Adw.PreferencesGroup(
+            title=_("Preparar unidad"),
+            description=_(
+                "Formatea un USB o SD como FAT32 (32 KB por clúster) y arma "
+                "la estructura de carpetas que esperan USB Loader GX y "
+                "Nintendont: apps, games y wbfs. Solo se muestran discos que "
+                "el sistema marca como removibles -nunca un disco interno."),
+        )
+        group.set_margin_start(12)
+        group.set_margin_end(12)
+        group.set_margin_top(12)
+
+        # BLINDAJE 1 en la interfaz: el modelo del desplegable se llena
+        # SOLO con lo que devuelve `drives.list_candidate_drives()`, que ya
+        # filtró por removable=1 (ver drives.py). Nunca se agrega nada acá
+        # "a mano" a partir de otra fuente.
+        self._factory_model = Gtk.StringList.new([])
+        self._factory_row = Adw.ComboRow(title=_("Unidad"))
+        self._factory_row.set_model(self._factory_model)
+        self._factory_row.connect("notify::selected",
+                                  self._on_factory_selection_changed)
+        group.add(self._factory_row)
+        content.append(group)
+
+        buttons_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+                              margin_start=12, margin_end=12, margin_top=8)
+        self._factory_refresh_btn = Gtk.Button(icon_name="view-refresh-symbolic")
+        self._factory_refresh_btn.set_tooltip_text(_("Volver a buscar unidades removibles"))
+        self._factory_refresh_btn.connect("clicked",
+                                          lambda *_a: self._refresh_factory_drives())
+        buttons_box.append(self._factory_refresh_btn)
+
+        self._factory_prepare_btn = Gtk.Button(label=_("Preparar unidad…"))
+        self._factory_prepare_btn.add_css_class("destructive-action")
+        self._factory_prepare_btn.set_sensitive(False)
+        self._factory_prepare_btn.connect("clicked", self._on_factory_prepare_clicked)
+        buttons_box.append(self._factory_prepare_btn)
+        content.append(buttons_box)
+
+        self._factory_empty_label = Gtk.Label(
+            label=_("No se detectó ninguna unidad removible. Conectá un USB "
+                    "o SD y tocá el botón de actualizar."),
+            wrap=True, xalign=0)
+        self._factory_empty_label.add_css_class("dim-label")
+        self._factory_empty_label.set_margin_start(12)
+        self._factory_empty_label.set_margin_end(12)
+        self._factory_empty_label.set_margin_top(8)
+        self._factory_empty_label.set_visible(False)
+        content.append(self._factory_empty_label)
+
+        self._factory_progress = Gtk.ProgressBar(visible=False, show_text=True)
+        self._factory_progress.set_margin_start(12)
+        self._factory_progress.set_margin_end(12)
+        self._factory_progress.set_margin_top(12)
+        content.append(self._factory_progress)
+
+        toolbar_view.set_content(content)
+        self._content_stack.add_named(toolbar_view, "fabrica")
+
+        self._factory_drives: list[drives.BlockDevice] = []
+        self._factory_busy = False
+        self._factory_pulse_id = None
+        self._refresh_factory_drives()
+
+    def _refresh_factory_drives(self):
+        """BLINDAJE 1: repuebla el desplegable solo con lo que el kernel
+        marca removable=1 -ver `drives.list_candidate_drives`. Se llama al
+        construir la página, al tocar el botón de actualizar y después de
+        cada intento de formateo (la unidad puede haber cambiado de
+        nombre, o el usuario puede haberla desconectado)."""
+        self._factory_drives = drives.list_candidate_drives()
+        while self._factory_model.get_n_items():
+            self._factory_model.remove(0)
+        for device in self._factory_drives:
+            self._factory_model.append(device.display_name)
+
+        hay_candidatos = bool(self._factory_drives)
+        self._factory_empty_label.set_visible(not hay_candidatos)
+        self._factory_row.set_visible(hay_candidatos)
+        if hay_candidatos:
+            self._factory_row.set_selected(0)
+        self._update_factory_prepare_sensitivity()
+
+    def _selected_factory_drive(self) -> "drives.BlockDevice | None":
+        idx = self._factory_row.get_selected()
+        if idx == Gtk.INVALID_LIST_POSITION or idx >= len(self._factory_drives):
+            return None
+        return self._factory_drives[idx]
+
+    def _on_factory_selection_changed(self, *_a):
+        self._update_factory_prepare_sensitivity()
+
+    def _update_factory_prepare_sensitivity(self):
+        self._factory_prepare_btn.set_sensitive(
+            not self._factory_busy and self._selected_factory_drive() is not None)
+
+    def _on_factory_prepare_clicked(self, *_a):
+        device = self._selected_factory_drive()
+        if device is None:
+            return
+
+        # BLINDAJE 2: confirmación informada (modelo + tamaño + ruta del
+        # dispositivo, tal como se ve en este instante) y el usuario tiene
+        # que escribir "FORMATEAR" a mano para habilitar el botón
+        # destructivo. Nada de esto reemplaza a los blindajes 3 y 4, que
+        # se vuelven a correr en `drives.format_as_wii_usb` pase lo que
+        # pase acá.
+        dialog = Adw.AlertDialog(
+            heading=_("¿Formatear esta unidad?"),
+            body=_("Vas a formatear:\n{drive}\n\nSe borra TODO su contenido "
+                   "actual, sin posibilidad de recuperarlo. Para confirmar, "
+                   "escribí FORMATEAR abajo.").format(drive=device.display_name),
+        )
+        entry = Gtk.Entry(placeholder_text="FORMATEAR")
+        dialog.set_extra_child(entry)
+        dialog.add_response("cancel", _("Cancelar"))
+        dialog.add_response("format", _("Formatear"))
+        dialog.set_response_appearance("format", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_response_enabled("format", False)
+        dialog.set_default_response("cancel")
+        dialog.set_close_response("cancel")
+        entry.connect(
+            "changed",
+            lambda e: dialog.set_response_enabled("format",
+                                                   e.get_text().strip() == "FORMATEAR"))
+        dialog.connect("response", self._on_factory_confirm_response, device)
+        dialog.present(self)
+
+    def _on_factory_confirm_response(self, _dialog, response, device):
+        if response != "format":
+            return
+        self._start_factory_format(device)
+
+    def _start_factory_format(self, device: "drives.BlockDevice"):
+        """Corre `drives.format_as_wii_usb` (blindajes 3 y 4 + mkfs +
+        estructura de carpetas) en un hilo de fondo, para no congelar la
+        interfaz mientras `pkexec` pide contraseña y `mkfs.vfat` escribe.
+        El resultado vuelve al hilo de GTK con `GLib.idle_add`, igual que
+        el resto de las operaciones largas de la ventana."""
+        self._factory_busy = True
+        self._factory_prepare_btn.set_sensitive(False)
+        self._factory_refresh_btn.set_sensitive(False)
+        self._factory_row.set_sensitive(False)
+        self._factory_progress.set_visible(True)
+        self._factory_progress.set_text(_("Formateando…"))
+        self._factory_progress.pulse()
+        self._factory_pulse_id = GLib.timeout_add(150, self._pulse_factory_progress)
+
+        def worker():
+            try:
+                punto_montaje = drives.format_as_wii_usb(device)
+            except Exception as e:  # noqa: BLE001
+                GLib.idle_add(self._on_factory_format_done, False, str(e))
+            else:
+                GLib.idle_add(self._on_factory_format_done, True, str(punto_montaje))
+
+        threading.Thread(target=worker, daemon=True, name="factory-format").start()
+
+    def _pulse_factory_progress(self):
+        if not self._factory_busy:
+            return False
+        self._factory_progress.pulse()
+        return True
+
+    def _on_factory_format_done(self, ok: bool, detail: str):
+        self._factory_busy = False
+        if self._factory_pulse_id is not None:
+            GLib.source_remove(self._factory_pulse_id)
+            self._factory_pulse_id = None
+        self._factory_progress.set_visible(False)
+        self._factory_refresh_btn.set_sensitive(True)
+        self._factory_row.set_sensitive(True)
+        if ok:
+            self._show_toast(_("Unidad preparada en {path}.").format(path=detail))
+        else:
+            self._show_toast(
+                _("No se pudo preparar la unidad: {error}").format(error=detail))
+        # Vuelve a escanear /sys/block: la unidad recién formateada puede
+        # haber cambiado de nombre de montaje, y si el formateo falló por
+        # un blindaje (ej. dejó de ser removible) tampoco tiene sentido
+        # dejarla todavía seleccionada como si nada.
+        self._refresh_factory_drives()
+        return False
+
+    # ----------------------------------------------------------- Página: Ajustes --
+    def _build_ajustes_page(self):
+        toolbar_view = Adw.ToolbarView()
+
+        self._ajustes_stack = Adw.ViewStack()
+        header = Adw.HeaderBar()
+        header.set_title_widget(
+            Adw.ViewSwitcher(stack=self._ajustes_stack,
+                             policy=Adw.ViewSwitcherPolicy.WIDE))
+        toolbar_view.add_top_bar(header)
+
+        general_page = Adw.PreferencesPage()
+        group = Adw.PreferencesGroup(title=_("Transferencias"))
+        self._scrub_switch_row = Adw.SwitchRow(
+            title=_("Optimizar espacio (Scrubbing)"),
+            subtitle=_(
+                "Al convertir a WBFS, descarta la partición de actualización "
+                "del disco (no la usan USB Loader GX ni Nintendont). Ahorra "
+                "espacio en el destino; ese juego después no se puede "
+                "actualizar desde el propio disco."),
+            active=self.settings.scrub_update,
+        )
+        self._scrub_switch_row.connect("notify::active", self._on_scrub_switch_toggled)
+        group.add(self._scrub_switch_row)
+        general_page.add(group)
+        self._ajustes_stack.add_titled_with_icon(
+            general_page, "general", _("General"), "preferences-system-symbolic")
+
+        self.log_view = LogView(self.op_log, self._show_toast)
+        self._ajustes_stack.add_titled_with_icon(
+            self.log_view, "log", _("Log"), "document-open-recent-symbolic")
+
+        toolbar_view.set_content(self._ajustes_stack)
+        self._content_stack.add_named(toolbar_view, "ajustes")
+
+    def _on_scrub_switch_toggled(self, row, _pspec):
+        self.settings.scrub_update = row.get_active()
+        error = config.try_save(self.settings)
+        if error:
+            self._show_toast(
+                _("No se pudo guardar la configuración: {error}. El cambio "
+                  "vale para esta sesión.").format(error=error))
 
     def _add_action(self, name: str, callback):
         action = Gio.SimpleAction.new(name, None)

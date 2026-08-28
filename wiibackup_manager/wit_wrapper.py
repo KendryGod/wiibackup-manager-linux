@@ -530,6 +530,7 @@ def convert(
     inactivity_timeout: Optional[float] = WIT_INACTIVITY_TIMEOUT,
     absolute_timeout: Optional[float] = WIT_ABSOLUTE_TIMEOUT,
     overwrite: bool = False,
+    scrub_update: bool = True,
 ) -> subprocess.CompletedProcess:
     """Convierte src -> dest. target_format: 'WBFS' o 'ISO'.
 
@@ -570,7 +571,15 @@ def convert(
     Se da por colgado a `wit` cuando pasa `inactivity_timeout` sin que el
     destino crezca ni un byte, no por tardar mucho: una copia lenta pero
     sana sigue adelante (ver `WIT_INACTIVITY_TIMEOUT`). `absolute_timeout`
-    queda como última red de seguridad."""
+    queda como última red de seguridad.
+
+    `scrub_update=True` (default) agrega `--rm UPDATE`: descarta la
+    partición de actualización del disco de origen, que USB Loader
+    GX/Nintendont no usan para nada y que en algunos juegos pesa varios
+    cientos de MB. Es la opción "Optimizar espacio (Scrubbing)" de
+    Ajustes -ver `config.Settings.scrub_update`-; con `scrub_update=False`
+    el WBFS resultante queda idéntico al disco original, actualizable
+    desde el propio juego."""
     if not find_wit(binary):
         raise WitNotFoundError(binary)
 
@@ -584,6 +593,8 @@ def convert(
         args.append("--overwrite")
     if split:
         args += ["--split-size", _SPLIT_SIZE_ARG]
+    if scrub_update:
+        args += ["--rm", "UPDATE"]
     args += [str(src), "--dest", str(dest)]
 
     # UN SOLO camino de ejecución, haya o no callbacks. Antes, sin progreso

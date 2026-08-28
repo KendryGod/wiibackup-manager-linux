@@ -905,6 +905,7 @@ def send_to_wbfs_drive(
     bytes_progress_cb: Optional[Callable[[int], None]] = None,
     overwrite: bool = False,
     cancel: Optional["wit_wrapper.CancellationToken"] = None,
+    scrub_update: bool = True,
 ) -> Path:
     """Copia `game` a la estructura estándar 'wbfs/<ID6>/<ID6>.wbfs' que
     reconocen los USB Loaders de Wii (USB Loader GX, CFG USB Loader, etc.)
@@ -938,7 +939,12 @@ def send_to_wbfs_drive(
 
     `cancel`, si se pasa, hace que cancelar corte esta copia/conversión en
     el momento (matando el `wit` en curso o abortando la copia directa) y
-    levante `wit_wrapper.OperationCancelled`."""
+    levante `wit_wrapper.OperationCancelled`.
+
+    `scrub_update` se le pasa tal cual a `wit_wrapper.convert` (ver ahí):
+    solo importa cuando el camino termina pasando por `wit` -una copia
+    directa de un WBFS que ya entra entero no convierte nada, así que no
+    hay partición de actualización que descartar."""
     if cancel is not None and cancel.cancelled:
         raise wit_wrapper.OperationCancelled("Transferencia cancelada por el usuario.")
 
@@ -986,7 +992,7 @@ def send_to_wbfs_drive(
         # usuario.
         result = wit_wrapper.convert(game.path, dest, "WBFS", wit_binary, split=split,
                                       bytes_progress_cb=bytes_progress_cb, cancel=cancel,
-                                      overwrite=True)
+                                      overwrite=True, scrub_update=scrub_update)
         if result.returncode != 0:
             raise RuntimeError(
                 result.stderr.strip() or _("Error desconocido al convertir con wit"))

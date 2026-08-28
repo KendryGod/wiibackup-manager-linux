@@ -122,6 +122,11 @@ class TransferJob:
     # ---- Datos de trabajo (no los toca la interfaz) ----
     wit_binary: str = "wit"
     overwrite: bool = False
+    # "Optimizar espacio (Scrubbing)" de Ajustes -ver
+    # `config.Settings.scrub_update`-, congelado en la tarea al encolar
+    # para que cambiar el switch a mitad de una tanda no le cambie las
+    # reglas a una tarea que ya está copiando.
+    scrub_update: bool = True
     # Cuánto se espera que ocupe en el destino. Si viene de
     # `library.plan_transfer_fast` ya está medido; si no, lo mide la cola
     # justo antes de copiar (ver `_ensure_output_bytes`).
@@ -254,7 +259,7 @@ class TransferQueue:
 
     # ------------------------------------------------------------ Encolar --
     def add_jobs(self, items, dest_root, wit_binary: str = "wit",
-                 overwrite: bool = False) -> list[TransferJob]:
+                 overwrite: bool = False, scrub_update: bool = True) -> list[TransferJob]:
         """Encola juegos hacia `dest_root` y devuelve las tareas creadas.
 
         `items` puede ser una lista de `Game` o de `library.TransferItem`.
@@ -278,7 +283,7 @@ class TransferQueue:
             job = TransferJob(
                 id=next(self._ids), game=game, dest_root=dest_root,
                 wit_binary=wit_binary, overwrite=overwrite,
-                output_bytes=output_bytes,
+                output_bytes=output_bytes, scrub_update=scrub_update,
             )
             nuevos.append(job)
 
@@ -612,6 +617,7 @@ class TransferQueue:
                 bytes_progress_cb=on_bytes,
                 overwrite=job.overwrite,
                 cancel=job.cancel_token,
+                scrub_update=job.scrub_update,
             )
         except wit_wrapper.OperationCancelled:
             self._finish_job(job, JobStatus.CANCELLED, "", oplog.STATUS_CANCELLED,

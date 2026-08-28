@@ -912,7 +912,8 @@ class TransferView(Gtk.Box):
             # (que sí llega por `GLib.idle_add`), así que se puede llamar
             # derecho desde acá.
             self.queue.add_jobs(items, dest_root, wit_binary=wit_binary,
-                                overwrite=overwrite)
+                                overwrite=overwrite,
+                                scrub_update=self.settings.scrub_update)
 
         threading.Thread(target=worker, daemon=True,
                          name="transfer-plan").start()
