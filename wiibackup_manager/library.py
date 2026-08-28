@@ -483,6 +483,24 @@ class DestinationExistsError(FileExistsError):
         self.dest = dest
 
 
+class MultiGameContainerError(RuntimeError):
+    """`game.path` es un .wbfs que contiene más de un juego (detectado con
+    `wit_wrapper.list_wbfs_container`). `identify_file` solo identifica el
+    primero de la lista, así que una copia directa terminaría poniendo el
+    contenedor entero -con todos los juegos que tenga adentro- en el
+    destino de un solo juego (wbfs/<ID6>/<ID6>.wbfs), algo que los USB
+    Loaders no van a reconocer como válido. Se aborta en vez de adivinar
+    cuál de los juegos del contenedor es el que se quiso transferir."""
+
+    def __init__(self, path: Path, contenido: list["wit_wrapper.DiscInfo"]):
+        ids = ", ".join(juego.game_id for juego in contenido)
+        super().__init__(
+            f"{path} es un WBFS multi-juego ({ids}); no se puede copiar "
+            "directo a un destino de un solo juego.")
+        self.path = path
+        self.contenido = contenido
+
+
 def wbfs_dest_path(game: Game, drive_root: Path) -> Path:
     """Ruta final que va a ocupar `game` dentro de `drive_root`, en la
     estructura 'wbfs/<ID6>/<ID6>.wbfs' que reconocen los USB Loaders.
@@ -914,6 +932,11 @@ def send_to_wbfs_drive(
     puede necesitar dividir el archivo, se delega en `wit`, que es quien
     sabe empaquetar (y, si hace falta, partir) el WBFS correctamente.
 
+    Antes de la copia directa de un WBFS se chequea, vía
+    `wit_wrapper.list_wbfs_container`, que el contenedor tenga un solo
+    juego: si tiene más, levanta `MultiGameContainerError` en vez de
+    copiar el contenedor entero al destino de un solo juego.
+
     Si `game.console == "gc"` el destino es el que arma `gc_dest_path`
     (estructura de Nintendont) y SIEMPRE se copia directo con
     `_copy_with_progress`: Nintendont lee ISO y CISO de GameCube tal cual,
@@ -967,6 +990,19 @@ def send_to_wbfs_drive(
     # dividir (si hiciera falta dividir, una copia plana no puede hacerlo:
     # hay que pasar por `wit COPY --split`).
     if game.fmt.upper() == "WBFS" and not (split and game.size_bytes >= _FAT32_SIZE_LIMIT_BYTES):
+        # `identify_file` solo mira el primer juego de un .wbfs (ver
+        # `wit_wrapper._find_id6_line`); si el contenedor tiene más de
+        # uno, copiarlo tal cual al destino de un solo juego produce un
+        # WBFS que ningún USB Loader va a reconocer como válido. Se
+        # verifica acá, justo antes del atajo de copia directa, en vez de
+        # confiar en que nadie mande un contenedor así -si `wit` no está
+        # disponible no hay forma de chequear esto, igual que `identify_file`
+        # tampoco podría haber identificado bien ese archivo.
+        if wit_wrapper.is_available(wit_binary):
+            contenido = wit_wrapper.list_wbfs_container(game.path, wit_binary)
+            if len(contenido) > 1:
+                raise MultiGameContainerError(game.path, contenido)
+
         # SIEMPRE por `_copy_with_progress`, aunque no haya progreso ni
         # cancelación que reportar: es el único camino que escribe en un
         # temporal y recién al final lo mueve encima del destino. La rama

@@ -243,6 +243,51 @@ def test_send_to_wbfs_drive_gc_nunca_divide_el_archivo(make_game, tmp_path, monk
     assert not destino.with_suffix(".wbf1").exists()
 
 
+# ------------------------------------------------- WBFS multi-juego --
+def test_send_to_wbfs_drive_wbfs_multi_juego_no_copia_directo(make_game, tmp_path, monkeypatch):
+    """Un .wbfs cuyo contenedor trae más de un juego no se puede copiar
+    tal cual al destino de un solo juego (wbfs/<ID6>/<ID6>.wbfs): eso es
+    justo lo que `identify_file` no detecta (solo mira el primer ID6, ver
+    `wit_wrapper._find_id6_line`), así que el chequeo tiene que pasar acá,
+    antes del atajo de copia directa."""
+    from wiibackup_manager.disc_header import DiscInfo
+
+    contenido = [
+        DiscInfo(game_id="RMCP01", title="Mario Kart Wii", source="wit"),
+        DiscInfo(game_id="RSBE01", title="Super Smash Bros. Brawl", source="wit"),
+    ]
+    monkeypatch.setattr(library.wit_wrapper, "is_available", lambda _binary: True)
+    monkeypatch.setattr(library.wit_wrapper, "list_wbfs_container",
+                        lambda _path, _binary: contenido)
+
+    juego = make_game(name="contenedor.wbfs", game_id="RMCP01",
+                      title="Mario Kart Wii", fmt="WBFS",
+                      contenido=b"contenedor multi-juego")
+
+    with pytest.raises(library.MultiGameContainerError):
+        library.send_to_wbfs_drive(juego, tmp_path)
+
+    assert not library.wbfs_dest_path(juego, tmp_path).exists()
+
+
+def test_send_to_wbfs_drive_wbfs_un_solo_juego_copia_directo(make_game, tmp_path, monkeypatch):
+    """Contraparte del test anterior: un contenedor de un solo juego sigue
+    yendo por el atajo de copia directa de siempre."""
+    from wiibackup_manager.disc_header import DiscInfo
+
+    contenido = [DiscInfo(game_id="RMCP01", title="Mario Kart Wii", source="wit")]
+    monkeypatch.setattr(library.wit_wrapper, "is_available", lambda _binary: True)
+    monkeypatch.setattr(library.wit_wrapper, "list_wbfs_container",
+                        lambda _path, _binary: contenido)
+
+    juego = make_game(name="juego.wbfs", game_id="RMCP01", title="Mario Kart Wii",
+                      fmt="WBFS", contenido=b"contenido de prueba wbfs")
+
+    destino = library.send_to_wbfs_drive(juego, tmp_path)
+
+    assert destino.read_bytes() == b"contenido de prueba wbfs"
+
+
 # ----------------------------------------------------------- Escaneo --
 def test_find_game_files_encuentra_por_extension(tmp_path):
     (tmp_path / "a.iso").write_bytes(b"x")

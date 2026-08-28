@@ -260,6 +260,15 @@ class CriticalMountError(FactoryModeError):
     ruta crítica del sistema operativo."""
 
 
+class StillMountedError(FactoryModeError):
+    """BLINDAJE 5: después de intentar desmontar todo, `device_path` (o
+    alguna de sus particiones) sigue apareciendo en /proc/mounts. Pasa,
+    por ejemplo, si `umount` falla en silencio por permisos insuficientes:
+    sin este chequeo, `mkfs.vfat` correría igual sobre un dispositivo con
+    una partición todavía montada, con riesgo de corromper los datos que
+    tenga esa partición."""
+
+
 def _device_name(device_path) -> str:
     """'/dev/sdb' -> 'sdb'. Nombre tal como aparece bajo /sys/block."""
     return Path(device_path).name
@@ -464,10 +473,11 @@ def check_no_critical_mounts(device: BlockDevice) -> None:
 
 def _unmount_all(device_path, *, run=subprocess.run) -> None:
     """Desmonta todo lo que esté montado de `device_path` o sus
-    particiones. Best-effort a propósito: si algo ya estaba desmontado no
-    es un error, y si `umount` falla de verdad (dispositivo ocupado) el
-    `mkfs.vfat` de después va a fallar igual, ruidosamente -no hay forma
-    de que un fallo acá termine en un formateo silencioso a medias."""
+    particiones. Best-effort: si algo ya estaba desmontado no es un
+    error, y si `umount` falla (dispositivo ocupado, permisos) esta
+    función no lo nota -quien llama es responsable de volver a consultar
+    /proc/mounts después (BLINDAJE 5, `StillMountedError` más abajo) en
+    vez de asumir que acá adentro quedó todo desmontado."""
     for origen, _punto in _mount_points_of(device_path):
         run(["umount", origen], capture_output=True, text=True, timeout=30)
 
@@ -505,7 +515,8 @@ def format_as_wii_usb(device: BlockDevice, *, run=subprocess.run,
     """Ejecuta el Modo Fábrica de verdad sobre `device`: re-corre los
     blindajes 3 y 4 (nunca se confía en un chequeo hecho en otro momento,
     ni siquiera uno hecho un segundo antes por quien llama), desmonta lo
-    que haya montado, formatea FAT32 vía `mkfs.vfat` y arma la estructura
+    que haya montado, confirma con el Blindaje 5 que ese desmontaje surtió
+    efecto de verdad, formatea FAT32 vía `mkfs.vfat` y arma la estructura
     de carpetas que esperan USB Loader GX / Nintendont.
 
     Pensada para correr en un hilo de fondo: no toca GTK ni nada de la
@@ -527,6 +538,15 @@ def format_as_wii_usb(device: BlockDevice, *, run=subprocess.run,
     check_no_critical_mounts(device)
 
     _unmount_all(device.path, run=run)
+
+    puntos_restantes = _mount_points_of(device.path)
+    if puntos_restantes:
+        raise StillMountedError(
+            f"{device.path} sigue teniendo algo montado en "
+            f"{', '.join(sorted(punto for _origen, punto in puntos_restantes))} "
+            "después de intentar desmontarlo (umount pudo haber fallado "
+            "por permisos u otro motivo). Se aborta el formateo por "
+            "seguridad.")
 
     prefijo = [] if os.geteuid() == 0 else ["pkexec"]
     resultado = run(
