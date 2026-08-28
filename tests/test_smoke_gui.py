@@ -54,7 +54,7 @@ def test_la_ventana_se_arma_y_se_muestra(gtk, tmp_path, monkeypatch):
     """Levanta la app entera y espera a que la ventana esté presentada."""
     from gi.repository import Adw, GLib
 
-    from wiibackup_manager import config
+    from wiibackup_manager import config, oscwii_client
     from wiibackup_manager.styles import load_css
     from wiibackup_manager.window import WiiBackupWindow
 
@@ -63,6 +63,12 @@ def test_la_ventana_se_arma_y_se_muestra(gtk, tmp_path, monkeypatch):
     monkeypatch.setattr(config.Settings, "load",
                         classmethod(lambda cls: config.Settings(
                             library_path=str(biblioteca))))
+    # La página Homebrew Store pide el catálogo de OSC apenas se construye
+    # (ver HomebrewStoreView._load_apps). Sin este parche, cada corrida del
+    # smoke test dispararía un pedido HTTP real contra oscwii.org -lento,
+    # dependiente de red, y que puede quedar corriendo en el pool
+    # compartido del módulo más allá de que este test ya haya terminado.
+    monkeypatch.setattr(oscwii_client, "fetch_apps_async", lambda on_done=None: None)
 
     resultado = {}
 
@@ -84,11 +90,12 @@ def test_la_ventana_se_arma_y_se_muestra(gtk, tmp_path, monkeypatch):
             try:
                 resultado["titulo"] = win.get_title()
                 resultado["visible"] = win.get_visible()
-                # Las 4 páginas del sidebar (Juegos/Cola de Tareas/Modo
-                # Fábrica/Ajustes) tienen que existir dentro del stack de
-                # contenido, cada una con su propia fila en el sidebar.
+                # Las 5 páginas del sidebar (Juegos/Cola de Tareas/Modo
+                # Fábrica/Homebrew Store/Ajustes) tienen que existir dentro
+                # del stack de contenido, cada una con su propia fila en el
+                # sidebar.
                 resultado["paginas"] = {
-                    pid for pid in ("juegos", "cola", "fabrica", "ajustes")
+                    pid for pid in ("juegos", "cola", "fabrica", "tienda", "ajustes")
                     if win._content_stack.get_child_by_name(pid) is not None
                 }
                 resultado["filas_sidebar"] = [pid for pid, _icon, _lbl in win._sidebar_items]
@@ -106,8 +113,8 @@ def test_la_ventana_se_arma_y_se_muestra(gtk, tmp_path, monkeypatch):
     assert not resultado.get("colgada"), "la app no terminó de arrancar"
     assert resultado.get("visible") is True
     assert "WiiBackup Manager" in resultado.get("titulo", "")
-    assert resultado.get("paginas") == {"juegos", "cola", "fabrica", "ajustes"}
-    assert resultado.get("filas_sidebar") == ["juegos", "cola", "fabrica", "ajustes"]
+    assert resultado.get("paginas") == {"juegos", "cola", "fabrica", "tienda", "ajustes"}
+    assert resultado.get("filas_sidebar") == ["juegos", "cola", "fabrica", "tienda", "ajustes"]
 
 
 def test_la_ventana_tambien_arranca_en_ingles(gtk, tmp_path, monkeypatch):
@@ -118,7 +125,7 @@ def test_la_ventana_tambien_arranca_en_ingles(gtk, tmp_path, monkeypatch):
 
     from gi.repository import Adw, GLib
 
-    from wiibackup_manager import config, i18n
+    from wiibackup_manager import config, i18n, oscwii_client
     from wiibackup_manager.styles import load_css
 
     locale_dir = Path(__file__).resolve().parent.parent / "data" / "locale"
@@ -128,8 +135,8 @@ def test_la_ventana_tambien_arranca_en_ingles(gtk, tmp_path, monkeypatch):
     # window.py importó `_` por valor, así que se parchea también ahí y en
     # los widgets que lo usan al construir la interfaz.
     from wiibackup_manager import window as window_mod
-    from wiibackup_manager.widgets import log_view, transfer_view
-    for mod in (window_mod, log_view, transfer_view):
+    from wiibackup_manager.widgets import homebrew_store_view, log_view, transfer_view
+    for mod in (window_mod, homebrew_store_view, log_view, transfer_view):
         monkeypatch.setattr(mod, "_", en.gettext)
 
     biblioteca = tmp_path / "biblioteca"
@@ -137,6 +144,9 @@ def test_la_ventana_tambien_arranca_en_ingles(gtk, tmp_path, monkeypatch):
     monkeypatch.setattr(config.Settings, "load",
                         classmethod(lambda cls: config.Settings(
                             library_path=str(biblioteca))))
+    # Ver el comentario equivalente en el test anterior: sin esto, este
+    # test también dispararía un pedido HTTP real contra oscwii.org.
+    monkeypatch.setattr(oscwii_client, "fetch_apps_async", lambda on_done=None: None)
 
     resultado = {}
 
@@ -153,7 +163,7 @@ def test_la_ventana_tambien_arranca_en_ingles(gtk, tmp_path, monkeypatch):
         def _revisar(self, win):
             try:
                 resultado["paginas"] = {
-                    pid for pid in ("juegos", "cola", "fabrica", "ajustes")
+                    pid for pid in ("juegos", "cola", "fabrica", "tienda", "ajustes")
                     if win._content_stack.get_child_by_name(pid) is not None
                 }
                 resultado["vacio"] = win.status_page.get_title()
@@ -169,5 +179,5 @@ def test_la_ventana_tambien_arranca_en_ingles(gtk, tmp_path, monkeypatch):
     App().run([])
 
     assert not resultado.get("colgada"), "la app no terminó de arrancar"
-    assert resultado.get("paginas") == {"juegos", "cola", "fabrica", "ajustes"}
+    assert resultado.get("paginas") == {"juegos", "cola", "fabrica", "tienda", "ajustes"}
     assert resultado.get("vacio") == "No games yet"

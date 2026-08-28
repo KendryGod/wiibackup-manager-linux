@@ -63,6 +63,7 @@ class OperationKind(Enum):
     TRANSFERRING = "Enviando a la unidad"
     DELETING = "Eliminando"
     RENAMING = "Renombrando"
+    INSTALLING_HOMEBREW = "Instalando homebrew"
 
     @property
     def label(self) -> str:

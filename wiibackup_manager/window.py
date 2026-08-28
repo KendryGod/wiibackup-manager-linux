@@ -45,6 +45,7 @@ SORT_OPTIONS = [
 from .library import Game
 from .widgets.game_detail_dialog import GameDetailDialog
 from .widgets.game_row import GameRow
+from .widgets.homebrew_store_view import HomebrewStoreView
 from .widgets.log_view import LogView
 from .widgets import gtk_helpers
 from .widgets.preferences_dialog import PreferencesDialog
@@ -153,6 +154,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self._build_juegos_page()
         self._build_cola_page()
         self._build_modo_fabrica_page()
+        self._build_homebrew_page()
         self._build_ajustes_page()
         self._build_sidebar()
 
@@ -181,6 +183,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             ("juegos", "applications-games-symbolic", _("Juegos")),
             ("cola", "emblem-synchronizing-symbolic", _("Cola de Tareas")),
             ("fabrica", "drive-removable-media-symbolic", _("Modo Fábrica")),
+            ("tienda", "system-software-install-symbolic", _("Homebrew Store")),
             ("ajustes", "emblem-system-symbolic", _("Ajustes")),
         ]
 
@@ -607,6 +610,21 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         # dejarla todavía seleccionada como si nada.
         self._refresh_factory_drives()
         return False
+
+    # -------------------------------------------------- Página: Homebrew Store --
+    def _build_homebrew_page(self):
+        toolbar_view = Adw.ToolbarView()
+        header = Adw.HeaderBar()
+        header.set_title_widget(Adw.WindowTitle(title=_("Homebrew Store")))
+        toolbar_view.add_top_bar(header)
+
+        # Mismo patrón que `TransferView`/`_build_cola_page`: toda la
+        # lógica (catálogo de OSC, descarga, verificación e instalación)
+        # vive en el widget, no acá.
+        self.homebrew_view = HomebrewStoreView(self.settings, self._show_toast, self.ops)
+        toolbar_view.set_content(self.homebrew_view)
+
+        self._content_stack.add_named(toolbar_view, "tienda")
 
     # ----------------------------------------------------------- Página: Ajustes --
     def _build_ajustes_page(self):
@@ -2496,6 +2514,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
     def _on_close_request(self, *_args) -> bool:
         self.transfer_view.shutdown()
+        self.homebrew_view.shutdown()
         return False  # False = seguir con el cierre normal
 
     def _show_toast(self, message: str):
