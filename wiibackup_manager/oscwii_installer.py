@@ -14,18 +14,21 @@ Flujo de `install_app`, en orden, y por qué:
    chequea el CRC de cada miembro): sin esto, un ZIP corrupto o truncado
    se extraería a medias y dejaría una app instalada a medio copiar.
 4. Validar CADA ruta interna del ZIP antes de extraer nada: tiene que
-   empezar con "apps/" (la convención real de Homebrew Channel, confirmada
-   bajando ZIPs reales - ver `oscwii_client`), no puede traer ".." ni ser
-   absoluta, y el destino resuelto tiene que quedar adentro de
-   `dest_root/apps`. Ningún archivo del ZIP puede ser un symlink (podría
-   apuntar afuera de `apps/` y hacer que una entrada posterior, ya
-   "adentro" según el nombre, en realidad escriba a través de él hacia
-   otro lado). Si UNA sola entrada no pasa, se aborta todo: no se extrae
-   nada, ni siquiera las entradas que sí eran seguras.
-5. Extraer SOLO a `dest_root/apps/`, copiando bytes (nunca ejecutando ni
-   el binario -.dol/.elf- ni ningún script) a un archivo temporal por
-   entrada y renombrándolo al final (mismo patrón atómico que
-   `gametdb._store_cover` y `config.write_text_atomic`).
+   empezar con una carpeta de primer nivel conocida y segura
+   (`_ALLOWED_TOP_LEVEL_DIRS`: "apps/" siempre, y "controllers/" para el
+   caso real de Nintendont -ver el comentario de esa constante-), no
+   puede traer ".." ni ser absoluta, y el destino resuelto tiene que
+   quedar adentro de esa carpeta permitida dentro de `dest_root`. Ningún
+   archivo del ZIP puede ser un symlink (podría apuntar afuera y hacer
+   que una entrada posterior, ya "adentro" según el nombre, en realidad
+   escriba a través de él hacia otro lado). Si UNA sola entrada no pasa,
+   se aborta todo: no se extrae nada, ni siquiera las entradas que sí
+   eran seguras.
+5. Extraer SOLO dentro de esas carpetas permitidas de `dest_root`,
+   copiando bytes (nunca ejecutando ni el binario -.dol/.elf- ni ningún
+   script) a un archivo temporal por entrada y renombrándolo al final
+   (mismo patrón atómico que `gametdb._store_cover` y
+   `config.write_text_atomic`).
 
 Nada de esto usa GLib: igual que `gametdb.py`, este módulo es agnóstico de
 la interfaz. `install_app` es una función sincrónica y bloqueante; quien
@@ -63,9 +66,19 @@ DOWNLOAD_CHUNK_SIZE = 256 * 1024
 MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 MAX_UNCOMPRESSED_TOTAL_BYTES = 512 * 1024 * 1024
 
-# Carpeta que debe contener, sí o sí, cada entrada del ZIP (ver el
-# comentario del módulo y el de `oscwii_client`).
-_REQUIRED_PREFIX = "apps/"
+# Carpetas de primer nivel donde SÍ se puede extraer. "apps" es la
+# convención general de Homebrew Channel (ver el comentario de
+# `oscwii_client`, confirmada bajando ZIPs reales). "controllers" se
+# agregó después de un caso real encontrado en el propio catálogo de
+# OSC: el ZIP de Nintendont (subdirectories, según la API:
+# ["/controllers", "/apps/Nintendont"]) trae perfiles de mandos HID en
+# una carpeta al mismo nivel que "apps", no adentro. Sin esta carpeta en
+# la lista, el ZIP de Nintendont se rechazaba ENTERO como "no seguro" y
+# la app nunca se podía instalar de verdad. Cualquier otra carpeta de
+# primer nivel que no esté acá se sigue rechazando: la protección
+# anti zip-slip de abajo (`_is_safe_member`) no se relaja, solo se le
+# suma un segundo destino válido conocido.
+_ALLOWED_TOP_LEVEL_DIRS = ("apps", "controllers")
 
 
 class InstallStatus(Enum):
@@ -196,36 +209,37 @@ def _verify_hash(app: HomebrewApp, computed_md5: str, computed_sha256: str) -> O
 
 
 # ------------------------------------------------- Validación del ZIP --
-def _is_safe_member(name: str, apps_dir: Path, dest_root: Path) -> bool:
+def _is_safe_member(name: str, dest_root: Path) -> bool:
     """True si la entrada `name` del ZIP puede extraerse sin escaparse de
-    `dest_root/apps`.
+    alguna de las carpetas de `_ALLOWED_TOP_LEVEL_DIRS` dentro de
+    `dest_root`.
 
-    Se combinan dos chequeos independientes a propósito: el del prefijo
-    de texto (rápido, y documenta la regla: "solo /apps/") y el de la ruta
-    resuelta (`resolve()` + contención), que es el que de verdad importa
-    para la seguridad y cubre casos que el primero solo no ve (p. ej.
-    componentes "." mezclados, o separadores repetidos)."""
+    Se combinan dos chequeos independientes a propósito: el del primer
+    componente de la ruta (rápido, y documenta la regla: "solo estas
+    carpetas de primer nivel") y el de la ruta resuelta (`resolve()` +
+    contención), que es el que de verdad importa para la seguridad y
+    cubre casos que el primero solo no ve (p. ej. componentes "."
+    mezclados, o separadores repetidos)."""
     normalized = name.replace("\\", "/")
     if not normalized or normalized.startswith("/"):
-        return False
-    if not normalized.startswith(_REQUIRED_PREFIX):
         return False
     pure = PurePosixPath(normalized)
     if pure.is_absolute():
         return False
     if ".." in pure.parts:
         return False
+    if not pure.parts or pure.parts[0] not in _ALLOWED_TOP_LEVEL_DIRS:
+        return False
 
     try:
         target = (dest_root / normalized).resolve()
-        apps_resolved = apps_dir.resolve()
+        allowed_root = (dest_root / pure.parts[0]).resolve()
     except OSError:
         return False
-    return target == apps_resolved or apps_resolved in target.parents
+    return target == allowed_root or allowed_root in target.parents
 
 
-def _validate_zip(zip_path: Path, apps_dir: Path,
-                  dest_root: Path) -> tuple:
+def _validate_zip(zip_path: Path, dest_root: Path) -> tuple:
     """Abre y valida el ZIP entero SIN extraer nada. Devuelve
     (zipfile.ZipFile, None, "") si todo salió bien -el ZipFile queda
     abierto y a cargo de quien llama cerrarlo- o (None, InstallStatus,
@@ -273,10 +287,11 @@ def _validate_zip(zip_path: Path, apps_dir: Path,
                     error = f"el ZIP contiene un symlink ({info.filename}), rechazado"
                     break
 
-                if not _is_safe_member(info.filename, apps_dir, dest_root):
+                if not _is_safe_member(info.filename, dest_root):
                     status = InstallStatus.UNSAFE_ZIP
-                    error = (f"entrada fuera de /apps/ en el ZIP "
-                            f"({info.filename}), rechazado")
+                    error = (f"entrada fuera de las carpetas permitidas "
+                            f"({', '.join(_ALLOWED_TOP_LEVEL_DIRS)}) en el "
+                            f"ZIP ({info.filename}), rechazado")
                     break
     except (zipfile.BadZipFile, OSError, EOFError) as e:
         status = InstallStatus.BAD_ZIP
@@ -311,12 +326,16 @@ def _extract_member(zf: zipfile.ZipFile, info: zipfile.ZipInfo,
 def install_app(app: HomebrewApp, dest_root: Path, *,
                 cancel_event: Optional[threading.Event] = None,
                 on_progress: Optional[ProgressCallback] = None) -> InstallResult:
-    """Descarga, verifica y extrae `app` a `dest_root/apps/`.
+    """Descarga, verifica y extrae `app` a `dest_root/`, respetando solo
+    las carpetas de primer nivel de `_ALLOWED_TOP_LEVEL_DIRS` (hoy "apps"
+    y "controllers"; ver el comentario de esa constante).
 
     `dest_root` es la raíz de la unidad de destino (la USB/SD ya
     preparada, o cualquier carpeta que el usuario haya confirmado): esta
-    función crea `dest_root/apps` si no existe, pero nunca escribe fuera
-    de ahí (ver el comentario del módulo).
+    función crea `dest_root/apps` si no existe -para fallar rápido si el
+    destino no es escribible, antes de gastar tiempo en la descarga-,
+    pero nunca escribe fuera de las carpetas permitidas (ver el
+    comentario del módulo).
 
     Nunca lanza: cualquier fallo -de red, de integridad, de espacio, de
     E/S- vuelve como un `InstallResult` con el `status` que corresponda,
@@ -324,9 +343,8 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
     revisa entre cada bloque descargado y entre cada archivo extraído."""
     try:
         dest_root = Path(dest_root)
-        apps_dir = dest_root / "apps"
         try:
-            apps_dir.mkdir(parents=True, exist_ok=True)
+            (dest_root / "apps").mkdir(parents=True, exist_ok=True)
         except OSError as e:
             return InstallResult(InstallStatus.IO_ERROR, app.slug, str(e))
 
@@ -344,7 +362,7 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
 
             _check_cancel(cancel_event)
 
-            zf, zip_status, zip_err = _validate_zip(tmp_zip, apps_dir, dest_root)
+            zf, zip_status, zip_err = _validate_zip(tmp_zip, dest_root)
             if zf is None:
                 return InstallResult(zip_status, app.slug, zip_err)
 

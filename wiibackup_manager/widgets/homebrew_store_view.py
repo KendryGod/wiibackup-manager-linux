@@ -22,7 +22,7 @@ gi.require_version("Adw", "1")
 gi.require_version("Pango", "1.0")
 from gi.repository import Adw, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
 
-from .. import drives, oscwii_client, oscwii_installer
+from .. import drives, golden_configs, oscwii_client, oscwii_installer
 from ..i18n import _
 from ..oscwii_client import HomebrewApp
 from ..oscwii_installer import InstallStatus
@@ -153,7 +153,7 @@ class HomebrewAppCard(Gtk.Box):
 
 
 class HomebrewStoreView(Gtk.Box):
-    def __init__(self, settings, show_toast_cb, ops=None):
+    def __init__(self, settings, show_toast_cb, ops=None, op_log=None):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.settings = settings
         self._show_toast = show_toast_cb
@@ -161,6 +161,12 @@ class HomebrewStoreView(Gtk.Box):
             from ..operations import OperationManager
             ops = OperationManager()
         self.ops = ops
+        # Historial de operaciones compartido con la ventana: es donde
+        # `golden_configs.maybe_apply` deja trazado cuándo se aplicó (o
+        # falló) una configuración maestra. Opcional -None en los tests
+        # que no necesitan ese rastro- para no obligar a construir un
+        # `OperationLog` real en cada prueba de esta vista.
+        self.op_log = op_log
 
         self._dest_choices: list = []  # [(etiqueta, Path), ...]
         self._dest_path: Optional[Path] = None
@@ -533,7 +539,15 @@ class HomebrewStoreView(Gtk.Box):
         def worker():
             result = oscwii_installer.install_app(
                 app, dest_root, cancel_event=cancel_event, on_progress=on_progress)
-            GLib.idle_add(self._on_install_done, app, result, op)
+            # Todavía en el hilo de fondo, a propósito: si `app.slug` no
+            # tiene ninguna config maestra registrada (la inmensa mayoría
+            # del catálogo), `maybe_apply` vuelve en el acto sin tocar
+            # disco ni log. Cuando sí aplica, es una copia chica (un
+            # archivo, no un ZIP entero) y no vale la pena otro salto de
+            # hilo solo para eso.
+            golden_result = golden_configs.maybe_apply(
+                app, dest_root, result, op_log=self.op_log)
+            GLib.idle_add(self._on_install_done, app, result, op, golden_result)
 
         threading.Thread(target=worker, daemon=True,
                          name=f"oscwii-install-{app.slug}").start()
@@ -562,7 +576,7 @@ class HomebrewStoreView(Gtk.Box):
             self._apply_install_state(card, state)
         return False
 
-    def _on_install_done(self, app: HomebrewApp, result, op) -> bool:
+    def _on_install_done(self, app: HomebrewApp, result, op, golden_result=None) -> bool:
         self.ops.finish(op)
 
         if result.ok:
@@ -571,6 +585,19 @@ class HomebrewStoreView(Gtk.Box):
             self._show_toast(
                 _("'{name}' instalada ({n} archivo(s)).")
                 .format(name=app.name, n=len(result.installed_paths)))
+            # Aviso aparte: la app en sí se instaló bien de todos modos,
+            # así que un problema acá no cambia el estado de la tarjeta
+            # (`state` sigue siendo DONE) -solo se le suma un segundo
+            # toast explicando qué pasó con la config maestra.
+            if golden_result is not None and golden_result.status.is_error:
+                self._show_toast(
+                    _("'{name}' se instaló, pero no se pudo aplicar su "
+                      "configuración maestra: {detail}")
+                    .format(name=app.name, detail=golden_result.error))
+            elif golden_result is not None and golden_result.applied:
+                self._show_toast(
+                    _("Se aplicó la configuración maestra de '{name}'.")
+                    .format(name=app.name))
         elif result.status is InstallStatus.CANCELLED:
             state = _InstallState(kind=_CardState.IDLE)
             self._show_toast(_("Instalación de '{name}' cancelada.").format(name=app.name))

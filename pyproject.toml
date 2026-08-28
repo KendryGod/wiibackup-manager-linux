@@ -38,3 +38,11 @@ include = ["wiibackup_manager*"]
 "share/icons/hicolor/128x128/apps" = ["data/icons/hicolor/128x128/apps/com.gamefixsps.WiiBackupManager.png"]
 "share/icons/hicolor/256x256/apps" = ["data/icons/hicolor/256x256/apps/com.gamefixsps.WiiBackupManager.png"]
 "share/icons/hicolor/512x512/apps" = ["data/icons/hicolor/512x512/apps/com.gamefixsps.WiiBackupManager.png"]
+# Configuraciones maestras ("Golden Configs") que golden_configs.py copia
+# a la unidad de destino después de instalar ciertas apps de homebrew
+# puntuales desde la Homebrew Store. Van en assets/ (no en data/) porque
+# no son un recurso de la interfaz de esta app sino contenido de terceros
+# (formatos de USB Loader GX / Nintendont) que se redistribuye tal cual;
+# `golden_configs._candidate_asset_dirs` sabe encontrarlas acá instaladas.
+"share/wiibackup-manager/configs/usbloadergx" = ["assets/configs/usbloadergx/GXGlobal.cfg"]
+"share/wiibackup-manager/configs/nintendont" = ["assets/configs/nintendont/nincfg.bin"]

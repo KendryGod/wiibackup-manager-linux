@@ -621,7 +621,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         # Mismo patrón que `TransferView`/`_build_cola_page`: toda la
         # lógica (catálogo de OSC, descarga, verificación e instalación)
         # vive en el widget, no acá.
-        self.homebrew_view = HomebrewStoreView(self.settings, self._show_toast, self.ops)
+        self.homebrew_view = HomebrewStoreView(self.settings, self._show_toast,
+                                               self.ops, self.op_log)
         toolbar_view.set_content(self.homebrew_view)
 
         self._content_stack.add_named(toolbar_view, "tienda")
