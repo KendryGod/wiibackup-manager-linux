@@ -419,6 +419,28 @@ def mounted_critical_paths(device_path) -> list[str]:
             if patron.match(origen) and punto in CRITICAL_MOUNTPOINTS]
 
 
+def is_critical_system_path(path) -> bool:
+    """¿`path`, resuelto a ruta absoluta real, es uno de los puntos de
+    montaje críticos del sistema operativo (`CRITICAL_MOUNTPOINTS`)?
+
+    Mismo criterio que usa el BLINDAJE 4 para decidir si una partición
+    montada es peligrosa, pero aplicado directo a una ruta de destino en
+    vez de a lo que reporte /proc/mounts: así, cualquier función que
+    reciba una carpeta de destino de quien la llame (no solo Modo
+    Fábrica, ver `oscwii_installer.install_app`) puede protegerse a sí
+    misma reusando la misma lista de rutas críticas, en vez de mantener
+    una copia propia que se puede desactualizar.
+
+    Si `path` no se puede resolver (no existe, symlink roto), se compara
+    la ruta tal cual la pasaron: no poder confirmar dónde apunta de
+    verdad no es motivo para asumir que es segura."""
+    try:
+        resolved = Path(path).resolve()
+    except OSError:
+        resolved = Path(path)
+    return str(resolved) in CRITICAL_MOUNTPOINTS
+
+
 def _mount_points_of(device_path) -> list[tuple[str, str]]:
     """[(origen, punto_de_montaje), ...] de TODO lo que esté montado de
     `device_path` o sus particiones (no solo lo crítico): es lo que hay

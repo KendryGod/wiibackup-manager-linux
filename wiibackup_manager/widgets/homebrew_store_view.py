@@ -92,6 +92,7 @@ _INSTALL_STATUS_LABELS = {
     InstallStatus.HASH_MISMATCH: _("El archivo no coincide con lo esperado"),
     InstallStatus.BAD_ZIP: _("El archivo descargado está dañado"),
     InstallStatus.UNSAFE_ZIP: _("El paquete no es seguro para instalar"),
+    InstallStatus.UNSAFE_DEST_ROOT: _("El destino elegido no es válido"),
     InstallStatus.NO_SPACE: _("No hay espacio suficiente en el destino"),
     InstallStatus.IO_ERROR: _("Error al escribir en el destino"),
 }

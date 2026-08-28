@@ -13,6 +13,7 @@ from __future__ import annotations
 import zipfile
 
 from wiibackup_manager import oscwii_installer
+from wiibackup_manager.oscwii_client import HomebrewApp
 from wiibackup_manager.oscwii_installer import InstallStatus
 
 
@@ -90,3 +91,58 @@ def test_validate_zip_rechaza_entrada_fuera_de_lo_permitido(tmp_path):
     assert zf is None
     assert status is InstallStatus.UNSAFE_ZIP
     assert "otra_carpeta" in err
+
+
+# ----------------------------------------------------------- install_app --
+def _fake_app(**overrides) -> HomebrewApp:
+    kwargs = dict(slug="TestApp", name="Test App",
+                 zip_url="https://hbb1.oscwii.org/api/contents/TestApp/TestApp.zip")
+    kwargs.update(overrides)
+    return HomebrewApp(**kwargs)
+
+
+def test_install_app_rechaza_dest_root_critico(tmp_path, monkeypatch):
+    """Defensa en profundidad (Blindaje 4 reusado): aunque hoy la UI nunca
+    deje elegir una ruta crítica del sistema como destino, `install_app`
+    tiene que rechazarla por su cuenta si algún día se la llama desde
+    otro lugar sin ese filtro. Se simula la ruta crítica con
+    `drives.CRITICAL_MOUNTPOINTS` (en vez de apuntar a "/" de verdad) para
+    no depender de -ni arriesgar- el sistema real que corre la prueba."""
+    monkeypatch.setattr(oscwii_installer.drives, "CRITICAL_MOUNTPOINTS",
+                        frozenset({str(tmp_path)}))
+
+    def _no_deberia_descargar(*_a, **_k):
+        raise AssertionError(
+            "install_app no debería llegar a descargar nada si dest_root "
+            "ya se rechazó por ser una ruta crítica")
+    monkeypatch.setattr(oscwii_installer, "_download_zip", _no_deberia_descargar)
+
+    result = oscwii_installer.install_app(_fake_app(), tmp_path)
+
+    assert not result.ok
+    assert result.status is InstallStatus.UNSAFE_DEST_ROOT
+    assert not (tmp_path / "apps").exists()
+
+
+def test_install_app_con_destino_valido_instala_normal(tmp_path, monkeypatch):
+    """No-regresión: un destino normal (no crítico) sigue instalando la
+    app como siempre, atravesando la validación nueva sin que interfiera."""
+    dest_root = tmp_path / "usb"
+    dest_root.mkdir()
+
+    zip_entries = {
+        "apps/TestApp/boot.dol": b"A" * 100,
+        "apps/TestApp/meta.xml": b"<app/>",
+    }
+
+    def _fake_download_zip(app, dest_path, cancel_event, on_progress):
+        _make_zip(dest_path, zip_entries)
+        return True, "", "d41d8cd98f00b204e9800998ecf8427e", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    monkeypatch.setattr(oscwii_installer, "_download_zip", _fake_download_zip)
+
+    result = oscwii_installer.install_app(_fake_app(), dest_root)
+
+    assert result.ok, result.error
+    assert result.status is InstallStatus.OK
+    assert (dest_root / "apps" / "TestApp" / "boot.dol").read_bytes() == b"A" * 100
+    assert (dest_root / "apps" / "TestApp" / "meta.xml").read_bytes() == b"<app/>"

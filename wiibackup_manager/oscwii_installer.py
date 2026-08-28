@@ -52,7 +52,7 @@ from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
 
-from . import library
+from . import drives, library
 from .oscwii_client import HomebrewApp
 
 REQUEST_TIMEOUT = 20
@@ -87,6 +87,7 @@ class InstallStatus(Enum):
     HASH_MISMATCH = "hash_mismatch"
     BAD_ZIP = "bad_zip"
     UNSAFE_ZIP = "unsafe_zip"
+    UNSAFE_DEST_ROOT = "unsafe_dest_root"
     NO_SPACE = "no_space"
     IO_ERROR = "io_error"
     CANCELLED = "cancelled"
@@ -332,10 +333,12 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
 
     `dest_root` es la raíz de la unidad de destino (la USB/SD ya
     preparada, o cualquier carpeta que el usuario haya confirmado): esta
-    función crea `dest_root/apps` si no existe -para fallar rápido si el
-    destino no es escribible, antes de gastar tiempo en la descarga-,
-    pero nunca escribe fuera de las carpetas permitidas (ver el
-    comentario del módulo).
+    función rechaza `dest_root` de entrada si es una ruta crítica del
+    sistema operativo (`drives.is_critical_system_path`, mismo criterio
+    que el BLINDAJE 4 de Modo Fábrica), crea `dest_root/apps` si no
+    existe -para fallar rápido si el destino no es escribible, antes de
+    gastar tiempo en la descarga-, y nunca escribe fuera de las carpetas
+    permitidas (ver el comentario del módulo).
 
     Nunca lanza: cualquier fallo -de red, de integridad, de espacio, de
     E/S- vuelve como un `InstallResult` con el `status` que corresponda,
@@ -343,6 +346,19 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
     revisa entre cada bloque descargado y entre cada archivo extraído."""
     try:
         dest_root = Path(dest_root)
+
+        # Defensa en profundidad: hoy la UI (Homebrew Store) solo deja
+        # elegir unidades removibles o una carpeta confirmada a mano, así
+        # que este caso no debería poder darse en la práctica. Pero esta
+        # función no tiene por qué confiar en eso -mismo espíritu que
+        # `drives.check_no_critical_mounts` para Modo Fábrica- por si el
+        # día de mañana se llama desde otro lugar sin ese filtro.
+        if drives.is_critical_system_path(dest_root):
+            return InstallResult(
+                InstallStatus.UNSAFE_DEST_ROOT, app.slug,
+                f"{dest_root} es una ruta crítica del sistema operativo, "
+                "se rechaza como destino de instalación")
+
         try:
             (dest_root / "apps").mkdir(parents=True, exist_ok=True)
         except OSError as e:
