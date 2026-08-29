@@ -6,7 +6,8 @@ del header de un disco de Wii o GameCube está documentado, es el mismo
 para las dos consolas salvo el magic word, y no cambia entre juegos:
 
     offset 0x00 .. 0x06   -> Game ID (6 bytes ASCII, ej. "RMCE01"/"GZ2E01")
-    offset 0x06           -> número de disco (0 = disco 1, 1 = disco 2, ...)
+    offset 0x06           -> número de disco (0 = disco 1, 1 = disco 2;
+                             ver `MAX_DISC_NUMBER`: no hay un tercero)
     offset 0x07           -> versión del disco
     offset 0x18 .. 0x1C   -> magic word de disco Wii  = 0x5D1C9EA3
     offset 0x1C .. 0x20   -> magic word de disco GameCube = 0xC2339F3D
@@ -86,7 +87,33 @@ class DiscInfo:
     title: str
     source: str  # "iso" | "wit"
     console: str = "wii"  # "wii" | "gc"
-    disc_number: int = 0  # 0 = disco 1, 1 = disco 2, ... (offset 0x06)
+    disc_number: int = 0  # 0 = disco 1, 1 = disco 2 (offset 0x06); no hay más
+
+
+# Número de disco: 0 = disco 1, 1 = disco 2, y NADA MÁS. Nintendo nunca
+# publicó un juego de más de dos discos -ni en GameCube, que es donde la
+# app usa este dato (`library.gc_dest_path` arma "disc2.iso" para el
+# segundo), ni en Wii-, así que cualquier otro valor en el offset 0x06 es
+# un header corrupto o un archivo que no es lo que dice ser.
+#
+# Antes se aceptaba cualquier valor menor que 8, que era un tope
+# arbitrario sin nada detrás: un 2 se tomaba como válido y terminaba
+# armando un "disc3.iso" que Nintendont no busca ni podría usar.
+MAX_DISC_NUMBER = 1
+
+
+def _disc_number_or_first(value: int) -> int:
+    """Aplica la política de arriba: `value` si es un número de disco que
+    existe de verdad, y disco 1 (0) si no.
+
+    Se cae a disco 1 en vez de rechazar el archivo entero por el mismo
+    criterio que ya usa este módulo para todo lo dudoso: un byte raro en
+    el offset 0x06 no invalida el resto del header -el Game ID y el magic
+    word pueden estar perfectos- y dejar el juego sin identificar por eso
+    sería peor que asumir lo que vale para la enorme mayoría de los
+    juegos, que no son multidisco. Lo que NO puede pasar es que ese valor
+    llegue tal cual a formar parte de un nombre de archivo."""
+    return value if 0 <= value <= MAX_DISC_NUMBER else 0
 
 
 def read_plain_iso_header(path: Path) -> Optional[DiscInfo]:
@@ -122,11 +149,7 @@ def read_plain_iso_header(path: Path) -> Optional[DiscInfo]:
         return None
     game_id = validate_game_id(game_id)
 
-    # Nintendo nunca sacó un disco más allá del segundo: un valor más alto
-    # acá es un header corrupto (o un archivo que no es lo que dice ser), y
-    # confiarlo ciegamente terminaría armando un nombre de archivo
-    # "discN.ext" sin sentido. Ante la duda, se trata como disco 1.
-    disc_number = data[DISC_NUMBER_OFFSET] if data[DISC_NUMBER_OFFSET] < 8 else 0
+    disc_number = _disc_number_or_first(data[DISC_NUMBER_OFFSET])
 
     title_raw = data[HEADER_TITLE_OFFSET:HEADER_TITLE_OFFSET + HEADER_TITLE_MAX_LEN]
     title = title_raw.split(b"\x00", 1)[0].decode("ascii", errors="replace").strip()
@@ -164,11 +187,12 @@ CISO_BLOCK_MAP_OFFSET = 8
 
 
 def read_ciso_disc_number(path: Path) -> int:
-    """Número de disco (0 = disco 1, 1 = disco 2, ...) leído directo de un
+    """Número de disco (0 = disco 1, 1 = disco 2) leído directo de un
     .ciso, o 0 si el archivo no es un CISO reconocible, el bloque 0 no
-    está presente, o cualquier otra cosa no cierra. 0 (disco 1) es el
-    respaldo correcto: es lo que vale para la enorme mayoría de los
-    juegos, que no son multidisco."""
+    está presente, el valor no es un número de disco que exista
+    (`_disc_number_or_first`), o cualquier otra cosa no cierra. 0 (disco
+    1) es el respaldo correcto: es lo que vale para la enorme mayoría de
+    los juegos, que no son multidisco."""
     try:
         with open(path, "rb") as f:
             header = f.read(CISO_HEADER_SIZE)
@@ -190,5 +214,4 @@ def read_ciso_disc_number(path: Path) -> int:
         return 0
     if not raw:
         return 0
-    value = raw[0]
-    return value if value < 8 else 0
+    return _disc_number_or_first(raw[0])

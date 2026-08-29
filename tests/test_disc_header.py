@@ -171,3 +171,55 @@ def test_ciso_truncado_no_revienta(tmp_path):
 
 def test_ciso_inexistente_da_cero(tmp_path):
     assert read_ciso_disc_number(tmp_path / "no-existe.ciso") == 0
+
+
+# --------------------------------------------- Política de nº de disco --
+# 0 = disco 1, 1 = disco 2, y nada más: Nintendo nunca publicó un juego de
+# tres discos. Antes se aceptaba cualquier valor menor que 8, así que un
+# header con un 2 armaba un "disc3.iso" que Nintendont no busca (ver
+# `library.gc_dest_path`).
+@pytest.mark.parametrize("crudo, esperado", [
+    (0, 0),    # disco 1
+    (1, 1),    # disco 2, el máximo que existe
+    (2, 0),    # el caso del hallazgo: antes pasaba como "disco 3"
+    (7, 0),    # también pasaba: era el límite viejo (< 8)
+    (8, 0),
+    (250, 0),
+])
+def test_politica_de_numero_de_disco_en_iso_plana(tmp_path, iso_bytes,
+                                                  crudo, esperado):
+    iso = tmp_path / "juego.iso"
+    iso.write_bytes(iso_bytes(game_id=b"GZ2E01", console="gc", disc_number=crudo))
+    info = read_plain_iso_header(iso)
+    assert info is not None
+    assert info.disc_number == esperado
+
+
+@pytest.mark.parametrize("crudo, esperado", [
+    (0, 0), (1, 1), (2, 0), (7, 0), (8, 0), (250, 0),
+])
+def test_politica_de_numero_de_disco_en_ciso(tmp_path, crudo, esperado):
+    ciso = tmp_path / "juego.ciso"
+    ciso.write_bytes(_ciso_bytes(disc_number=crudo))
+    assert read_ciso_disc_number(ciso) == esperado
+
+
+def test_un_numero_de_disco_corrupto_no_arma_un_disc3(tmp_path, iso_bytes):
+    """El efecto concreto que el hallazgo describía: la ruta de destino de
+    Nintendont. Con un 2 en el offset 0x06, el archivo tiene que caer como
+    el disco 1 de su carpeta y no como un tercer disco inexistente."""
+    from wiibackup_manager import library
+
+    iso = tmp_path / "juego.iso"
+    iso.write_bytes(iso_bytes(game_id=b"GZ2E01", title=b"ZELDA", console="gc",
+                              disc_number=2))
+    info = read_plain_iso_header(iso)
+
+    juego = library.Game(path=iso, game_id=info.game_id, title=info.title,
+                         fmt="ISO", size_bytes=iso.stat().st_size,
+                         identified_by="iso", console="gc",
+                         disc_number=info.disc_number)
+    destino = library.gc_dest_path(juego, tmp_path / "usb")
+
+    assert destino.name == "game.iso"
+    assert "disc3" not in str(destino)
