@@ -4,7 +4,16 @@ Flujo de `install_app`, en orden, y por qué:
 
 1. Descargar el ZIP a un directorio temporal (fuera del destino elegido:
    la USB/SD ya preparada por Modo Fábrica, o cualquier carpeta que el
-   usuario confirme). Nada de esto toca el destino todavía.
+   usuario confirme). Nada de esto toca el destino todavía. La descarga
+   va por `oscwii_client.open_allowlisted`: antes de abrir siquiera el
+   socket se exige que la URL sea https y apunte a un host de la lista
+   blanca (`oscwii_client.ALLOWED_DOWNLOAD_HOSTS`), y cada redirección
+   se valida igual antes de seguirla. La URL sale del catálogo de la
+   API, que es contenido de red, y a ese contenido no se le delega desde
+   qué dominio se baja lo que después se instala. La lista vive en
+   `oscwii_client` -no acá- porque las URLs de ícono que baja ese mismo
+   módulo salen del mismo catálogo y tienen que pasar por el mismo
+   filtro: una sola lista, no dos que se desincronizan.
 2. Verificar el hash contra el que traiga la API (`HomebrewApp.zip_sha256`
    / `zip_md5`), si trae alguno. Hoy la API v3 de OSC no expone ningún
    hash (ver el comentario de `oscwii_client`), así que este paso no hace
@@ -24,6 +33,14 @@ Flujo de `install_app`, en orden, y por qué:
    escriba a través de él hacia otro lado). Si UNA sola entrada no pasa,
    se aborta todo: no se extrae nada, ni siquiera las entradas que sí
    eran seguras.
+   Además, dos entradas tampoco pueden colisionar ENTRE SÍ vistas como
+   las ve el destino real, que es FAT32/exFAT y no distingue mayúsculas:
+   "apps/Foo/meta.xml" y "apps/Foo/META.XML" son dos archivos distintos
+   acá y uno solo allá -el segundo pisaría al primero en silencio, así
+   que lo instalado no sería lo que el catálogo dice-. Tampoco puede una
+   ruta ser un archivo y otra necesitar ese mismo nombre como carpeta.
+   Cualquiera de las dos cosas rechaza el ZIP entero
+   (`_check_name_collisions`).
 5. Extraer SOLO dentro de esas carpetas permitidas de `dest_root`. Cada
    ZIP toca una o más "unidades" -una subcarpeta de primer nivel dentro
    de una carpeta permitida, típicamente `apps/<NombreDeLaApp>`- y cada
@@ -69,7 +86,6 @@ import stat
 import tempfile
 import threading
 import urllib.error
-import urllib.request
 import zipfile
 from dataclasses import dataclass
 from enum import Enum
@@ -78,7 +94,8 @@ from typing import Callable, Optional
 
 from . import drives, library
 from .fsutil import atomic_target
-from .oscwii_client import HomebrewApp
+from .oscwii_client import (HomebrewApp, UnsafeDownloadURL,
+                            open_allowlisted, url_rejection_reason)
 
 REQUEST_TIMEOUT = 20
 DOWNLOAD_CHUNK_SIZE = 256 * 1024
@@ -112,6 +129,11 @@ class InstallStatus(Enum):
     HASH_MISMATCH = "hash_mismatch"
     BAD_ZIP = "bad_zip"
     UNSAFE_ZIP = "unsafe_zip"
+    # La URL de descarga (la del catálogo, o el destino de una
+    # redirección) no pasó la lista blanca de esquema/host. Distinto de
+    # `DOWNLOAD_ERROR`: no es que la descarga haya fallado, es que ni
+    # siquiera se intentó porque el catálogo apuntaba a otro lado.
+    UNSAFE_URL = "unsafe_url"
     UNSAFE_DEST_ROOT = "unsafe_dest_root"
     NO_SPACE = "no_space"
     IO_ERROR = "io_error"
@@ -176,14 +198,18 @@ def _download_zip(app: HomebrewApp, dest_path: Path,
     """Descarga `app.zip_url` a `dest_path`, calculando md5 y sha256 al
     vuelo (una sola pasada por los bytes, sirve para lo que sea que la API
     haya provisto). Devuelve (True, "", md5_hex, sha256_hex) o
-    (False, motivo, "", ""); nunca lanza salvo `CancelRequested`, que se
-    deja propagar para que `install_app` la distinga de un error real."""
+    (False, motivo, "", ""); nunca lanza salvo `CancelRequested` y
+    `UnsafeDownloadURL`, que se dejan propagar para que `install_app` las
+    distinga de un error de red común."""
     md5 = hashlib.md5()
     sha256 = hashlib.sha256()
     try:
-        req = urllib.request.Request(
-            app.zip_url, headers={"User-Agent": "wiibackup-manager-linux"})
-        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+        # `open_allowlisted` valida la URL antes de abrir el socket (o
+        # sea, antes de tocar `dest_path`), valida cada redirección antes
+        # de seguirla y valida también la URL final: nada de lo que se
+        # escribe acá puede venir de un host que no esté en la lista.
+        with open_allowlisted(app.zip_url, REQUEST_TIMEOUT,
+                              "la URL de descarga del catálogo") as resp:
             if resp.status != 200:
                 return False, f"status HTTP {resp.status}", "", ""
 
@@ -271,6 +297,83 @@ def _is_safe_member(name: str, dest_root: Path) -> bool:
     return target == allowed_root or allowed_root in target.parents
 
 
+def _normalized_member_path(name: str) -> str:
+    """Ruta de una entrada del ZIP en la forma canónica que se usa para
+    compararla con las demás: separadores "/" (los ZIP de Windows pueden
+    traer "\\"), sin componentes vacíos ni ".", y sin la "/" final que
+    marca a las carpetas. Devuelve "" si no queda nada."""
+    partes = [p for p in name.replace("\\", "/").split("/") if p and p != "."]
+    return "/".join(partes)
+
+
+def _check_name_collisions(infos: list) -> Optional[str]:
+    """Busca dos entradas del ZIP que terminarían siendo LA MISMA cosa en
+    el destino. Devuelve el motivo del rechazo, o None si no hay ninguna.
+
+    Dos casos, y los dos rechazan el ZIP entero (no solo la entrada
+    repetida: si el paquete es ambiguo, no hay forma de saber cuál de las
+    dos versiones era la que el catálogo decía instalar):
+
+    1. Colisión de nombres sin distinguir mayúsculas. El destino real es
+       una SD/USB con FAT32 o exFAT, que no las distingue:
+       "apps/Foo/meta.xml" y "apps/Foo/META.XML" son dos entradas
+       distintas para `zipfile` -y para Linux- pero un solo archivo allá,
+       y la segunda pisaría a la primera sin que nada lo avise. Lo mismo
+       vale entre carpetas ("apps/Foo" y "apps/foo" son una sola unidad
+       en el destino, y `_stage_and_swap_unit` instalaría una encima de
+       la otra). La comparación usa `casefold()`, que es el plegado de
+       mayúsculas pensado para comparar, no `lower()`.
+    2. Conflicto archivo/carpeta: una entrada es el archivo "apps/foo" y
+       otra necesita que "apps/foo" sea una carpeta (p. ej. la entrada
+       "apps/foo/bar"). No es un choque de nombres sino de estructura, y
+       en el destino tampoco puede existir de las dos formas a la vez.
+
+    También cuenta como colisión que la MISMA ruta aparezca dos veces
+    como archivo: un ZIP puede traer entradas duplicadas, y quien lo lea
+    después se queda con una u otra según la implementación -otra vez,
+    contenido ambiguo-. Los duplicados de carpeta no son ambiguos (una
+    carpeta no tiene contenido propio) y se aceptan: son inevitables,
+    porque toda ruta implica a sus carpetas padre."""
+    # clave normalizada -> (ruta tal como quedó normalizada, es_carpeta)
+    vistos: dict = {}
+
+    def _registrar(ruta: str, es_carpeta: bool) -> Optional[str]:
+        clave = ruta.casefold()
+        previa = vistos.get(clave)
+        if previa is None:
+            vistos[clave] = (ruta, es_carpeta)
+            return None
+        ruta_previa, previa_es_carpeta = previa
+        if previa_es_carpeta != es_carpeta:
+            archivo = ruta_previa if not previa_es_carpeta else ruta
+            carpeta = ruta if not previa_es_carpeta else ruta_previa
+            return (f'"{archivo}" es un archivo y "{carpeta}" necesita ese '
+                    f"mismo nombre como carpeta")
+        if ruta_previa != ruta:
+            return (f'"{ruta_previa}" y "{ruta}" son el mismo nombre en el '
+                    f"destino (FAT32/exFAT no distingue mayúsculas)")
+        if not es_carpeta:
+            return f'"{ruta}" aparece dos veces en el ZIP'
+        return None
+
+    for info in infos:
+        ruta = _normalized_member_path(info.filename)
+        if not ruta:
+            continue
+        partes = ruta.split("/")
+        # Cada carpeta padre de la entrada, aunque el ZIP no traiga una
+        # entrada propia para ella: es lo que hay que crear en el destino
+        # para poder escribir esta ruta.
+        for i in range(1, len(partes)):
+            motivo = _registrar("/".join(partes[:i]), True)
+            if motivo is not None:
+                return motivo
+        motivo = _registrar(ruta, info.is_dir())
+        if motivo is not None:
+            return motivo
+    return None
+
+
 def _validate_zip(zip_path: Path, dest_root: Path) -> tuple:
     """Abre y valida el ZIP entero SIN extraer nada. Devuelve
     (zipfile.ZipFile, None, "") si todo salió bien -el ZipFile queda
@@ -325,6 +428,18 @@ def _validate_zip(zip_path: Path, dest_root: Path) -> tuple:
                             f"({', '.join(_ALLOWED_TOP_LEVEL_DIRS)}) en el "
                             f"ZIP ({info.filename}), rechazado")
                     break
+
+            # Recién con todas las entradas validadas de a una tiene
+            # sentido mirarlas entre sí: dos rutas que por separado son
+            # seguras pueden ser la misma cosa en el destino. Se hace
+            # sobre `infolist()` completo -carpetas incluidas- porque el
+            # conflicto puede estar justo entre un archivo y una carpeta.
+            if status is None:
+                motivo = _check_name_collisions(zf.infolist())
+                if motivo is not None:
+                    status = InstallStatus.UNSAFE_ZIP
+                    error = (f"el ZIP tiene entradas que colisionan en el "
+                            f"destino: {motivo}; rechazado")
     except (zipfile.BadZipFile, OSError, EOFError) as e:
         status = InstallStatus.BAD_ZIP
         error = f"el ZIP está corrupto o truncado ({e})"
@@ -516,6 +631,19 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
                 f"{dest_root} es una ruta crítica del sistema operativo, "
                 "se rechaza como destino de instalación")
 
+        # Antes de crear nada en el destino: si la URL que trae el
+        # catálogo no está en la lista blanca, esta instalación no va a
+        # pasar de acá, así que no tiene por qué dejar rastro en la
+        # unidad del usuario. `_download_zip` vuelve a chequearlo por su
+        # cuenta -es la que abre el socket- y además valida cada
+        # redirección.
+        url_err = url_rejection_reason(app.zip_url)
+        if url_err is not None:
+            return InstallResult(
+                InstallStatus.UNSAFE_URL, app.slug,
+                f"la URL de descarga de la app fue rechazada: {url_err} "
+                f"({app.zip_url})")
+
         try:
             (dest_root / "apps").mkdir(parents=True, exist_ok=True)
         except OSError as e:
@@ -579,6 +707,12 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
     except CancelRequested:
         return InstallResult(InstallStatus.CANCELLED, app.slug,
                              "instalación cancelada")
+    except UnsafeDownloadURL as e:
+        # Sale de `_download_zip` (o de una redirección rechazada a mitad
+        # de la descarga): la app no se instaló y nada del destino se
+        # tocó, pero el motivo no es un fallo de red común y se reporta
+        # distinto.
+        return InstallResult(InstallStatus.UNSAFE_URL, app.slug, str(e))
     except library.RollbackFailedError as e:
         # Caso grave: la instalación falló Y ADEMÁS no se pudo devolver
         # la versión anterior a su lugar (ver `_stage_and_swap_unit`).

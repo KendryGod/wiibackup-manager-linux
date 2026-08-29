@@ -177,3 +177,147 @@ def test_extraccion_cortada_no_deja_temporales_en_la_unidad(tmp_path, monkeypatc
 
     quedaron = list((dest_root / "apps" / "TestApp").iterdir())
     assert quedaron == [], f"quedaron temporales huérfanos: {quedaron}"
+
+
+# ---------------------------------------------- Colisiones de nombres --
+# El destino real de una instalación es una SD/USB con FAT32 o exFAT, que
+# NO distingue mayúsculas. Dos entradas que en Linux son dos archivos
+# distintos pueden ser una sola allá, y la segunda pisa a la primera sin
+# que nada lo avise: lo que queda instalado no es lo que el catálogo dice.
+# Todo el ZIP se rechaza, no solo la entrada repetida.
+def test_validate_zip_rechaza_colision_de_mayusculas_en_archivos(tmp_path):
+    zip_path = tmp_path / "colision.zip"
+    _make_zip(zip_path, {
+        "apps/Foo/boot.dol": b"A" * 10,
+        "apps/Foo/meta.xml": b"<app>bueno</app>",
+        "apps/Foo/META.XML": b"<app>malicioso</app>",
+    })
+
+    dest_root = tmp_path / "usb"
+    (dest_root / "apps").mkdir(parents=True)
+
+    zf, status, err = oscwii_installer._validate_zip(zip_path, dest_root)
+    assert zf is None
+    assert status is InstallStatus.UNSAFE_ZIP
+    assert "META.XML" in err and "meta.xml" in err
+
+
+def test_validate_zip_rechaza_colision_de_mayusculas_en_carpetas(tmp_path):
+    """Dos "unidades" que solo se diferencian por mayúsculas son una sola
+    carpeta en el destino: `_stage_and_swap_unit` instalaría una encima
+    de la otra y una de las dos desaparecería entera."""
+    zip_path = tmp_path / "colision-carpetas.zip"
+    _make_zip(zip_path, {
+        "apps/Foo/boot.dol": b"A" * 10,
+        "apps/foo/boot.dol": b"B" * 10,
+    })
+
+    dest_root = tmp_path / "usb"
+    (dest_root / "apps").mkdir(parents=True)
+
+    zf, status, err = oscwii_installer._validate_zip(zip_path, dest_root)
+    assert zf is None
+    assert status is InstallStatus.UNSAFE_ZIP
+    assert "apps/Foo" in err and "apps/foo" in err
+
+
+def test_validate_zip_rechaza_conflicto_archivo_carpeta(tmp_path):
+    """"apps/Foo" no puede ser un archivo y a la vez la carpeta que
+    "apps/Foo/bar.txt" necesita: es un conflicto de estructura, no de
+    nombre, y en el destino tampoco puede existir de las dos formas."""
+    zip_path = tmp_path / "archivo-y-carpeta.zip"
+    _make_zip(zip_path, {
+        "apps/Foo": b"soy un archivo",
+        "apps/Foo/bar.txt": b"y yo estoy adentro de una carpeta",
+    })
+
+    dest_root = tmp_path / "usb"
+    (dest_root / "apps").mkdir(parents=True)
+
+    zf, status, err = oscwii_installer._validate_zip(zip_path, dest_root)
+    assert zf is None
+    assert status is InstallStatus.UNSAFE_ZIP
+    assert "apps/Foo" in err
+    assert "carpeta" in err
+
+
+def test_validate_zip_rechaza_conflicto_archivo_carpeta_con_mayusculas(tmp_path):
+    """El mismo conflicto, pero escrito con otra combinación de
+    mayúsculas: en FAT sigue siendo el mismo nombre."""
+    zip_path = tmp_path / "archivo-y-carpeta-mayusculas.zip"
+    _make_zip(zip_path, {
+        "apps/foo": b"soy un archivo",
+        "apps/FOO/bar.txt": b"y yo estoy adentro de una carpeta",
+    })
+
+    dest_root = tmp_path / "usb"
+    (dest_root / "apps").mkdir(parents=True)
+
+    zf, status, err = oscwii_installer._validate_zip(zip_path, dest_root)
+    assert zf is None
+    assert status is InstallStatus.UNSAFE_ZIP
+
+
+def test_validate_zip_rechaza_la_misma_ruta_dos_veces(tmp_path):
+    """Un ZIP puede traer la misma entrada repetida; cuál de las dos gana
+    depende de quién lo lea. Contenido ambiguo, se rechaza."""
+    zip_path = tmp_path / "duplicada.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("apps/Foo/boot.dol", b"bueno")
+        zf.writestr("apps/Foo/boot.dol", b"malicioso")
+
+    dest_root = tmp_path / "usb"
+    (dest_root / "apps").mkdir(parents=True)
+
+    zf, status, err = oscwii_installer._validate_zip(zip_path, dest_root)
+    assert zf is None
+    assert status is InstallStatus.UNSAFE_ZIP
+    assert "dos veces" in err
+
+
+def test_validate_zip_acepta_entradas_de_carpeta_explicitas(tmp_path):
+    """No-regresión: que un ZIP traiga entradas de carpeta propias
+    ("apps/", "apps/Foo/") además de los archivos es lo normal, y esas
+    carpetas coinciden a propósito con las que implican los archivos. Eso
+    no es una colisión."""
+    zip_path = tmp_path / "con-carpetas.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("apps/", b"")
+        zf.writestr("apps/Foo/", b"")
+        zf.writestr("apps/Foo/boot.dol", b"A" * 10)
+        zf.writestr("apps/Foo/meta.xml", b"<app/>")
+        zf.writestr("controllers/", b"")
+        zf.writestr("controllers/perfil.ini", b"[c]\n")
+
+    dest_root = tmp_path / "usb"
+    (dest_root / "apps").mkdir(parents=True)
+
+    zf, status, err = oscwii_installer._validate_zip(zip_path, dest_root)
+    try:
+        assert status is None, err
+        assert zf is not None
+    finally:
+        if zf is not None:
+            zf.close()
+
+
+def test_install_app_no_extrae_nada_de_un_zip_con_colision(tmp_path, monkeypatch):
+    """De punta a punta: el ZIP entero se rechaza y no se escribe ni la
+    entrada que sí era única."""
+    dest_root = tmp_path / "usb"
+    dest_root.mkdir()
+
+    def _fake_download_zip(app, dest_path, cancel_event, on_progress):
+        _make_zip(dest_path, {
+            "apps/TestApp/boot.dol": b"A" * 100,
+            "apps/TestApp/meta.xml": b"<app>bueno</app>",
+            "apps/TestApp/Meta.xml": b"<app>malicioso</app>",
+        })
+        return True, "", "", ""
+    monkeypatch.setattr(oscwii_installer, "_download_zip", _fake_download_zip)
+
+    result = oscwii_installer.install_app(_fake_app(), dest_root)
+
+    assert not result.ok
+    assert result.status is InstallStatus.UNSAFE_ZIP
+    assert not (dest_root / "apps" / "TestApp").exists()

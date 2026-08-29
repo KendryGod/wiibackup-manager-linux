@@ -40,6 +40,18 @@ tanto la única verificación real de integridad es la validación de ZIP
 que hace `oscwii_installer` (Paso 2), que es obligatoria siempre y no
 depende de que esto se confirme.
 
+De dónde se baja
+----------------
+Todas las URLs que este módulo y `oscwii_installer` piden -el catálogo,
+los íconos y los ZIP- salen del mismo host confirmado arriba, y las dos
+últimas vienen DENTRO de la respuesta de la API, o sea que las elige
+contenido de red y no este código. Por eso viven acá la lista blanca
+(`ALLOWED_URL_SCHEMES` / `ALLOWED_DOWNLOAD_HOSTS`) y el único camino por
+el que se abre una descarga (`open_allowlisted`): un catálogo cambiado
+-comprometido, manipulado en el camino, o simplemente distinto mañana- no
+puede hacer que la app baje nada de otro dominio, ni siquiera a través de
+una redirección.
+
 También se confirmó bajando esos dos ZIPs reales que TODOS los archivos
 de adentro empiezan con "apps/<slug>/" (p. ej. "apps/WiiDonut/boot.dol"):
 es la convención estándar de Homebrew Channel para instalar en la
@@ -50,6 +62,7 @@ from __future__ import annotations
 
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from enum import Enum
@@ -64,6 +77,122 @@ OSC_API_BASE = "https://hbb1.oscwii.org"
 OSC_CONTENTS_URL = f"{OSC_API_BASE}/api/v3/contents"
 REQUEST_TIMEOUT = 15
 CONTENTS_CACHE_FILENAME = "oscwii_contents.json"
+USER_AGENT = "wiibackup-manager-linux"
+
+# Lista blanca de descarga (ver "De dónde se baja", arriba). El host de la
+# API se deriva de `OSC_API_BASE` en vez de copiarse a mano, para que
+# apuntar el cliente a otro servidor no deje esta lista desactualizada en
+# silencio; el literal queda igual escrito como respaldo explícito y como
+# documentación del host real (confirmado en vivo).
+ALLOWED_URL_SCHEMES = frozenset({"https"})
+ALLOWED_DOWNLOAD_HOSTS = frozenset(
+    h for h in {"hbb1.oscwii.org",
+                urllib.parse.urlsplit(OSC_API_BASE).hostname or ""} if h)
+
+
+class UnsafeDownloadURL(Exception):
+    """La URL a descargar -o la de alguna redirección- no está en la lista
+    blanca. Es una excepción y no un valor de retorno porque también tiene
+    que poder cortar desde adentro de urllib, en
+    `AllowlistRedirectHandler`, donde no hay ningún retorno que mirar.
+    Quien llama la traduce a lo que corresponda: `get_icon_path` la trata
+    como cualquier otro fallo de ícono (devuelve None, ícono de
+    placeholder) y `oscwii_installer.install_app` la reporta como
+    `InstallStatus.UNSAFE_URL`."""
+
+
+def url_rejection_reason(url: str) -> Optional[str]:
+    """Motivo por el que `url` NO se puede descargar, o None si está
+    permitida (https + host de `ALLOWED_DOWNLOAD_HOSTS`).
+
+    El host se saca de `urlsplit(...).hostname` a propósito y no del
+    `netloc` crudo: `hostname` ya descarta el puerto y, sobre todo, la
+    parte de credenciales, así que una URL del estilo
+    "https://hbb1.oscwii.org@atacante.example/x.zip" -que a ojo parece del
+    host bueno- se resuelve como "atacante.example" y se rechaza. Las
+    credenciales embebidas igual se rechazan aparte: el repositorio de OSC
+    es público y anónimo, una URL con usuario/contraseña solo puede venir
+    de un catálogo manipulado."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname
+        username = parts.username
+    except ValueError as e:
+        return f"la URL no se pudo interpretar ({e})"
+
+    scheme = parts.scheme.lower()
+    if scheme not in ALLOWED_URL_SCHEMES:
+        return (f"esquema {scheme or '(ninguno)'} no permitido; solo "
+                f"{', '.join(sorted(ALLOWED_URL_SCHEMES))}")
+    if username is not None:
+        return "la URL trae credenciales embebidas"
+    if not host:
+        return "la URL no tiene host"
+
+    # Un punto final ("hbb1.oscwii.org.") resuelve al mismo lugar en DNS
+    # pero no coincidiría con el literal de la lista: se normaliza para no
+    # rechazar por eso a un host que sí está permitido.
+    host = host.lower().rstrip(".")
+    if host not in ALLOWED_DOWNLOAD_HOSTS:
+        return (f"host {host} no permitido; solo "
+                f"{', '.join(sorted(ALLOWED_DOWNLOAD_HOSTS))}")
+    return None
+
+
+def ensure_url_allowed(url: str, que_es: str) -> None:
+    """Igual que `url_rejection_reason`, pero levantando
+    `UnsafeDownloadURL` para los lugares donde no hay un valor de retorno
+    que revisar (el handler de redirecciones, adentro de urllib)."""
+    motivo = url_rejection_reason(url)
+    if motivo is not None:
+        raise UnsafeDownloadURL(f"{que_es} fue rechazada: {motivo} ({url})")
+
+
+class AllowlistRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Valida CADA salto de redirección antes de seguirlo.
+
+    Validar solo la URL inicial no alcanza: urllib sigue las
+    redirecciones por su cuenta (301/302/303/307/308), así que un
+    `Location:` hacia otro dominio bastaría para saltear la lista blanca
+    aunque la URL del catálogo fuera la buena. `redirect_request` es el
+    único punto por el que urllib decide seguir un salto, así que es el
+    lugar donde cortarlo -y se corta antes de conectarse al destino
+    nuevo, no después."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        motivo = url_rejection_reason(newurl)
+        if motivo is not None:
+            # `http_error_302` sería quien cierra `fp` si el salto
+            # siguiera; como acá se corta, se cierra a mano para no dejar
+            # el socket de la respuesta colgando.
+            fp.close()
+            raise UnsafeDownloadURL(
+                f"la descarga fue redirigida a una URL rechazada: "
+                f"{motivo} ({newurl})")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def open_allowlisted(url: str, timeout: float, que_es: str = "la URL"):
+    """Único camino por el que esta app abre una descarga cuya URL vino
+    del catálogo (íconos acá, ZIPs en `oscwii_installer`): valida la URL
+    ANTES de abrir el socket, valida cada redirección antes de seguirla, y
+    valida también la URL final por si alguna vez se llega a ella por un
+    camino que no pase por el handler. Devuelve la respuesta abierta (para
+    usar con `with`); levanta `UnsafeDownloadURL` si algo de eso no pasa,
+    y lo que levante urllib para los errores de red normales."""
+    ensure_url_allowed(url, que_es)
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    # Opener propio en vez de `urlopen`: el `urlopen` global usa el
+    # `HTTPRedirectHandler` de urllib, que sigue cualquier salto sin
+    # preguntar (ver `AllowlistRedirectHandler`).
+    opener = urllib.request.build_opener(AllowlistRedirectHandler)
+    resp = opener.open(req, timeout=timeout)
+    try:
+        ensure_url_allowed(resp.geturl(), "la URL final de la descarga")
+    except BaseException:
+        resp.close()
+        raise
+    return resp
 
 
 def contents_cache_path() -> Path:
@@ -232,7 +361,7 @@ def _fetch_remote() -> tuple:
     malformado quedan todos capturados acá, no en quien llama)."""
     try:
         req = urllib.request.Request(
-            OSC_CONTENTS_URL, headers={"User-Agent": "wiibackup-manager-linux"})
+            OSC_CONTENTS_URL, headers={"User-Agent": USER_AGENT})
         with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
             if resp.status != 200:
                 return None, f"status HTTP {resp.status}"
@@ -382,7 +511,15 @@ def get_icon_path(app: HomebrewApp, force: bool = False) -> Optional[Path]:
     capturar. No hace falta una validación tan fuerte como
     `gametdb._decodes_as_image` (que decodifica el PNG entero): un ícono
     mal cacheado acá es cosmético, no arriesga instalar nada corrupto -eso
-    lo cubre `oscwii_installer`, con el ZIP."""
+    lo cubre `oscwii_installer`, con el ZIP.
+
+    `app.icon_url` sale del catálogo igual que `zip_url`, así que pasa por
+    la misma lista blanca (`open_allowlisted`): un catálogo cambiado no
+    puede hacer que la app le pida nada a otro dominio, ni siquiera por
+    una redirección. Un ícono es cosmético, así que una URL rechazada se
+    trata como cualquier otro fallo de descarga -None, y la tarjeta se
+    queda con el placeholder- en vez de interrumpir a quien mira la
+    tienda; lo que sí no puede pasar es que la descarga ocurra."""
     if not app.icon_url:
         return None
 
@@ -390,14 +527,22 @@ def get_icon_path(app: HomebrewApp, force: bool = False) -> Optional[Path]:
     if cache_path.exists() and not force:
         return cache_path
 
+    # Antes de crear la carpeta de caché: si la URL no está permitida, acá
+    # no se va a bajar nada, así que tampoco tiene por qué dejar rastro.
+    # `open_allowlisted` lo vuelve a chequear por su cuenta -es la que
+    # abre el socket-, esto es para cortar antes y sin efectos.
+    if url_rejection_reason(app.icon_url) is not None:
+        return None
+
     icons_cache_dir().mkdir(parents=True, exist_ok=True)
     try:
-        req = urllib.request.Request(
-            app.icon_url, headers={"User-Agent": "wiibackup-manager-linux"})
-        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+        with open_allowlisted(app.icon_url, REQUEST_TIMEOUT,
+                              "la URL del ícono") as resp:
             if resp.status != 200:
                 return None
             data = resp.read()
+    except UnsafeDownloadURL:
+        return None
     except urllib.error.HTTPError:
         return None
     except (urllib.error.URLError, OSError, TimeoutError):

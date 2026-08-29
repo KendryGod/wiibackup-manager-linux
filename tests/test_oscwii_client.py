@@ -6,9 +6,15 @@ así que se cubre desde cero priorizando el manejo de errores -timeouts,
 JSON/ZIP mal formados, caída de la API con fallback a caché, dedupe de
 descargas concurrentes- por sobre el camino feliz.
 
-Nada toca la red de verdad: se fakea `urllib.request.urlopen` con objetos
-simples (sin `unittest.mock`), y `config.CACHE_DIR` se aísla a `tmp_path`
-en cada test."""
+Nada toca la red de verdad: se fakea con objetos simples (sin
+`unittest.mock`) el punto por el que cada camino sale a la red
+-`urllib.request.urlopen` para el catálogo, `oscwii_client.open_allowlisted`
+para los íconos, que es por donde pasan las descargas cuya URL viene del
+catálogo (ver la lista blanca del módulo)-, y `config.CACHE_DIR` se aísla
+a `tmp_path` en cada test.
+
+Que un ícono NO se baje de un host fuera de la lista blanca se prueba
+aparte, en test_oscwii_url_allowlist.py, contra un servidor HTTP real."""
 from __future__ import annotations
 
 import json
@@ -21,7 +27,7 @@ from pathlib import Path
 import pytest
 
 from wiibackup_manager import config, oscwii_client
-from wiibackup_manager.oscwii_client import HomebrewApp
+from wiibackup_manager.oscwii_client import OSC_CONTENTS_URL, HomebrewApp
 
 
 # --------------------------------------------------------------- fixtures --
@@ -48,6 +54,9 @@ class FakeResponse:
 
     def read(self) -> bytes:
         return self._data
+
+    def geturl(self) -> str:
+        return OSC_CONTENTS_URL
 
     def __enter__(self):
         return self
@@ -498,9 +507,9 @@ def test_icon_cache_path_slug_vacio_usa_app():
 
 
 def test_get_icon_path_sin_icon_url_no_toca_red(monkeypatch):
-    monkeypatch.setattr(urllib.request, "urlopen",
-                         lambda *a, **kw: (_ for _ in ()).throw(
-                             AssertionError("no debería llamar a la red")))
+    monkeypatch.setattr(oscwii_client, "open_allowlisted",
+                        lambda *a, **kw: (_ for _ in ()).throw(
+                            AssertionError("no debería llamar a la red")))
     assert oscwii_client.get_icon_path(_app(icon_url="")) is None
 
 
@@ -511,20 +520,20 @@ def test_get_icon_path_sin_icon_url_no_toca_red(monkeypatch):
     OSError("desconectado"),
 ])
 def test_get_icon_path_error_de_red(monkeypatch, excepcion):
-    monkeypatch.setattr(urllib.request, "urlopen",
-                         lambda *a, **kw: (_ for _ in ()).throw(excepcion))
+    monkeypatch.setattr(oscwii_client, "open_allowlisted",
+                        lambda *a, **kw: (_ for _ in ()).throw(excepcion))
     assert oscwii_client.get_icon_path(_app()) is None
 
 
 def test_get_icon_path_status_no_200(monkeypatch):
-    monkeypatch.setattr(urllib.request, "urlopen",
-                         lambda *a, **kw: FakeResponse(503, b""))
+    monkeypatch.setattr(oscwii_client, "open_allowlisted",
+                        lambda *a, **kw: FakeResponse(503, b""))
     assert oscwii_client.get_icon_path(_app()) is None
 
 
 def test_get_icon_path_respuesta_no_es_png(monkeypatch):
-    monkeypatch.setattr(urllib.request, "urlopen",
-                         lambda *a, **kw: FakeResponse(200, b"<html>404</html>"))
+    monkeypatch.setattr(oscwii_client, "open_allowlisted",
+                        lambda *a, **kw: FakeResponse(200, b"<html>404</html>"))
     app = _app()
     result = oscwii_client.get_icon_path(app)
     assert result is None
@@ -533,8 +542,8 @@ def test_get_icon_path_respuesta_no_es_png(monkeypatch):
 
 def test_get_icon_path_exitoso_guarda_y_devuelve(monkeypatch):
     data = oscwii_client.PNG_MAGIC + b"contenido-de-mentira"
-    monkeypatch.setattr(urllib.request, "urlopen",
-                         lambda *a, **kw: FakeResponse(200, data))
+    monkeypatch.setattr(oscwii_client, "open_allowlisted",
+                        lambda *a, **kw: FakeResponse(200, data))
     result = oscwii_client.get_icon_path(_app())
     assert result.read_bytes() == data
 
@@ -544,9 +553,9 @@ def test_get_icon_path_usa_cache_sin_pedir_red(monkeypatch):
     cache_path = oscwii_client.icon_cache_path(app.slug)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_bytes(oscwii_client.PNG_MAGIC + b"ya cacheado")
-    monkeypatch.setattr(urllib.request, "urlopen",
-                         lambda *a, **kw: (_ for _ in ()).throw(
-                             AssertionError("no debería llamar a la red")))
+    monkeypatch.setattr(oscwii_client, "open_allowlisted",
+                        lambda *a, **kw: (_ for _ in ()).throw(
+                            AssertionError("no debería llamar a la red")))
     result = oscwii_client.get_icon_path(app)
     assert result == cache_path
 
@@ -557,16 +566,16 @@ def test_get_icon_path_force_ignora_cache_existente(monkeypatch):
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_bytes(oscwii_client.PNG_MAGIC + b"viejo")
     nuevo = oscwii_client.PNG_MAGIC + b"nuevo"
-    monkeypatch.setattr(urllib.request, "urlopen",
-                         lambda *a, **kw: FakeResponse(200, nuevo))
+    monkeypatch.setattr(oscwii_client, "open_allowlisted",
+                        lambda *a, **kw: FakeResponse(200, nuevo))
     result = oscwii_client.get_icon_path(app, force=True)
     assert result.read_bytes() == nuevo
 
 
 def test_get_icon_path_falla_escritura_temporal(monkeypatch):
     data = oscwii_client.PNG_MAGIC + b"x"
-    monkeypatch.setattr(urllib.request, "urlopen",
-                         lambda *a, **kw: FakeResponse(200, data))
+    monkeypatch.setattr(oscwii_client, "open_allowlisted",
+                        lambda *a, **kw: FakeResponse(200, data))
 
     def boom_write_bytes(self, *a, **kw):
         raise OSError("disco lleno")
@@ -577,8 +586,8 @@ def test_get_icon_path_falla_escritura_temporal(monkeypatch):
 
 def test_get_icon_path_falla_escritura_y_tambien_falla_la_limpieza(monkeypatch):
     data = oscwii_client.PNG_MAGIC + b"x"
-    monkeypatch.setattr(urllib.request, "urlopen",
-                         lambda *a, **kw: FakeResponse(200, data))
+    monkeypatch.setattr(oscwii_client, "open_allowlisted",
+                        lambda *a, **kw: FakeResponse(200, data))
 
     def boom_write_bytes(self, *a, **kw):
         raise OSError("disco lleno")

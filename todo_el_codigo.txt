@@ -499,12 +499,26 @@ Los "blindajes" a los que se refieren los docstrings de acá son:
 - BLINDAJE 2: vive en la interfaz (Objetivo 1/2 de la ventana), no acá:
   el diálogo de confirmación que obliga a escribir "FORMATEAR".
 - BLINDAJE 3 (`verify_still_safe`): re-chequeo, ya en el hilo de fondo,
-  de que el dispositivo sigue siendo removible y pesa lo mismo que
-  cuando se armó el diálogo.
+  de que el dispositivo sigue siendo removible, pesa lo mismo y tiene la
+  misma identidad física (serie/WWN vía udev) que cuando se armó el
+  diálogo. `format_as_wii_usb` lo corre DOS veces -antes de desmontar y
+  otra vez justo antes de `mkfs.vfat`- porque ahí en el medio hay una
+  ventana real: el desmontaje puede tardar, y es el momento en que menos
+  se está mirando el dispositivo.
 - BLINDAJE 4 (`check_no_critical_mounts` / `mounted_critical_paths`):
   última línea de defensa. Se corre siempre, pase lo que pase con los
   blindajes anteriores: si alguna partición del disco está montada en
   una ruta del sistema operativo, se aborta.
+
+Un blindaje más que no vive en las funciones de arriba sino en cómo se
+usa `OperationManager` (`operations.py`): Modo Fábrica registra el disco
+entero (`BlockDevice.path`, ej. `/dev/sdb`) como `resources` de una
+operación `FORMATTING` antes de tocarlo, y Transferencias/Homebrew hacen
+lo mismo con el disco físico detrás de su punto de montaje
+(`physical_disk_for_path`, más abajo) además del punto de montaje de
+siempre. Así el `OperationManager` bloquea formatear un disco mientras se
+le está escribiendo algo, y viceversa -sin esto, nada impedía lanzar
+`mkfs.vfat` sobre una unidad con una copia a mitad de camino.
 """
 from __future__ import annotations
 
@@ -691,6 +705,11 @@ def eject_mount_point(path: Path) -> tuple[bool, str]:
 # disco real de la máquina que corre la suite.
 _SYS_BLOCK = Path("/sys/block")
 _PROC_MOUNTS = Path("/proc/mounts")
+# /sys/class/block trae disco enteros Y particiones en un mismo nivel
+# (a diferencia de /sys/block, que solo lista discos enteros como
+# subcarpetas): es lo que permite mapear una partición montada de vuelta
+# al disco físico que la contiene. Ver `_whole_disk_path`.
+_SYS_CLASS_BLOCK = Path("/sys/class/block")
 
 # Puntos de montaje del sistema operativo que jamás deberían aparecer
 # colgando de un disco que se está por formatear. No es "la raíz nada
@@ -726,6 +745,19 @@ class DeviceChangedError(FactoryModeError):
     """BLINDAJE 3: el dispositivo cambió de tamaño desde que se armó la
     confirmación. Es la señal de que puede ser un disco distinto -mismo
     nombre de dispositivo, otro USB- y no el que el usuario aprobó."""
+
+
+class DeviceIdentityMismatchError(FactoryModeError):
+    """BLINDAJE 3: la identidad física del dispositivo (serie/WWN vía
+    udev) cambió desde que se armó la confirmación, aunque `/dev/sdX`,
+    la removibilidad y hasta el tamaño coincidan.
+
+    Es el caso que `DeviceChangedError` no cubre: dos USB del mismo
+    modelo tienen el mismo tamaño exacto, y el kernel recicla el mismo
+    nombre de dispositivo para el próximo que se conecta en ese puerto.
+    Sin esto, desconectar el USB confirmado y conectar OTRO idéntico en
+    tamaño antes de que termine el formateo pasaría los blindajes 1 y 3
+    (tamaño) igual."""
 
 
 class CriticalMountError(FactoryModeError):
@@ -791,14 +823,132 @@ def _device_model(device_path) -> str:
         return ""
 
 
+def device_identity(device_path, *, run=subprocess.run) -> str | None:
+    """Identidad física estable de `device_path`, vía la base de datos de
+    udev: el número de serie (o el WWN si el disco no expone serie), que
+    no cambia aunque el kernel reasigne `/dev/sdX` a otro dispositivo.
+
+    A diferencia de `removable`/`size` (que se leen directo de /sys/block
+    porque el kernel los expone ahí sin intermediarios), la identidad
+    física no vive en un archivo fijo: depende del bus (USB, ATA, NVMe)
+    y de qué reglas de udev corrieron para ESE dispositivo en particular.
+    `udevadm info` es la interfaz estable para pedirla sin tener que saber
+    de antemano con qué bus se está tratando -es la misma fuente que llena
+    los symlinks de `/dev/disk/by-id/`.
+
+    Se prueban, en orden, `ID_SERIAL` (serie completa, la más específica),
+    `ID_SERIAL_SHORT` (a veces `ID_SERIAL` no está pero esta sí) y
+    `ID_WWN` (World Wide Name, típico de discos que no exponen serie de
+    otra forma). None si ninguna está disponible -algunos lectores de
+    tarjetas SD integrados no exponen nada de esto- o si `udevadm` no
+    está instalado: quien llama (`verify_still_safe`) trata None como
+    "no se puede confirmar la identidad" y no como "coincide"."""
+    try:
+        resultado = run(
+            ["udevadm", "info", "--query=property", f"--name={device_path}"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if resultado.returncode != 0:
+        return None
+    propiedades: dict[str, str] = {}
+    for linea in resultado.stdout.splitlines():
+        clave, separador, valor = linea.partition("=")
+        if separador:
+            propiedades[clave] = valor
+    for clave in ("ID_SERIAL", "ID_SERIAL_SHORT", "ID_WWN"):
+        valor = propiedades.get(clave)
+        if valor:
+            return valor
+    return None
+
+
+def _whole_disk_path(device_path) -> Path | None:
+    """Disco entero detrás de `device_path`: si es una partición
+    (`/dev/sdb1`, `/dev/nvme0n1p1`) devuelve el disco que la contiene
+    (`/dev/sdb`, `/dev/nvme0n1`); si `device_path` ya es un disco entero,
+    lo devuelve tal cual. None si no aparece en /sys/class/block.
+
+    Partición vs. disco entero se distingue con el archivo `partition`
+    que el kernel expone -SOLO en subcarpetas de partición- bajo
+    `/sys/class/block/<nombre>/partition`: no se puede adivinar por el
+    nombre (`sdb1` vs. `nvme0n1p1` siguen convenciones de nombrado
+    distintas por bus), pero ese archivo es la misma señal para
+    cualquiera. Cuando es una partición, el directorio real (resuelto el
+    symlink de /sys/class/block) queda anidado un nivel adentro del disco
+    que la contiene, así que el nombre del padre es el disco entero."""
+    nombre = Path(device_path).name
+    entrada = _SYS_CLASS_BLOCK / nombre
+    try:
+        real = entrada.resolve(strict=True)
+    except OSError:
+        return None
+    if (entrada / "partition").exists():
+        return Path("/dev") / real.parent.name
+    return Path("/dev") / nombre
+
+
+def physical_disk_for_path(path) -> Path | None:
+    """El disco físico entero (ej. `/dev/sdb`) detrás del punto de
+    montaje `path`, o None si no se pudo determinar.
+
+    Existe para que Transferencias y la instalación de Homebrew declaren,
+    ante el `OperationManager`, el MISMO recurso físico que Modo Fábrica
+    -así una operación de formateo se bloquea mutuamente con cualquiera
+    que esté escribiendo en el mismo disco, sin importar en qué punto de
+    montaje ocurra esa escritura (Modo Fábrica desmonta el disco antes de
+    formatear: comparar contra el punto de montaje no serviría de nada
+    ahí, porque para ese momento ya no existe).
+
+    None cuando `path` no corresponde a ningún punto de montaje que
+    `findmnt` reconozca, o cuando el dispositivo que reporta no aparece
+    en /sys/class/block (por ejemplo, un filesystem de red). Quien llama
+    debería tratar ese None como "no se pudo identificar el disco físico"
+    -no bloquea nada nuevo, pero tampoco rompe lo que ya funcionaba antes
+    de que existiera esta función."""
+    dispositivo = _block_device_for(Path(path))
+    if dispositivo is None:
+        return None
+    return _whole_disk_path(dispositivo)
+
+
+def resources_for_mount_point(path) -> list[Path]:
+    """Los `resources` que Transferencias y la instalación de Homebrew
+    tienen que declarar ante el `OperationManager` al escribir en el
+    punto de montaje `path`: el punto de montaje en sí (de siempre, es lo
+    que ya usaba el botón "Expulsar unidad") MÁS el disco físico que hay
+    detrás (`physical_disk_for_path`), si se lo pudo determinar.
+
+    El físico es lo que hace que choquen con Modo Fábrica formateando el
+    mismo disco -que declara el disco entero, no un punto de montaje,
+    porque lo desmonta como parte de formatear- sin dejar de chocar entre
+    sí por el punto de montaje de siempre. Si no se pudo determinar el
+    disco físico, se devuelve solo el punto de montaje: ni mejora ni
+    empeora el comportamiento que había antes de que existiera esta
+    función."""
+    punto = Path(path)
+    fisico = physical_disk_for_path(punto)
+    return [punto] if fisico is None else [punto, fisico]
+
+
 @dataclass(frozen=True)
 class BlockDevice:
     """Un disco candidato a Modo Fábrica. `size_bytes` queda congelado acá
     en el momento en que se listó -es justamente lo que `verify_still_safe`
-    vuelve a medir más tarde para detectar que cambió."""
+    vuelve a medir más tarde para detectar que cambió.
+
+    `identity` es lo mismo pero para la identidad física del dispositivo
+    (ver `device_identity`): puede ser `None` si no se pudo determinar
+    (dispositivo sin serie expuesta por udev), caso en el que
+    `verify_still_safe` no la vuelve a chequear -no tener el dato no es
+    lo mismo que poder confirmar que cambió, y bloquear Modo Fábrica
+    entero para esos dispositivos sería peor que la protección que se
+    gana en el resto."""
     path: Path
     model: str
     size_bytes: int
+    identity: str | None = None
 
     @property
     def size_gb(self) -> float:
@@ -835,7 +985,8 @@ def list_candidate_drives() -> list[BlockDevice]:
             continue
         candidatos.append(BlockDevice(path=device_path,
                                       model=_device_model(device_path),
-                                      size_bytes=size))
+                                      size_bytes=size,
+                                      identity=device_identity(device_path)))
     return candidatos
 
 
@@ -926,21 +1077,25 @@ def _mount_points_of(device_path) -> list[tuple[str, str]]:
     return [(origen, punto) for origen, punto in filas if patron.match(origen)]
 
 
-def verify_still_safe(device: BlockDevice) -> None:
-    """BLINDAJE 3: re-chequeo, ya en el hilo de fondo y justo antes de
-    escribir, de que `device.path` sigue siendo removible y pesa lo mismo
-    que cuando se armó el diálogo de confirmación.
+def verify_still_safe(device: BlockDevice, *, run=subprocess.run) -> None:
+    """BLINDAJE 3: re-chequeo, ya en el hilo de fondo, de que
+    `device.path` sigue siendo removible, pesa lo mismo y tiene la misma
+    identidad física que cuando se armó el diálogo de confirmación.
+    `format_as_wii_usb` la llama DOS veces: acá y otra vez justo antes de
+    `mkfs.vfat`, así que esta función no asume en qué momento del flujo
+    está -siempre vuelve a preguntarle al kernel/udev, nunca confía en
+    una llamada anterior, ni siquiera una hecha un segundo antes.
 
     Entre que el usuario ve el diálogo (con el modelo y el tamaño
-    impresos) y aprieta el botón puede pasar cualquier cosa: que saque el
-    USB y conecte otro dispositivo en el mismo puerto (el kernel suele
-    reciclar `/dev/sdb` para el próximo que aparezca), o simplemente que
-    haya elegido mal en una máquina con varios discos conectados. Esta
-    función no confía en nada de lo que se sabía al armar el diálogo:
-    vuelve a preguntarle al kernel.
+    impresos) y aprieta el botón -o entre que se desmonta el disco y se
+    lo formatea, la otra ventana que cubre esta función- puede pasar
+    cualquier cosa: que saque el USB y conecte otro dispositivo en el
+    mismo puerto (el kernel suele reciclar `/dev/sdb` para el próximo que
+    aparezca), o que conecte uno del mismo tamaño exacto -el tamaño solo
+    no alcanza para distinguirlos, por eso la identidad física.
 
-    No devuelve nada: levanta `UnsafeDeviceError` o `DeviceChangedError`
-    si algo no cierra."""
+    No devuelve nada: levanta `UnsafeDeviceError`, `DeviceChangedError` o
+    `DeviceIdentityMismatchError` si algo no cierra."""
     if not is_removable_block_device(device.path):
         raise UnsafeDeviceError(
             f"{device.path} ya no es un dispositivo removible (o "
@@ -951,6 +1106,17 @@ def verify_still_safe(device: BlockDevice) -> None:
             f"El tamaño de {device.path} cambió desde que se confirmó "
             f"({device.size_bytes} → {tamano_actual} bytes). Puede ser "
             "otro dispositivo: se aborta el formateo por seguridad.")
+    # Si no se pudo determinar la identidad al listar el dispositivo (ver
+    # `BlockDevice.identity`), no hay nada contra qué comparar: no tener
+    # el dato no es lo mismo que poder confirmar que cambió.
+    if device.identity is not None:
+        identidad_actual = device_identity(device.path, run=run)
+        if identidad_actual != device.identity:
+            raise DeviceIdentityMismatchError(
+                f"La identidad física de {device.path} cambió desde que "
+                f"se confirmó ({device.identity} → {identidad_actual}). "
+                "Puede ser otro dispositivo del mismo tamaño reconectado "
+                "en el mismo puerto: se aborta el formateo por seguridad.")
 
 
 def check_no_critical_mounts(device: BlockDevice) -> None:
@@ -1029,7 +1195,7 @@ def format_as_wii_usb(device: BlockDevice, *, run=subprocess.run,
     Devuelve el punto de montaje final. Levanta la subclase de
     `FactoryModeError` que corresponda si algún blindaje no pasa, o
     `RuntimeError` si `mkfs.vfat` (o el montaje posterior) fallan."""
-    verify_still_safe(device)
+    verify_still_safe(device, run=run)
     check_no_critical_mounts(device)
 
     _unmount_all(device.path, run=run)
@@ -1042,6 +1208,13 @@ def format_as_wii_usb(device: BlockDevice, *, run=subprocess.run,
             "después de intentar desmontarlo (umount pudo haber fallado "
             "por permisos u otro motivo). Se aborta el formateo por "
             "seguridad.")
+
+    # BLINDAJE 3 otra vez, ya con el disco desmontado: el desmontaje puede
+    # haber tardado (discos lentos, `udisksctl` reintentando), y esta es
+    # la ventana real entre "confirmamos que era el dispositivo correcto"
+    # y "empezamos a escribir sobre él" -no alcanza con haberlo chequeado
+    # antes de desmontar.
+    verify_still_safe(device, run=run)
 
     prefijo = [] if os.geteuid() == 0 else ["pkexec"]
     resultado = run(
@@ -3405,6 +3578,54 @@ def wbfs_group(dest: Path) -> list:
     return miembros
 
 
+class RollbackFailedError(RuntimeError):
+    """`DestinationGuard._restore()` no pudo devolver TODOS los
+    originales apartados a su lugar: al menos un respaldo temporal
+    quedó sin restaurar.
+
+    Nunca se levanta desde una operación exitosa: solo puede pasar
+    adentro de `_restore()`, que a su vez solo corre después de que algo
+    YA había fallado antes (la conversión, una cancelación, o el propio
+    apartado del respaldo en `__enter__`). O sea que cuando esto se
+    levanta hay DOS problemas encadenados, no uno -y `original_error`,
+    si se lo pudo determinar, es el primero de los dos: quien atrape
+    esta excepción tiene que nombrar ambos en el mensaje final, "algo
+    falló" no alcanza para un archivo que puede haber quedado
+    inservible.
+
+    `pending` es la lista de `(original, respaldo)` que no volvieron a
+    su lugar -en un WBFS dividido puede ser una sola de las tres partes-:
+    el archivo de respaldo TODAVÍA existe en esa ruta, nada se perdió,
+    pero alguien tiene que moverlo a mano."""
+
+    def __init__(self, pending: list[tuple[Path, Path]],
+                original_error: BaseException | None = None):
+        self.pending = list(pending)
+        self.original_error = original_error
+        detalle = "; ".join(
+            f"{original} (respaldo en {respaldo})"
+            for original, respaldo in self.pending)
+        super().__init__(
+            "No se pudo restaurar el archivo original después de un "
+            f"error: {detalle}")
+
+    def user_message(self) -> str:
+        """El mensaje para mostrarle al usuario -no `str(self)` a secas:
+        acá hay DOS problemas (por qué se estaba restaurando, y que
+        además la restauración falló) y hay que nombrar los dos, o el
+        usuario ve "la conversión falló" sin enterarse de que el
+        original puede haber quedado inservible. Si no se conoce el
+        motivo original (`self.original_error is None`, el caso más raro:
+        `_restore()` se llamó sin que nada hubiera fallado antes) se
+        vuelve al mensaje de acá nomás."""
+        if self.original_error is None:
+            return str(self)
+        return _(
+            "La conversión falló ({motivo}) y además no se pudo "
+            "restaurar completamente el archivo original: {detalle}"
+        ).format(motivo=str(self.original_error), detalle=str(self))
+
+
 class DestinationGuard:
     """Aparta lo que ya hay en el destino y lo devuelve si algo falla.
 
@@ -3452,10 +3673,19 @@ class DestinationGuard:
             respaldo = original.with_name(f".{original.name}{marca}")
             try:
                 os.replace(original, respaldo)
-            except OSError:
+            except OSError as e:
                 # No se pudo apartar: se deshace lo ya apartado y se sale
-                # sin tocar nada, mejor que quedar a mitad de camino.
-                self._restore()
+                # sin tocar nada, mejor que quedar a mitad de camino. Si
+                # ESE deshacer también falla, lo que se propaga es
+                # `RollbackFailedError` (más grave: hay un original que
+                # quedó movido a un nombre de respaldo, no solo un intento
+                # de apartado que no arrancó) con este `OSError` como
+                # motivo original.
+                try:
+                    self._restore()
+                except RollbackFailedError as rollback_error:
+                    rollback_error.original_error = e
+                    raise
                 raise
             self._saved.append((original, respaldo))
         # La foto va DESPUÉS de apartar el respaldo, no antes: el respaldo
@@ -3481,7 +3711,18 @@ class DestinationGuard:
             self._discard()
         else:
             self._cleanup_partials()
-            self._restore()
+            try:
+                self._restore()
+            except RollbackFailedError as rollback_error:
+                # `exc` es lo que haya fallado DENTRO del `with` (la
+                # conversión, una cancelación) -el motivo por el que se
+                # llegó a intentar restaurar en primer lugar. Si además
+                # restaurar falla, quien atrape esto necesita los dos
+                # datos: no alcanza con saber que el respaldo quedó a
+                # medio volver, si no también por qué se estaba
+                # restaurando.
+                rollback_error.original_error = exc
+                raise
         return False  # nunca se traga la excepción
 
     def _cleanup_partials(self) -> None:
@@ -3513,11 +3754,24 @@ class DestinationGuard:
                 pass
 
     def _restore(self) -> None:
+        """Devuelve cada respaldo a su nombre original. Se intenta con
+        TODOS aunque alguno falle -en un WBFS dividido (wbfs/wbf1/wbf2)
+        no tiene sentido dejar dos partes sin restaurar porque la
+        tercera se atoró (permiso, disco desconectándose a medias)- y
+        `self._saved` solo se vacía si TODOS volvieron a su lugar. Si
+        algo falló, `self._saved` queda con exactamente lo pendiente (no
+        vacío, no lo restaurado con éxito) y se levanta
+        `RollbackFailedError`: silenciar esto acá dejaba un juego a medio
+        restaurar sin que nadie -ni la app, ni el usuario- se enterara."""
+        fallidos: list[tuple[Path, Path]] = []
         for original, respaldo in reversed(self._saved):
             try:
                 os.replace(respaldo, original)
             except OSError:
-                pass
+                fallidos.append((original, respaldo))
+        if fallidos:
+            self._saved = [par for par in self._saved if par in fallidos]
+            raise RollbackFailedError(self._saved)
         self._saved = []
 
     def _discard(self) -> None:
@@ -3748,7 +4002,16 @@ información falsa:
   lista queda mostrando el resultado más viejo;
 - escanear mientras se copia/convierte dentro de la biblioteca, con lo que
   el escaneo llega a ver archivos a medio escribir y los identifica mal;
-- expulsar el USB mientras se le está copiando un juego encima.
+- expulsar el USB mientras se le está copiando un juego encima;
+- formatear un USB (Modo Fábrica) mientras se le está copiando un juego o
+  instalando homebrew encima -o al revés: arrancar una copia sobre un
+  disco que Modo Fábrica está formateando en ese momento. Acá es donde
+  `resources` no puede ser el punto de montaje nomás: Modo Fábrica lo
+  desmonta como parte de formatear, así que declara el disco físico
+  entero (`drives.physical_disk_for_path` / `BlockDevice.path`) y
+  Transferencias/Homebrew declaran ESE MISMO recurso además del punto de
+  montaje, para que ambos lados choquen entre sí sin importar cuál
+  arrancó primero.
 
 Cada operación declara TRES cosas, y de ahí salen todos los conflictos:
 
@@ -3802,6 +4065,7 @@ class OperationKind(Enum):
     DELETING = "Eliminando"
     RENAMING = "Renombrando"
     INSTALLING_HOMEBREW = "Instalando homebrew"
+    FORMATTING = "Formateando la unidad"
 
     @property
     def label(self) -> str:
@@ -4544,6 +4808,18 @@ tanto la única verificación real de integridad es la validación de ZIP
 que hace `oscwii_installer` (Paso 2), que es obligatoria siempre y no
 depende de que esto se confirme.
 
+De dónde se baja
+----------------
+Todas las URLs que este módulo y `oscwii_installer` piden -el catálogo,
+los íconos y los ZIP- salen del mismo host confirmado arriba, y las dos
+últimas vienen DENTRO de la respuesta de la API, o sea que las elige
+contenido de red y no este código. Por eso viven acá la lista blanca
+(`ALLOWED_URL_SCHEMES` / `ALLOWED_DOWNLOAD_HOSTS`) y el único camino por
+el que se abre una descarga (`open_allowlisted`): un catálogo cambiado
+-comprometido, manipulado en el camino, o simplemente distinto mañana- no
+puede hacer que la app baje nada de otro dominio, ni siquiera a través de
+una redirección.
+
 También se confirmó bajando esos dos ZIPs reales que TODOS los archivos
 de adentro empiezan con "apps/<slug>/" (p. ej. "apps/WiiDonut/boot.dol"):
 es la convención estándar de Homebrew Channel para instalar en la
@@ -4554,6 +4830,7 @@ from __future__ import annotations
 
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from enum import Enum
@@ -4568,6 +4845,122 @@ OSC_API_BASE = "https://hbb1.oscwii.org"
 OSC_CONTENTS_URL = f"{OSC_API_BASE}/api/v3/contents"
 REQUEST_TIMEOUT = 15
 CONTENTS_CACHE_FILENAME = "oscwii_contents.json"
+USER_AGENT = "wiibackup-manager-linux"
+
+# Lista blanca de descarga (ver "De dónde se baja", arriba). El host de la
+# API se deriva de `OSC_API_BASE` en vez de copiarse a mano, para que
+# apuntar el cliente a otro servidor no deje esta lista desactualizada en
+# silencio; el literal queda igual escrito como respaldo explícito y como
+# documentación del host real (confirmado en vivo).
+ALLOWED_URL_SCHEMES = frozenset({"https"})
+ALLOWED_DOWNLOAD_HOSTS = frozenset(
+    h for h in {"hbb1.oscwii.org",
+                urllib.parse.urlsplit(OSC_API_BASE).hostname or ""} if h)
+
+
+class UnsafeDownloadURL(Exception):
+    """La URL a descargar -o la de alguna redirección- no está en la lista
+    blanca. Es una excepción y no un valor de retorno porque también tiene
+    que poder cortar desde adentro de urllib, en
+    `AllowlistRedirectHandler`, donde no hay ningún retorno que mirar.
+    Quien llama la traduce a lo que corresponda: `get_icon_path` la trata
+    como cualquier otro fallo de ícono (devuelve None, ícono de
+    placeholder) y `oscwii_installer.install_app` la reporta como
+    `InstallStatus.UNSAFE_URL`."""
+
+
+def url_rejection_reason(url: str) -> Optional[str]:
+    """Motivo por el que `url` NO se puede descargar, o None si está
+    permitida (https + host de `ALLOWED_DOWNLOAD_HOSTS`).
+
+    El host se saca de `urlsplit(...).hostname` a propósito y no del
+    `netloc` crudo: `hostname` ya descarta el puerto y, sobre todo, la
+    parte de credenciales, así que una URL del estilo
+    "https://hbb1.oscwii.org@atacante.example/x.zip" -que a ojo parece del
+    host bueno- se resuelve como "atacante.example" y se rechaza. Las
+    credenciales embebidas igual se rechazan aparte: el repositorio de OSC
+    es público y anónimo, una URL con usuario/contraseña solo puede venir
+    de un catálogo manipulado."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname
+        username = parts.username
+    except ValueError as e:
+        return f"la URL no se pudo interpretar ({e})"
+
+    scheme = parts.scheme.lower()
+    if scheme not in ALLOWED_URL_SCHEMES:
+        return (f"esquema {scheme or '(ninguno)'} no permitido; solo "
+                f"{', '.join(sorted(ALLOWED_URL_SCHEMES))}")
+    if username is not None:
+        return "la URL trae credenciales embebidas"
+    if not host:
+        return "la URL no tiene host"
+
+    # Un punto final ("hbb1.oscwii.org.") resuelve al mismo lugar en DNS
+    # pero no coincidiría con el literal de la lista: se normaliza para no
+    # rechazar por eso a un host que sí está permitido.
+    host = host.lower().rstrip(".")
+    if host not in ALLOWED_DOWNLOAD_HOSTS:
+        return (f"host {host} no permitido; solo "
+                f"{', '.join(sorted(ALLOWED_DOWNLOAD_HOSTS))}")
+    return None
+
+
+def ensure_url_allowed(url: str, que_es: str) -> None:
+    """Igual que `url_rejection_reason`, pero levantando
+    `UnsafeDownloadURL` para los lugares donde no hay un valor de retorno
+    que revisar (el handler de redirecciones, adentro de urllib)."""
+    motivo = url_rejection_reason(url)
+    if motivo is not None:
+        raise UnsafeDownloadURL(f"{que_es} fue rechazada: {motivo} ({url})")
+
+
+class AllowlistRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Valida CADA salto de redirección antes de seguirlo.
+
+    Validar solo la URL inicial no alcanza: urllib sigue las
+    redirecciones por su cuenta (301/302/303/307/308), así que un
+    `Location:` hacia otro dominio bastaría para saltear la lista blanca
+    aunque la URL del catálogo fuera la buena. `redirect_request` es el
+    único punto por el que urllib decide seguir un salto, así que es el
+    lugar donde cortarlo -y se corta antes de conectarse al destino
+    nuevo, no después."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        motivo = url_rejection_reason(newurl)
+        if motivo is not None:
+            # `http_error_302` sería quien cierra `fp` si el salto
+            # siguiera; como acá se corta, se cierra a mano para no dejar
+            # el socket de la respuesta colgando.
+            fp.close()
+            raise UnsafeDownloadURL(
+                f"la descarga fue redirigida a una URL rechazada: "
+                f"{motivo} ({newurl})")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def open_allowlisted(url: str, timeout: float, que_es: str = "la URL"):
+    """Único camino por el que esta app abre una descarga cuya URL vino
+    del catálogo (íconos acá, ZIPs en `oscwii_installer`): valida la URL
+    ANTES de abrir el socket, valida cada redirección antes de seguirla, y
+    valida también la URL final por si alguna vez se llega a ella por un
+    camino que no pase por el handler. Devuelve la respuesta abierta (para
+    usar con `with`); levanta `UnsafeDownloadURL` si algo de eso no pasa,
+    y lo que levante urllib para los errores de red normales."""
+    ensure_url_allowed(url, que_es)
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    # Opener propio en vez de `urlopen`: el `urlopen` global usa el
+    # `HTTPRedirectHandler` de urllib, que sigue cualquier salto sin
+    # preguntar (ver `AllowlistRedirectHandler`).
+    opener = urllib.request.build_opener(AllowlistRedirectHandler)
+    resp = opener.open(req, timeout=timeout)
+    try:
+        ensure_url_allowed(resp.geturl(), "la URL final de la descarga")
+    except BaseException:
+        resp.close()
+        raise
+    return resp
 
 
 def contents_cache_path() -> Path:
@@ -4736,7 +5129,7 @@ def _fetch_remote() -> tuple:
     malformado quedan todos capturados acá, no en quien llama)."""
     try:
         req = urllib.request.Request(
-            OSC_CONTENTS_URL, headers={"User-Agent": "wiibackup-manager-linux"})
+            OSC_CONTENTS_URL, headers={"User-Agent": USER_AGENT})
         with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
             if resp.status != 200:
                 return None, f"status HTTP {resp.status}"
@@ -4886,7 +5279,15 @@ def get_icon_path(app: HomebrewApp, force: bool = False) -> Optional[Path]:
     capturar. No hace falta una validación tan fuerte como
     `gametdb._decodes_as_image` (que decodifica el PNG entero): un ícono
     mal cacheado acá es cosmético, no arriesga instalar nada corrupto -eso
-    lo cubre `oscwii_installer`, con el ZIP."""
+    lo cubre `oscwii_installer`, con el ZIP.
+
+    `app.icon_url` sale del catálogo igual que `zip_url`, así que pasa por
+    la misma lista blanca (`open_allowlisted`): un catálogo cambiado no
+    puede hacer que la app le pida nada a otro dominio, ni siquiera por
+    una redirección. Un ícono es cosmético, así que una URL rechazada se
+    trata como cualquier otro fallo de descarga -None, y la tarjeta se
+    queda con el placeholder- en vez de interrumpir a quien mira la
+    tienda; lo que sí no puede pasar es que la descarga ocurra."""
     if not app.icon_url:
         return None
 
@@ -4894,14 +5295,22 @@ def get_icon_path(app: HomebrewApp, force: bool = False) -> Optional[Path]:
     if cache_path.exists() and not force:
         return cache_path
 
+    # Antes de crear la carpeta de caché: si la URL no está permitida, acá
+    # no se va a bajar nada, así que tampoco tiene por qué dejar rastro.
+    # `open_allowlisted` lo vuelve a chequear por su cuenta -es la que
+    # abre el socket-, esto es para cortar antes y sin efectos.
+    if url_rejection_reason(app.icon_url) is not None:
+        return None
+
     icons_cache_dir().mkdir(parents=True, exist_ok=True)
     try:
-        req = urllib.request.Request(
-            app.icon_url, headers={"User-Agent": "wiibackup-manager-linux"})
-        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+        with open_allowlisted(app.icon_url, REQUEST_TIMEOUT,
+                              "la URL del ícono") as resp:
             if resp.status != 200:
                 return None
             data = resp.read()
+    except UnsafeDownloadURL:
+        return None
     except urllib.error.HTTPError:
         return None
     except (urllib.error.URLError, OSError, TimeoutError):
@@ -4959,7 +5368,16 @@ Flujo de `install_app`, en orden, y por qué:
 
 1. Descargar el ZIP a un directorio temporal (fuera del destino elegido:
    la USB/SD ya preparada por Modo Fábrica, o cualquier carpeta que el
-   usuario confirme). Nada de esto toca el destino todavía.
+   usuario confirme). Nada de esto toca el destino todavía. La descarga
+   va por `oscwii_client.open_allowlisted`: antes de abrir siquiera el
+   socket se exige que la URL sea https y apunte a un host de la lista
+   blanca (`oscwii_client.ALLOWED_DOWNLOAD_HOSTS`), y cada redirección
+   se valida igual antes de seguirla. La URL sale del catálogo de la
+   API, que es contenido de red, y a ese contenido no se le delega desde
+   qué dominio se baja lo que después se instala. La lista vive en
+   `oscwii_client` -no acá- porque las URLs de ícono que baja ese mismo
+   módulo salen del mismo catálogo y tienen que pasar por el mismo
+   filtro: una sola lista, no dos que se desincronizan.
 2. Verificar el hash contra el que traiga la API (`HomebrewApp.zip_sha256`
    / `zip_md5`), si trae alguno. Hoy la API v3 de OSC no expone ningún
    hash (ver el comentario de `oscwii_client`), así que este paso no hace
@@ -4979,11 +5397,43 @@ Flujo de `install_app`, en orden, y por qué:
    escriba a través de él hacia otro lado). Si UNA sola entrada no pasa,
    se aborta todo: no se extrae nada, ni siquiera las entradas que sí
    eran seguras.
-5. Extraer SOLO dentro de esas carpetas permitidas de `dest_root`,
-   copiando bytes (nunca ejecutando ni el binario -.dol/.elf- ni ningún
-   script) a un archivo temporal por entrada y renombrándolo al final
-   (mismo patrón atómico que `gametdb._store_cover` y
-   `config.write_text_atomic`).
+   Además, dos entradas tampoco pueden colisionar ENTRE SÍ vistas como
+   las ve el destino real, que es FAT32/exFAT y no distingue mayúsculas:
+   "apps/Foo/meta.xml" y "apps/Foo/META.XML" son dos archivos distintos
+   acá y uno solo allá -el segundo pisaría al primero en silencio, así
+   que lo instalado no sería lo que el catálogo dice-. Tampoco puede una
+   ruta ser un archivo y otra necesitar ese mismo nombre como carpeta.
+   Cualquiera de las dos cosas rechaza el ZIP entero
+   (`_check_name_collisions`).
+5. Extraer SOLO dentro de esas carpetas permitidas de `dest_root`. Cada
+   ZIP toca una o más "unidades" -una subcarpeta de primer nivel dentro
+   de una carpeta permitida, típicamente `apps/<NombreDeLaApp>`- y cada
+   unidad se instala como bloque atómico, no archivo por archivo:
+
+   a. Se extrae la unidad ENTERA a una carpeta de staging oculta,
+      hermana de su carpeta final (mismo filesystem, para que el
+      intercambio de abajo sea un `os.replace` simple y no una copia).
+      Si algo falla durante la extracción, se borra la staging entera y
+      la carpeta final -la versión anterior de la app, si había una- no
+      se toca para nada.
+   b. Con la extracción completa: si la unidad no existía antes, la
+      staging pasa a ocupar su lugar directo. Si ya existía
+      (actualización), se la aparta primero a un nombre oculto de
+      respaldo, entra la staging en su lugar, y el respaldo se borra
+      solo si el intercambio completo salió bien. Sin esto, una
+      actualización que fallaba a mitad de camino podía dejar una
+      mezcla de archivos de la versión vieja y la nueva -cada archivo
+      individual escrito de forma válida, pero la app entera rota-;
+      mismo patrón que `library.DestinationGuard` (Sesión 2), llevado
+      de archivos WBFS individuales a una carpeta completa. Ver
+      `_stage_and_swap_unit`.
+
+   Los pocos archivos sueltos que un ZIP puede traer directo dentro de
+   una carpeta permitida sin ninguna subcarpeta (sin "unidad" que
+   intercambiar) se siguen escribiendo uno por uno con el patrón atómico
+   de siempre (`_extract_member`, mismo que `gametdb._store_cover` y
+   `config.write_text_atomic`) -nunca ejecutando ni el binario
+   (.dol/.elf) ni ningún script, solo copiando bytes.
 
 Nada de esto usa GLib: igual que `gametdb.py`, este módulo es agnóstico de
 la interfaz. `install_app` es una función sincrónica y bloqueante; quien
@@ -4994,12 +5444,12 @@ como ya hace `queue_manager.TransferQueue` para las transferencias.
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import stat
 import tempfile
 import threading
 import urllib.error
-import urllib.request
 import zipfile
 from dataclasses import dataclass
 from enum import Enum
@@ -5008,7 +5458,8 @@ from typing import Callable, Optional
 
 from . import drives, library
 from .fsutil import atomic_target
-from .oscwii_client import HomebrewApp
+from .oscwii_client import (HomebrewApp, UnsafeDownloadURL,
+                            open_allowlisted, url_rejection_reason)
 
 REQUEST_TIMEOUT = 20
 DOWNLOAD_CHUNK_SIZE = 256 * 1024
@@ -5042,10 +5493,21 @@ class InstallStatus(Enum):
     HASH_MISMATCH = "hash_mismatch"
     BAD_ZIP = "bad_zip"
     UNSAFE_ZIP = "unsafe_zip"
+    # La URL de descarga (la del catálogo, o el destino de una
+    # redirección) no pasó la lista blanca de esquema/host. Distinto de
+    # `DOWNLOAD_ERROR`: no es que la descarga haya fallado, es que ni
+    # siquiera se intentó porque el catálogo apuntaba a otro lado.
+    UNSAFE_URL = "unsafe_url"
     UNSAFE_DEST_ROOT = "unsafe_dest_root"
     NO_SPACE = "no_space"
     IO_ERROR = "io_error"
     CANCELLED = "cancelled"
+    # La instalación falló Y ADEMÁS `_stage_and_swap_unit` no pudo
+    # devolver la versión anterior a su lugar (ver
+    # `library.RollbackFailedError`): distinto de `IO_ERROR` porque acá
+    # la app puede haber quedado directamente inexistente, no solo con
+    # la instalación nueva sin aplicar.
+    ROLLBACK_FAILED = "rollback_failed"
 
     @property
     def is_ok(self) -> bool:
@@ -5100,14 +5562,18 @@ def _download_zip(app: HomebrewApp, dest_path: Path,
     """Descarga `app.zip_url` a `dest_path`, calculando md5 y sha256 al
     vuelo (una sola pasada por los bytes, sirve para lo que sea que la API
     haya provisto). Devuelve (True, "", md5_hex, sha256_hex) o
-    (False, motivo, "", ""); nunca lanza salvo `CancelRequested`, que se
-    deja propagar para que `install_app` la distinga de un error real."""
+    (False, motivo, "", ""); nunca lanza salvo `CancelRequested` y
+    `UnsafeDownloadURL`, que se dejan propagar para que `install_app` las
+    distinga de un error de red común."""
     md5 = hashlib.md5()
     sha256 = hashlib.sha256()
     try:
-        req = urllib.request.Request(
-            app.zip_url, headers={"User-Agent": "wiibackup-manager-linux"})
-        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+        # `open_allowlisted` valida la URL antes de abrir el socket (o
+        # sea, antes de tocar `dest_path`), valida cada redirección antes
+        # de seguirla y valida también la URL final: nada de lo que se
+        # escribe acá puede venir de un host que no esté en la lista.
+        with open_allowlisted(app.zip_url, REQUEST_TIMEOUT,
+                              "la URL de descarga del catálogo") as resp:
             if resp.status != 200:
                 return False, f"status HTTP {resp.status}", "", ""
 
@@ -5195,6 +5661,83 @@ def _is_safe_member(name: str, dest_root: Path) -> bool:
     return target == allowed_root or allowed_root in target.parents
 
 
+def _normalized_member_path(name: str) -> str:
+    """Ruta de una entrada del ZIP en la forma canónica que se usa para
+    compararla con las demás: separadores "/" (los ZIP de Windows pueden
+    traer "\\"), sin componentes vacíos ni ".", y sin la "/" final que
+    marca a las carpetas. Devuelve "" si no queda nada."""
+    partes = [p for p in name.replace("\\", "/").split("/") if p and p != "."]
+    return "/".join(partes)
+
+
+def _check_name_collisions(infos: list) -> Optional[str]:
+    """Busca dos entradas del ZIP que terminarían siendo LA MISMA cosa en
+    el destino. Devuelve el motivo del rechazo, o None si no hay ninguna.
+
+    Dos casos, y los dos rechazan el ZIP entero (no solo la entrada
+    repetida: si el paquete es ambiguo, no hay forma de saber cuál de las
+    dos versiones era la que el catálogo decía instalar):
+
+    1. Colisión de nombres sin distinguir mayúsculas. El destino real es
+       una SD/USB con FAT32 o exFAT, que no las distingue:
+       "apps/Foo/meta.xml" y "apps/Foo/META.XML" son dos entradas
+       distintas para `zipfile` -y para Linux- pero un solo archivo allá,
+       y la segunda pisaría a la primera sin que nada lo avise. Lo mismo
+       vale entre carpetas ("apps/Foo" y "apps/foo" son una sola unidad
+       en el destino, y `_stage_and_swap_unit` instalaría una encima de
+       la otra). La comparación usa `casefold()`, que es el plegado de
+       mayúsculas pensado para comparar, no `lower()`.
+    2. Conflicto archivo/carpeta: una entrada es el archivo "apps/foo" y
+       otra necesita que "apps/foo" sea una carpeta (p. ej. la entrada
+       "apps/foo/bar"). No es un choque de nombres sino de estructura, y
+       en el destino tampoco puede existir de las dos formas a la vez.
+
+    También cuenta como colisión que la MISMA ruta aparezca dos veces
+    como archivo: un ZIP puede traer entradas duplicadas, y quien lo lea
+    después se queda con una u otra según la implementación -otra vez,
+    contenido ambiguo-. Los duplicados de carpeta no son ambiguos (una
+    carpeta no tiene contenido propio) y se aceptan: son inevitables,
+    porque toda ruta implica a sus carpetas padre."""
+    # clave normalizada -> (ruta tal como quedó normalizada, es_carpeta)
+    vistos: dict = {}
+
+    def _registrar(ruta: str, es_carpeta: bool) -> Optional[str]:
+        clave = ruta.casefold()
+        previa = vistos.get(clave)
+        if previa is None:
+            vistos[clave] = (ruta, es_carpeta)
+            return None
+        ruta_previa, previa_es_carpeta = previa
+        if previa_es_carpeta != es_carpeta:
+            archivo = ruta_previa if not previa_es_carpeta else ruta
+            carpeta = ruta if not previa_es_carpeta else ruta_previa
+            return (f'"{archivo}" es un archivo y "{carpeta}" necesita ese '
+                    f"mismo nombre como carpeta")
+        if ruta_previa != ruta:
+            return (f'"{ruta_previa}" y "{ruta}" son el mismo nombre en el '
+                    f"destino (FAT32/exFAT no distingue mayúsculas)")
+        if not es_carpeta:
+            return f'"{ruta}" aparece dos veces en el ZIP'
+        return None
+
+    for info in infos:
+        ruta = _normalized_member_path(info.filename)
+        if not ruta:
+            continue
+        partes = ruta.split("/")
+        # Cada carpeta padre de la entrada, aunque el ZIP no traiga una
+        # entrada propia para ella: es lo que hay que crear en el destino
+        # para poder escribir esta ruta.
+        for i in range(1, len(partes)):
+            motivo = _registrar("/".join(partes[:i]), True)
+            if motivo is not None:
+                return motivo
+        motivo = _registrar(ruta, info.is_dir())
+        if motivo is not None:
+            return motivo
+    return None
+
+
 def _validate_zip(zip_path: Path, dest_root: Path) -> tuple:
     """Abre y valida el ZIP entero SIN extraer nada. Devuelve
     (zipfile.ZipFile, None, "") si todo salió bien -el ZipFile queda
@@ -5249,6 +5792,18 @@ def _validate_zip(zip_path: Path, dest_root: Path) -> tuple:
                             f"({', '.join(_ALLOWED_TOP_LEVEL_DIRS)}) en el "
                             f"ZIP ({info.filename}), rechazado")
                     break
+
+            # Recién con todas las entradas validadas de a una tiene
+            # sentido mirarlas entre sí: dos rutas que por separado son
+            # seguras pueden ser la misma cosa en el destino. Se hace
+            # sobre `infolist()` completo -carpetas incluidas- porque el
+            # conflicto puede estar justo entre un archivo y una carpeta.
+            if status is None:
+                motivo = _check_name_collisions(zf.infolist())
+                if motivo is not None:
+                    status = InstallStatus.UNSAFE_ZIP
+                    error = (f"el ZIP tiene entradas que colisionan en el "
+                            f"destino: {motivo}; rechazado")
     except (zipfile.BadZipFile, OSError, EOFError) as e:
         status = InstallStatus.BAD_ZIP
         error = f"el ZIP está corrupto o truncado ({e})"
@@ -5280,6 +5835,128 @@ def _extract_member(zf: zipfile.ZipFile, info: zipfile.ZipInfo,
         with zf.open(info) as src, tmp.open("wb") as dst:
             shutil.copyfileobj(src, dst)
     return target
+
+
+# ---------------------------------------------- Unidades (carpeta atómica) --
+def _group_members(members: list) -> tuple[dict, list]:
+    """Separa los miembros del ZIP (ya validados, sin carpetas) en:
+
+    - unidades: subcarpetas de primer nivel dentro de una carpeta
+      permitida (ej. "apps/WiiDonut", o "controllers/Nintendont" si el
+      ZIP trae esa estructura) que se instalan como bloque atómico con
+      `_stage_and_swap_unit`.
+    - sueltos: archivos que caen directo dentro de una carpeta permitida
+      SIN ninguna subcarpeta (ej. "controllers/perfil.ini"). Para un
+      archivo suelto no hay una "carpeta completa" que intercambiar -ya
+      es atómico con `_extract_member` de siempre- así que agruparlo
+      igual no compraría ninguna protección de más, solo complejidad."""
+    unidades: dict = {}
+    sueltos: list = []
+    for info in members:
+        parts = PurePosixPath(info.filename).parts
+        if len(parts) >= 3:
+            clave = f"{parts[0]}/{parts[1]}"
+            unidades.setdefault(clave, []).append(info)
+        else:
+            sueltos.append(info)
+    return unidades, sueltos
+
+
+def _stage_and_swap_unit(zf: zipfile.ZipFile, unit_members: list,
+                         final_dir: Path,
+                         cancel_event: Optional[threading.Event],
+                         on_step: Callable[[], None]) -> list[Path]:
+    """Instala UNA unidad -una subcarpeta de primer nivel del ZIP, ej.
+    "apps/WiiDonut"- como bloque atómico: todo o nada, nunca una mezcla
+    de archivos viejos y nuevos. Mismo patrón que
+    `library.DestinationGuard` (Sesión 2), llevado de archivos WBFS
+    individuales a una carpeta completa:
+
+    1. Se extrae TODO el contenido de la unidad a una carpeta de staging
+       oculta, hermana de `final_dir` (mismo filesystem: el intercambio
+       final es un `os.replace` simple, nunca una copia entre discos).
+       Si algo falla acá, se borra la staging entera y se propaga el
+       error SIN TOCAR `final_dir` -la app vieja, si había una, queda
+       exactamente como estaba.
+    2. Con la extracción completa y sin errores: si `final_dir` no
+       existía, la staging pasa a ocupar su lugar directo. Si ya existía
+       (actualización), se la aparta primero a un nombre oculto de
+       respaldo, entra la staging en su lugar, y el respaldo se borra
+       recién si el intercambio completo salió bien.
+    3. Si el intercambio falla DESPUÉS de haber apartado el respaldo, se
+       intenta devolverlo a su lugar antes de propagar el error -la app
+       vieja se recupera, la instalación nueva es la que fracasó. Si eso
+       TAMBIÉN falla (el caso que no se puede ignorar en silencio, mismo
+       espíritu que `DestinationGuard._restore`), se levanta
+       `library.RollbackFailedError`: la estructura es distinta -acá un
+       solo par carpeta-original/carpeta-respaldo, en `DestinationGuard`
+       varios pares de archivos WBFS- pero el problema es el mismo, y
+       vale la misma excepción.
+
+    Devuelve las rutas finales escritas (para `InstallResult.installed_paths`)."""
+    parent = final_dir.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    pid = os.getpid()
+    staging_dir = parent / f".{final_dir.name}.wbm-staging-{pid}"
+    backup_dir = parent / f".{final_dir.name}.wbm-respaldo-{pid}"
+
+    # Por si quedó un staging huérfano de un intento anterior con el
+    # mismo PID: no debería pasar, pero `rmtree` de algo que no existe
+    # no es un error (`ignore_errors=True`).
+    shutil.rmtree(staging_dir, ignore_errors=True)
+    staging_dir.mkdir()
+
+    relativos: list[PurePosixPath] = []
+    try:
+        for info in unit_members:
+            _check_cancel(cancel_event)
+            relativo = PurePosixPath(*PurePosixPath(info.filename).parts[2:])
+            destino = staging_dir / Path(*relativo.parts)
+            destino.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(info) as src, destino.open("wb") as dst:
+                shutil.copyfileobj(src, dst)
+            relativos.append(relativo)
+            on_step()
+    except BaseException:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+
+    if not final_dir.exists():
+        try:
+            os.replace(staging_dir, final_dir)
+        except BaseException:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise
+        return [final_dir / Path(*r.parts) for r in relativos]
+
+    try:
+        os.replace(final_dir, backup_dir)
+    except OSError:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+
+    try:
+        os.replace(staging_dir, final_dir)
+    except OSError as e:
+        try:
+            os.replace(backup_dir, final_dir)
+        except OSError:
+            # Catastrófico: ni el intercambio ni la restauración del
+            # respaldo funcionaron. La staging -que SÍ tiene la versión
+            # nueva completa- se deja intacta a propósito, junto con el
+            # respaldo: dos candidatos rescatables a mano es mejor que
+            # borrar alguno de los dos por las dudas.
+            raise library.RollbackFailedError(
+                [(final_dir, backup_dir)], original_error=e) from e
+        # Se pudo restaurar la versión anterior: la instalación nueva
+        # fracasó pero la app queda funcional, así que no hace falta
+        # conservar la staging.
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+    else:
+        shutil.rmtree(backup_dir, ignore_errors=True)
+
+    return [final_dir / Path(*r.parts) for r in relativos]
 
 
 # -------------------------------------------------------------------- API --
@@ -5318,6 +5995,19 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
                 f"{dest_root} es una ruta crítica del sistema operativo, "
                 "se rechaza como destino de instalación")
 
+        # Antes de crear nada en el destino: si la URL que trae el
+        # catálogo no está en la lista blanca, esta instalación no va a
+        # pasar de acá, así que no tiene por qué dejar rastro en la
+        # unidad del usuario. `_download_zip` vuelve a chequearlo por su
+        # cuenta -es la que abre el socket- y además valida cada
+        # redirección.
+        url_err = url_rejection_reason(app.zip_url)
+        if url_err is not None:
+            return InstallResult(
+                InstallStatus.UNSAFE_URL, app.slug,
+                f"la URL de descarga de la app fue rechazada: {url_err} "
+                f"({app.zip_url})")
+
         try:
             (dest_root / "apps").mkdir(parents=True, exist_ok=True)
         except OSError as e:
@@ -5352,12 +6042,26 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
                         f"necesita {library.format_size(needed)} y quedan "
                         f"{library.format_size(free)} en el destino")
 
+                unidades, sueltos = _group_members(members)
+                total = len(members)
+                hechos = [0]
+
+                def _paso() -> None:
+                    hechos[0] += 1
+                    _report(on_progress, "extract",
+                           (hechos[0] / total) if total else 1.0)
+
                 written: list = []
-                for idx, info in enumerate(members):
+                for unit_key, unit_members in unidades.items():
+                    _check_cancel(cancel_event)
+                    final_dir = dest_root / unit_key
+                    written.extend(_stage_and_swap_unit(
+                        zf, unit_members, final_dir, cancel_event, _paso))
+
+                for info in sueltos:
                     _check_cancel(cancel_event)
                     written.append(_extract_member(zf, info, dest_root))
-                    _report(on_progress, "extract", (idx + 1) / len(members)
-                           if members else 1.0)
+                    _paso()
             finally:
                 zf.close()
 
@@ -5367,6 +6071,21 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
     except CancelRequested:
         return InstallResult(InstallStatus.CANCELLED, app.slug,
                              "instalación cancelada")
+    except UnsafeDownloadURL as e:
+        # Sale de `_download_zip` (o de una redirección rechazada a mitad
+        # de la descarga): la app no se instaló y nada del destino se
+        # tocó, pero el motivo no es un fallo de red común y se reporta
+        # distinto.
+        return InstallResult(InstallStatus.UNSAFE_URL, app.slug, str(e))
+    except library.RollbackFailedError as e:
+        # Caso grave: la instalación falló Y ADEMÁS no se pudo devolver
+        # la versión anterior a su lugar (ver `_stage_and_swap_unit`).
+        # `user_message` distingue esto de un `IO_ERROR` común -acá la
+        # app puede haber quedado directamente inexistente, y el
+        # respaldo que sigue existiendo (`e.pending`) es la única forma
+        # de rescatarla a mano.
+        return InstallResult(InstallStatus.ROLLBACK_FAILED, app.slug,
+                             e.user_message())
     except OSError as e:
         return InstallResult(InstallStatus.IO_ERROR, app.slug, str(e))
     except Exception as e:  # noqa: BLE001 - red de seguridad final
@@ -5429,7 +6148,7 @@ from typing import Callable, Optional
 
 from gi.repository import GLib
 
-from . import library, oplog, wit_wrapper
+from . import drives, library, oplog, wit_wrapper
 from .i18n import _
 from .library import Game, TransferItem
 from .operations import OperationBusy, OperationKind, OperationOutcome
@@ -5941,7 +6660,7 @@ class TransferQueue:
                     OperationKind.TRANSFERRING,
                     read=[job.game.path],
                     write=[dest],
-                    resources=[job.dest_root],
+                    resources=drives.resources_for_mount_point(job.dest_root),
                 )
             except OperationBusy as e:
                 if not aviso_dado:
@@ -6015,6 +6734,16 @@ class TransferQueue:
                 _("No se encontró `wit` ({binary}). Instalalo o configurá la "
                   "ruta en Preferencias.").format(binary=job.wit_binary),
                 oplog.STATUS_ERROR, op=op)
+            return
+        except library.RollbackFailedError as e:
+            # Caso grave: la conversión falló Y ADEMÁS no se pudo devolver
+            # el original a su lugar (típico en un WBFS dividido si falla
+            # justo una de las partes). `user_message` distingue esto de
+            # un "la conversión falló" común -acá el juego puede haber
+            # quedado inservible, y el respaldo que sigue existiendo (ver
+            # `e.pending`) es la única forma de rescatarlo a mano.
+            self._finish_job(job, JobStatus.ERROR, e.user_message(),
+                             oplog.STATUS_ERROR, op=op)
             return
         except Exception as e:  # noqa: BLE001
             if job.cancel_token.cancelled:
@@ -6997,9 +7726,11 @@ _INSTALL_STATUS_LABELS = {
     InstallStatus.HASH_MISMATCH: _("El archivo no coincide con lo esperado"),
     InstallStatus.BAD_ZIP: _("El archivo descargado está dañado"),
     InstallStatus.UNSAFE_ZIP: _("El paquete no es seguro para instalar"),
+    InstallStatus.UNSAFE_URL: _("La descarga apuntaba a un sitio no autorizado"),
     InstallStatus.UNSAFE_DEST_ROOT: _("El destino elegido no es válido"),
     InstallStatus.NO_SPACE: _("No hay espacio suficiente en el destino"),
     InstallStatus.IO_ERROR: _("Error al escribir en el destino"),
+    InstallStatus.ROLLBACK_FAILED: _("Error grave: no se pudo restaurar la versión anterior"),
 }
 
 
@@ -7425,7 +8156,7 @@ class HomebrewStoreView(Gtk.Box):
             op = self.ops.start(
                 OperationKind.INSTALLING_HOMEBREW,
                 write=[dest_root / "apps" / app.slug],
-                resources=[dest_root],
+                resources=drives.resources_for_mount_point(dest_root),
             )
         except OperationBusy as e:
             self._show_toast(_("No se puede ahora: {detail}.").format(detail=e.detail))
@@ -9092,7 +9823,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         # `self._content_nav_page` al elegirla.
         self._sidebar_items = [
             ("juegos", "applications-games-symbolic", _("Juegos")),
-            ("cola", "emblem-synchronizing-symbolic", _("Cola de Tareas")),
+            ("cola", "emblem-synchronizing-symbolic", _("Transferir")),
             ("fabrica", "drive-removable-media-symbolic", _("Modo Fábrica")),
             ("tienda", "system-software-install-symbolic", _("Homebrew Store")),
             ("ajustes", "emblem-system-symbolic", _("Ajustes")),
@@ -9311,7 +10042,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
     def _build_cola_page(self):
         toolbar_view = Adw.ToolbarView()
         header = Adw.HeaderBar()
-        header.set_title_widget(Adw.WindowTitle(title=_("Cola de Tareas")))
+        header.set_title_widget(Adw.WindowTitle(title=_("Transferir")))
         toolbar_view.add_top_bar(header)
 
         # `TransferView` es el mismo widget que antes vivía en la pestaña
@@ -9476,7 +10207,23 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         estructura de carpetas) en un hilo de fondo, para no congelar la
         interfaz mientras `pkexec` pide contraseña y `mkfs.vfat` escribe.
         El resultado vuelve al hilo de GTK con `GLib.idle_add`, igual que
-        el resto de las operaciones largas de la ventana."""
+        el resto de las operaciones largas de la ventana.
+
+        Antes de arrancar nada, declara el disco entero (`device.path`,
+        no un punto de montaje: `format_as_wii_usb` lo desmonta) como
+        recurso ocupado ante el `OperationManager`. Es lo que impide
+        formatear una unidad mientras Transferencias o la instalación de
+        Homebrew le están escribiendo algo encima -y viceversa: si el
+        disco ya está ocupado, `ops.start` levanta `OperationBusy` acá y
+        ni siquiera se llega a mostrar la barra de progreso."""
+        try:
+            op = self.ops.start(OperationKind.FORMATTING,
+                                resources=[device.path])
+        except OperationBusy as e:
+            self._show_toast(
+                _("No se puede formatear ahora: {detail}.").format(detail=e.detail))
+            return
+
         self._factory_busy = True
         self._factory_prepare_btn.set_sensitive(False)
         self._factory_refresh_btn.set_sensitive(False)
@@ -9493,6 +10240,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 GLib.idle_add(self._on_factory_format_done, False, str(e))
             else:
                 GLib.idle_add(self._on_factory_format_done, True, str(punto_montaje))
+            finally:
+                self.ops.finish(op)
 
         threading.Thread(target=worker, daemon=True, name="factory-format").start()
 
@@ -11266,6 +12015,15 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 cancelled = True
                 detail = "cancelada por el usuario"
                 msg = f"Conversión de '{game.title}' cancelada."
+            except library.RollbackFailedError as e:
+                # Caso grave: además de fallar la conversión, no se pudo
+                # devolver el original a su lugar (ver
+                # `library.RollbackFailedError`). `user_message` nombra
+                # los dos problemas -no alcanza con "error al convertir"
+                # cuando el archivo puede haber quedado inservible.
+                ok = False
+                msg = e.user_message()
+                detail = str(e)
             except Exception as e:
                 if cancel.cancelled:
                     cancelled = True
@@ -12318,12 +13076,23 @@ mentira PERO REAL: un archivo de unos cientos de MB expuesto con
    verdad, y no hace falta: lo que se prueba es que la función SABE
    encontrar la partición correcta y frenar, no que conozca de memoria
    la lista de rutas del sistema operativo.
-3) El camino feliz corre `format_as_wii_usb` DE VERDAD (mismo código que
+3) BLINDAJE 3 (identidad física) aborta si la serie que reporta udev
+   cambia entre el chequeo de antes de desmontar y el de justo antes de
+   `mkfs.vfat`. Un loop device no tiene serie de verdad -no es un bus con
+   identidad física, es un archivo-, así que acá se simula igual que la
+   Fase 1 simula que ES removable: reemplazando `drives.device_identity`
+   por una versión que, para este loop device puntual, devuelve un valor
+   la primera vez que se la llama y OTRO distinto la segunda -exactamente
+   lo que pasaría si el kernel reciclara `/dev/sdb` para un USB distinto
+   entre esos dos momentos. `format_as_wii_usb` en sí no se toca: nada
+   más se le inyecta un `run` que registra los comandos para confirmar
+   que `mkfs.vfat` nunca llegó a correr.
+4) El camino feliz corre `format_as_wii_usb` DE VERDAD (mismo código que
    usaría la interfaz) sobre el loop device: Blindaje 1 se fuerza a pasar
    -es la única forma de llegar hasta acá con un loop device, que nunca
    es removible de verdad- y de ahí en más todo es real: blindaje 3
-   (tamaño), blindaje 4 (montajes), `mkfs.vfat`, montaje y creación de
-   apps/games/wbfs.
+   (tamaño e identidad), blindaje 4 (montajes), `mkfs.vfat`, montaje y
+   creación de apps/games/wbfs.
 
 Requiere root: crear/soltar un loop device y formatear con `mkfs.vfat`
 son operaciones de root en cualquier distro. Se corre con
@@ -12378,7 +13147,7 @@ def crear_loop_device(tamano_mb: int, workdir: Path) -> tuple[Path, Path]:
 def fase_1_blindaje_1(loop_dev: Path) -> None:
     """El loop device tiene que quedar afuera de la lista blanca, igual
     que un disco interno: es exactamente lo que hace que sea seguro
-    usarlo para la Fase 3 sin arriesgar nada -si el Blindaje 1 fallara acá
+    usarlo para las Fases 3 y 4 sin arriesgar nada -si el Blindaje 1 fallara acá
     (falso positivo), format_as_wii_usb() ni siquiera necesitaría el
     monkeypatch de más abajo, que es la señal de que algo anda mal."""
     print("\n=== Fase 1: Blindaje 1 (lista blanca de removibles) ===")
@@ -12422,8 +13191,73 @@ def fase_2_blindaje_4(loop_dev: Path, workdir: Path) -> None:
 
 
 # --------------------------------------------------------------- Fase 3 --
-def fase_3_formateo_real(loop_dev: Path) -> None:
-    print("\n=== Fase 3: camino feliz — formateo real sobre el loop device ===")
+def fase_3_identidad(loop_dev: Path) -> None:
+    print("\n=== Fase 3: Blindaje 3 (identidad física entre desmontar y mkfs) ===")
+    original_is_removable = drives.is_removable_block_device
+    original_identity = drives.device_identity
+
+    def _forzar_removible(device_path):
+        if Path(device_path) == loop_dev:
+            return True
+        return original_is_removable(device_path)
+
+    llamadas = {"n": 0}
+
+    def _identidad_simulada(device_path, **kwargs):
+        # Solo se simula PARA ESTE loop device: si algún otro código de
+        # camino llegara a consultar la identidad de otro dispositivo
+        # (no debería pasar acá), se lo deja pasar a la función real.
+        if Path(device_path) != loop_dev:
+            return original_identity(device_path, **kwargs)
+        llamadas["n"] += 1
+        return "LOOP-SERIE-INICIAL" if llamadas["n"] == 1 else "LOOP-SERIE-DISTINTA"
+
+    comandos_ejecutados: list[list[str]] = []
+
+    def _run_real_pero_registrado(cmd, **kwargs):
+        comandos_ejecutados.append(cmd)
+        return subprocess.run(cmd, **kwargs)
+
+    drives.is_removable_block_device = _forzar_removible
+    drives.device_identity = _identidad_simulada
+    try:
+        tamano = drives.device_size_bytes(loop_dev)
+        device = drives.BlockDevice(path=loop_dev, model="Loop de prueba",
+                                    size_bytes=tamano or 0,
+                                    identity="LOOP-SERIE-INICIAL")
+        try:
+            drives.format_as_wii_usb(device, run=_run_real_pero_registrado,
+                                     label="WII_TEST")
+        except drives.DeviceIdentityMismatchError:
+            marcar("Fase 3: format_as_wii_usb aborta con "
+                   "DeviceIdentityMismatchError cuando la identidad cambia "
+                   "entre desmontar y mkfs.vfat", True)
+        except Exception as e:  # noqa: BLE001
+            marcar("Fase 3: format_as_wii_usb aborta con "
+                   "DeviceIdentityMismatchError cuando la identidad cambia "
+                   "entre desmontar y mkfs.vfat", False,
+                   f"levantó {type(e).__name__} en vez: {e}")
+        else:
+            marcar("Fase 3: format_as_wii_usb aborta con "
+                   "DeviceIdentityMismatchError cuando la identidad cambia "
+                   "entre desmontar y mkfs.vfat", False,
+                   "no levantó ninguna excepción -- llegó a formatear")
+
+        marcar("Fase 3: se consultó la identidad exactamente dos veces "
+               "(antes de desmontar y otra vez antes de mkfs.vfat)",
+               llamadas["n"] == 2, f"llamadas={llamadas['n']}")
+
+        hubo_mkfs = any("mkfs.vfat" in c for c in comandos_ejecutados)
+        marcar("Fase 3: mkfs.vfat NO llegó a ejecutarse",
+               not hubo_mkfs, str(comandos_ejecutados))
+    finally:
+        drives.is_removable_block_device = original_is_removable
+        drives.device_identity = original_identity
+
+
+# --------------------------------------------------------------- Fase 4 --
+def fase_4_formateo_real(loop_dev: Path) -> None:
+    print("\n=== Fase 4: camino feliz — formateo real sobre el loop device ===")
     # Blindaje 1 (adentro de verify_still_safe) rechazaría el loop device
     # de verdad -es justo lo que confirmó la Fase 1-, así que se lo fuerza
     # a pasar para poder ejercitar el resto del camino de punta a punta.
@@ -12443,22 +13277,22 @@ def fase_3_formateo_real(loop_dev: Path) -> None:
         try:
             punto_montaje = drives.format_as_wii_usb(device, label="WII_TEST")
         except Exception as e:  # noqa: BLE001
-            marcar("Fase 3: format_as_wii_usb corrió sin levantar excepción",
+            marcar("Fase 4: format_as_wii_usb corrió sin levantar excepción",
                    False, str(e))
             return
-        marcar("Fase 3: format_as_wii_usb corrió sin levantar excepción", True,
+        marcar("Fase 4: format_as_wii_usb corrió sin levantar excepción", True,
                f"montado en {punto_montaje}")
 
         carpetas_ok = all((punto_montaje / c).is_dir() for c in drives.FACTORY_FOLDERS)
-        marcar("Fase 3: se crearon apps/games/wbfs en el punto de montaje",
+        marcar("Fase 4: se crearon apps/games/wbfs en el punto de montaje",
                carpetas_ok, str(sorted(p.name for p in punto_montaje.iterdir())))
 
         fstype = drives.filesystem_of(punto_montaje)
-        marcar("Fase 3: el filesystem resultante es FAT32/vfat",
+        marcar("Fase 4: el filesystem resultante es FAT32/vfat",
                fstype in {"vfat", "fat32"}, f"filesystem_of={fstype}")
 
         ok_desmonte, detalle = drives.eject_mount_point(punto_montaje)
-        marcar("Fase 3: se pudo desmontar el punto de montaje al terminar",
+        marcar("Fase 4: se pudo desmontar el punto de montaje al terminar",
                ok_desmonte, detalle)
     finally:
         drives.is_removable_block_device = original_is_removable
@@ -12491,7 +13325,8 @@ def main() -> int:
 
         fase_1_blindaje_1(loop_dev)
         fase_2_blindaje_4(loop_dev, workdir)
-        fase_3_formateo_real(loop_dev)
+        fase_3_identidad(loop_dev)
+        fase_4_formateo_real(loop_dev)
     finally:
         if loop_dev is not None:
             subprocess.run(["umount", str(loop_dev)], capture_output=True)
@@ -13285,7 +14120,92 @@ def test_verify_still_safe_rechaza_si_el_dispositivo_desaparecio(sys_block):
         drives.verify_still_safe(device)
 
 
-# ------------------------------------------- Blindaje 4: montajes críticos --
+# ------------------------------------- Blindaje 3: identidad física (udev) --
+def _fake_udevadm(propiedades: dict[str, str]):
+    """`run` falso que simula `udevadm info --query=property --name=...`,
+    devolviendo `propiedades` como líneas CLAVE=valor (el formato real de
+    udevadm)."""
+    salida = "\n".join(f"{k}={v}" for k, v in propiedades.items()) + "\n"
+
+    def _run(cmd, **_k):
+        assert cmd[:2] == ["udevadm", "info"]
+        return subprocess.CompletedProcess(cmd, 0, salida, "")
+    return _run
+
+
+def test_device_identity_prefiere_id_serial(sys_block):
+    run = _fake_udevadm({"ID_SERIAL": "SanDisk_Ultra_AA11",
+                         "ID_SERIAL_SHORT": "AA11", "ID_WWN": "0xdead"})
+    assert drives.device_identity("/dev/sdb", run=run) == "SanDisk_Ultra_AA11"
+
+
+def test_device_identity_cae_a_serial_short_si_falta_id_serial(sys_block):
+    run = _fake_udevadm({"ID_SERIAL_SHORT": "AA11", "ID_WWN": "0xdead"})
+    assert drives.device_identity("/dev/sdb", run=run) == "AA11"
+
+
+def test_device_identity_cae_a_wwn_como_ultimo_recurso(sys_block):
+    run = _fake_udevadm({"ID_WWN": "0xdead"})
+    assert drives.device_identity("/dev/sdb", run=run) == "0xdead"
+
+
+def test_device_identity_none_si_no_hay_ninguna_propiedad(sys_block):
+    """Algunos lectores de tarjetas SD integrados no exponen serie ni WWN:
+    None, no una excepción -quien llama decide qué hacer con la falta de
+    dato (`verify_still_safe` no bloquea Modo Fábrica por esto solo)."""
+    run = _fake_udevadm({"ID_MODEL": "SD_Reader"})
+    assert drives.device_identity("/dev/sdb", run=run) is None
+
+
+def test_device_identity_none_si_udevadm_falla(sys_block):
+    def _run(cmd, **_k):
+        return subprocess.CompletedProcess(cmd, 2, "", "no such device")
+    assert drives.device_identity("/dev/sdb", run=_run) is None
+
+
+def test_device_identity_none_si_udevadm_no_esta_instalado(sys_block):
+    def _run(cmd, **_k):
+        raise FileNotFoundError("udevadm")
+    assert drives.device_identity("/dev/sdb", run=_run) is None
+
+
+def test_verify_still_safe_pasa_si_la_identidad_coincide(sys_block):
+    _make_block_device(sys_block, "sdb", removable=True, size_sectors=1000)
+    device = drives.BlockDevice(path=_dev("sdb"), model="X",
+                                size_bytes=1000 * 512, identity="SERIE-A")
+    run = _fake_udevadm({"ID_SERIAL": "SERIE-A"})
+    drives.verify_still_safe(device, run=run)  # no levanta nada
+
+
+def test_verify_still_safe_rechaza_si_la_identidad_cambio(sys_block):
+    """El caso central del blindaje: mismo /dev/sdb, mismo tamaño (el
+    kernel reasignó el nombre a otro USB de igual capacidad), pero la
+    serie que reporta udev ya no es la que se confirmó."""
+    _make_block_device(sys_block, "sdb", removable=True, size_sectors=1000)
+    device = drives.BlockDevice(path=_dev("sdb"), model="X",
+                                size_bytes=1000 * 512, identity="SERIE-A")
+    run = _fake_udevadm({"ID_SERIAL": "SERIE-B"})
+    with pytest.raises(drives.DeviceIdentityMismatchError):
+        drives.verify_still_safe(device, run=run)
+
+
+def test_verify_still_safe_no_chequea_identidad_si_no_se_pudo_capturar(sys_block):
+    """Si al listar el dispositivo no se pudo determinar su identidad
+    (`BlockDevice.identity is None`), `verify_still_safe` no la vuelve a
+    pedir: no hay nada contra qué comparar, y tratar "no sé" como
+    "cambió" bloquearía Modo Fábrica entero para esos dispositivos."""
+    _make_block_device(sys_block, "sdb", removable=True, size_sectors=1000)
+    device = drives.BlockDevice(path=_dev("sdb"), model="X",
+                                size_bytes=1000 * 512, identity=None)
+
+    def _no_deberia_llamarse(cmd, **_k):
+        raise AssertionError("no debería consultar udevadm si no hay "
+                             "identidad previa contra qué comparar")
+
+    drives.verify_still_safe(device, run=_no_deberia_llamarse)  # no levanta nada
+
+
+# ------------------------------------- Blindaje 4: montajes críticos --
 @pytest.mark.parametrize("punto_critico", ["/", "/home", "/boot", "/boot/efi"])
 def test_check_no_critical_mounts_aborta_si_hay_una_particion_del_sistema(
         proc_mounts, punto_critico):
@@ -13326,6 +14246,93 @@ def test_mounted_critical_paths_falla_cerrado_sin_proc_mounts(tmp_path, monkeypa
     todo estuviera montado en rutas críticas."""
     monkeypatch.setattr(drives, "_PROC_MOUNTS", tmp_path / "no-existe")
     assert drives.mounted_critical_paths("/dev/sdb") == sorted(drives.CRITICAL_MOUNTPOINTS)
+
+
+# ------------------------------- Recurso físico (para el OperationManager) --
+@pytest.fixture
+def sys_class_block(tmp_path, monkeypatch):
+    """Un /sys/class/block de juguete: symlinks planos apuntando a un
+    árbol de directorios reales, igual que el de verdad (donde una
+    partición vive anidada adentro de la carpeta de su disco, y el
+    archivo `partition` solo existe en las particiones)."""
+    devices = tmp_path / "devices_block"
+    devices.mkdir()
+    class_block = tmp_path / "class_block"
+    class_block.mkdir()
+    monkeypatch.setattr(drives, "_SYS_CLASS_BLOCK", class_block)
+
+    def _agregar_disco(nombre: str, particiones: tuple[str, ...] = ()) -> None:
+        disco_dir = devices / nombre
+        disco_dir.mkdir()
+        (class_block / nombre).symlink_to(disco_dir)
+        for particion in particiones:
+            part_dir = disco_dir / particion
+            part_dir.mkdir()
+            (part_dir / "partition").write_text("1\n")
+            (class_block / particion).symlink_to(part_dir)
+
+    return _agregar_disco
+
+
+def _fake_findmnt(origen_por_destino: dict[str, str]):
+    """`run` falso que simula `findmnt -n -o SOURCE --target <path>`."""
+    def _run(cmd, **_k):
+        assert cmd[0] == "findmnt"
+        destino = cmd[-1]
+        origen = origen_por_destino.get(destino)
+        if origen is None:
+            return subprocess.CompletedProcess(cmd, 1, "", "")
+        return subprocess.CompletedProcess(cmd, 0, origen + "\n", "")
+    return _run
+
+
+def test_whole_disk_path_de_una_particion_da_el_disco_entero(sys_class_block):
+    sys_class_block("sdb", particiones=("sdb1", "sdb2"))
+    assert drives._whole_disk_path("/dev/sdb1") == Path("/dev/sdb")
+
+
+def test_whole_disk_path_de_un_disco_entero_se_devuelve_igual(sys_class_block):
+    sys_class_block("sdb")
+    assert drives._whole_disk_path("/dev/sdb") == Path("/dev/sdb")
+
+
+def test_whole_disk_path_none_si_no_esta_en_sys_class_block(sys_class_block):
+    sys_class_block("sdb")
+    assert drives._whole_disk_path("/dev/no-existe") is None
+
+
+def test_physical_disk_for_path_resuelve_particion_montada(sys_class_block, monkeypatch):
+    sys_class_block("sdb", particiones=("sdb1",))
+    monkeypatch.setattr(drives.subprocess, "run",
+                        _fake_findmnt({"/run/media/usuario/MIUSB": "/dev/sdb1"}))
+    resultado = drives.physical_disk_for_path("/run/media/usuario/MIUSB")
+    assert resultado == Path("/dev/sdb")
+
+
+def test_physical_disk_for_path_none_si_findmnt_no_reconoce_el_punto(
+        sys_class_block, monkeypatch):
+    sys_class_block("sdb", particiones=("sdb1",))
+    monkeypatch.setattr(drives.subprocess, "run", _fake_findmnt({}))
+    assert drives.physical_disk_for_path("/no/es/un/montaje") is None
+
+
+def test_resources_for_mount_point_incluye_el_disco_fisico(sys_class_block, monkeypatch):
+    sys_class_block("sdb", particiones=("sdb1",))
+    monkeypatch.setattr(drives.subprocess, "run",
+                        _fake_findmnt({"/run/media/usuario/MIUSB": "/dev/sdb1"}))
+    recursos = drives.resources_for_mount_point("/run/media/usuario/MIUSB")
+    assert recursos == [Path("/run/media/usuario/MIUSB"), Path("/dev/sdb")]
+
+
+def test_resources_for_mount_point_solo_el_punto_si_no_hay_fisico(
+        sys_class_block, monkeypatch):
+    """Sin poder determinar el disco físico (ej. findmnt no reconoce el
+    punto), se degrada al comportamiento de siempre -solo el punto de
+    montaje- en vez de romper la operación entera."""
+    sys_class_block("sdb", particiones=("sdb1",))
+    monkeypatch.setattr(drives.subprocess, "run", _fake_findmnt({}))
+    recursos = drives.resources_for_mount_point("/algo/raro")
+    assert recursos == [Path("/algo/raro")]
 
 
 # ---------------------------------------- format_as_wii_usb: orquestación --
@@ -13417,6 +14424,225 @@ def test_format_as_wii_usb_propaga_error_de_mkfs(sys_block, proc_mounts):
     device = drives.BlockDevice(path=_dev("sdb"), model="X", size_bytes=1000 * 512)
     with pytest.raises(RuntimeError, match="ocupado"):
         drives.format_as_wii_usb(device, run=_fake_run)
+
+
+def test_format_as_wii_usb_aborta_si_la_identidad_cambia_entre_desmontar_y_mkfs(
+        sys_block, proc_mounts):
+    """El caso que motiva el segundo chequeo: el Blindaje 3 pasa antes de
+    desmontar (misma serie que se confirmó), pero para cuando está por
+    correr `mkfs.vfat` -después de desmontar, que puede tardar- la serie
+    que reporta udev ya es otra. Nada después del desmontaje debería
+    llegar a ejecutarse: ni `mkfs.vfat` ni el montaje posterior."""
+    _make_block_device(sys_block, "sdb", removable=True, size_sectors=1000)
+    proc_mounts([])  # nada montado: blindaje 4 pasa limpio
+
+    llamadas_udevadm = []
+
+    def _fake_run(cmd, **_k):
+        if cmd[0] == "umount":
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if cmd[:2] == ["udevadm", "info"]:
+            llamadas_udevadm.append(cmd)
+            # Primera consulta (antes de desmontar): la serie confirmada.
+            # Segunda consulta (justo antes de mkfs.vfat): otro disco.
+            serie = "SERIE-A" if len(llamadas_udevadm) == 1 else "SERIE-B"
+            return subprocess.CompletedProcess(cmd, 0, f"ID_SERIAL={serie}\n", "")
+        raise AssertionError(f"no debería llegar a ejecutar {cmd} "
+                             "-el segundo chequeo de identidad tiene que "
+                             "frenar antes de mkfs.vfat")
+
+    device = drives.BlockDevice(path=_dev("sdb"), model="X",
+                                size_bytes=1000 * 512, identity="SERIE-A")
+    with pytest.raises(drives.DeviceIdentityMismatchError):
+        drives.format_as_wii_usb(device, run=_fake_run)
+
+    assert len(llamadas_udevadm) == 2, (
+        "tienen que ser exactamente dos consultas a udevadm: una antes de "
+        "desmontar y otra justo antes de mkfs.vfat")
+
+
+# ============================================================
+# FILE: tests/test_factory_operation_conflicts.py
+# ============================================================
+"""Modo Fábrica y el `OperationManager`: que formatear y escribir en el
+mismo disco físico se bloqueen mutuamente.
+
+Antes de este archivo, `window._start_factory_format` lanzaba
+`drives.format_as_wii_usb` directo, sin pasar por `self.ops` -la Cola de
+Transferencias y la instalación de Homebrew sí se registraban (con el
+punto de montaje como recurso), pero Modo Fábrica no se enteraba de ellas
+ni ellas de Modo Fábrica. Resultado: nada impedía correr `mkfs.vfat`
+sobre un USB mientras se le copiaba un juego encima, con datos a mitad de
+escritura.
+
+La corrección tiene dos partes que se prueban acá juntas, porque una sin
+la otra no alcanza:
+
+1. Modo Fábrica declara el disco físico entero (`BlockDevice.path`, ej.
+   `/dev/sdb`) como recurso -no un punto de montaje, porque formatear lo
+   desmonta primero.
+2. Transferencias y la instalación de Homebrew declaran ESE MISMO disco
+   físico (`drives.resources_for_mount_point`, que resuelve el punto de
+   montaje al disco de verdad vía /sys/class/block) ADEMÁS del punto de
+   montaje de siempre.
+
+Todo corre contra un `/sys/class/block` y un `findmnt` de mentira (mismo
+patrón que `tests/test_drives_factory.py`): nada de esto toca hardware ni
+necesita privilegios, y sin embargo ejercita la resolución real de
+partición -> disco físico, no rutas escritas a mano que coincidan por
+casualidad."""
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from wiibackup_manager import drives
+from wiibackup_manager.operations import OperationBusy, OperationKind, OperationManager
+
+
+# --------------------------------------------------------------- Fixtures --
+@pytest.fixture
+def sys_class_block(tmp_path, monkeypatch):
+    """Un /sys/class/block de juguete: mismo fixture que
+    `test_drives_factory.py` (ver ahí el porqué de la estructura)."""
+    devices = tmp_path / "devices_block"
+    devices.mkdir()
+    class_block = tmp_path / "class_block"
+    class_block.mkdir()
+    monkeypatch.setattr(drives, "_SYS_CLASS_BLOCK", class_block)
+
+    def _agregar_disco(nombre: str, particiones: tuple[str, ...] = ()) -> None:
+        disco_dir = devices / nombre
+        disco_dir.mkdir()
+        (class_block / nombre).symlink_to(disco_dir)
+        for particion in particiones:
+            part_dir = disco_dir / particion
+            part_dir.mkdir()
+            (part_dir / "partition").write_text("1\n")
+            (class_block / particion).symlink_to(part_dir)
+
+    return _agregar_disco
+
+
+@pytest.fixture
+def fake_findmnt(monkeypatch):
+    """Fija qué `/dev/sdX1` reporta `findmnt` para cada punto de montaje."""
+    origen_por_destino: dict[str, str] = {}
+
+    def _run(cmd, **_k):
+        assert cmd[0] == "findmnt"
+        origen = origen_por_destino.get(cmd[-1])
+        if origen is None:
+            return subprocess.CompletedProcess(cmd, 1, "", "")
+        return subprocess.CompletedProcess(cmd, 0, origen + "\n", "")
+
+    monkeypatch.setattr(drives.subprocess, "run", _run)
+    return origen_por_destino
+
+
+def _montar(fake_findmnt, punto: str, particion: str) -> Path:
+    """Registra en el `findmnt` falso que `punto` es donde está montada
+    `particion`, y devuelve `punto` como Path -para no repetir la
+    conversión en cada test."""
+    fake_findmnt[punto] = particion
+    return Path(punto)
+
+
+# ------------------------------------------------------ Formatear vs. copiar --
+def test_formatear_se_bloquea_si_hay_una_transferencia_al_mismo_disco(
+        sys_class_block, fake_findmnt, tmp_path):
+    sys_class_block("sdb", particiones=("sdb1",))
+    punto_montaje = _montar(fake_findmnt, "/run/media/usuario/USB", "/dev/sdb1")
+
+    ops = OperationManager()
+    # Igual que `queue_manager._acquire_operation`.
+    ops.start(OperationKind.TRANSFERRING,
+             read=[tmp_path / "juego.iso"],
+             write=[punto_montaje / "wbfs" / "juego.wbfs"],
+             resources=drives.resources_for_mount_point(punto_montaje))
+
+    # Igual que `window._start_factory_format`: el disco físico ENTERO,
+    # no el punto de montaje (que Modo Fábrica va a desmontar).
+    with pytest.raises(OperationBusy) as exc:
+        ops.start(OperationKind.FORMATTING, resources=[Path("/dev/sdb")])
+    assert exc.value.blocker.kind is OperationKind.TRANSFERRING
+
+
+def test_formatear_se_bloquea_si_hay_una_instalacion_de_homebrew_al_mismo_disco(
+        sys_class_block, fake_findmnt):
+    sys_class_block("sdc", particiones=("sdc1",))
+    punto_montaje = _montar(fake_findmnt, "/run/media/usuario/HOMEBREW", "/dev/sdc1")
+
+    ops = OperationManager()
+    # Igual que `homebrew_store_view._start_install`.
+    ops.start(OperationKind.INSTALLING_HOMEBREW,
+             write=[punto_montaje / "apps" / "wiidonut"],
+             resources=drives.resources_for_mount_point(punto_montaje))
+
+    with pytest.raises(OperationBusy) as exc:
+        ops.start(OperationKind.FORMATTING, resources=[Path("/dev/sdc")])
+    assert exc.value.blocker.kind is OperationKind.INSTALLING_HOMEBREW
+
+
+def test_transferencia_se_bloquea_si_fabrica_esta_formateando_el_mismo_disco(
+        sys_class_block, fake_findmnt, tmp_path):
+    """La misma protección, en el sentido inverso: si Modo Fábrica ya
+    empezó a formatear, una transferencia que arranca después hacia el
+    mismo disco (por el punto de montaje viejo, que puede seguir
+    apareciendo un instante mientras se desmonta) tiene que esperar, no
+    pisar el formateo."""
+    sys_class_block("sdb", particiones=("sdb1",))
+    punto_montaje = _montar(fake_findmnt, "/run/media/usuario/USB", "/dev/sdb1")
+
+    ops = OperationManager()
+    ops.start(OperationKind.FORMATTING, resources=[Path("/dev/sdb")])
+
+    with pytest.raises(OperationBusy) as exc:
+        ops.start(OperationKind.TRANSFERRING,
+                 read=[tmp_path / "juego.iso"],
+                 write=[punto_montaje / "wbfs" / "juego.wbfs"],
+                 resources=drives.resources_for_mount_point(punto_montaje))
+    assert exc.value.blocker.kind is OperationKind.FORMATTING
+
+
+def test_formatear_no_se_bloquea_por_una_transferencia_a_otro_disco(
+        sys_class_block, fake_findmnt, tmp_path):
+    """Que el bloqueo sea por disco y no un candado global: una
+    transferencia a /dev/sdc no debería frenar el formateo de /dev/sdb."""
+    sys_class_block("sdb")
+    sys_class_block("sdc", particiones=("sdc1",))
+    punto_montaje = _montar(fake_findmnt, "/run/media/usuario/OTRO", "/dev/sdc1")
+
+    ops = OperationManager()
+    ops.start(OperationKind.TRANSFERRING,
+             read=[tmp_path / "juego.iso"],
+             write=[punto_montaje / "wbfs" / "juego.wbfs"],
+             resources=drives.resources_for_mount_point(punto_montaje))
+
+    ops.start(OperationKind.FORMATTING, resources=[Path("/dev/sdb")])  # no levanta nada
+
+
+def test_formatear_se_habilita_apenas_termina_la_transferencia(
+        sys_class_block, fake_findmnt, tmp_path):
+    sys_class_block("sdb", particiones=("sdb1",))
+    punto_montaje = _montar(fake_findmnt, "/run/media/usuario/USB", "/dev/sdb1")
+
+    ops = OperationManager()
+    transferencia = ops.start(
+        OperationKind.TRANSFERRING,
+        read=[tmp_path / "juego.iso"],
+        write=[punto_montaje / "wbfs" / "juego.wbfs"],
+        resources=drives.resources_for_mount_point(punto_montaje))
+
+    with pytest.raises(OperationBusy):
+        ops.start(OperationKind.FORMATTING, resources=[Path("/dev/sdb")])
+
+    ops.finish(transferencia)
+
+    formateo = ops.start(OperationKind.FORMATTING, resources=[Path("/dev/sdb")])
+    assert formateo.kind is OperationKind.FORMATTING
 
 
 # ============================================================
@@ -15453,6 +16679,7 @@ ajeno y armar la ruta de destino de una unidad WBFS.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -15845,6 +17072,146 @@ def test_export_csv_neutraliza_formulas(make_game):
     assert ",=1+1" not in csv_texto
 
 
+# --------------------------------------------------------- DestinationGuard --
+def test_destination_guard_restaura_todo_si_la_operacion_falla(tmp_path):
+    """Caso ya existente, sin cambios de comportamiento: si todo se
+    puede restaurar, `_saved` queda vacío y no se levanta nada -la
+    excepción de la operación (acá, el `RuntimeError` simulado) es la
+    única que se propaga."""
+    a = tmp_path / "juego.wbfs"
+    b = tmp_path / "juego.wbf1"
+    a.write_bytes(b"original-a")
+    b.write_bytes(b"original-b")
+
+    with pytest.raises(RuntimeError, match="la conversión falló"):
+        with library.DestinationGuard(a) as guard:
+            # Simula lo que deja `wit` a mitad de una conversión que
+            # después falla: los nombres finales ya tienen contenido
+            # nuevo (parcial, corrupto, lo que sea).
+            a.write_bytes(b"nuevo-a")
+            b.write_bytes(b"nuevo-b")
+            raise RuntimeError("la conversión falló")
+
+    assert a.read_bytes() == b"original-a"
+    assert b.read_bytes() == b"original-b"
+    assert guard._saved == []
+
+
+def test_destination_guard_restore_exitoso_no_deja_respaldos_sueltos(tmp_path):
+    a = tmp_path / "juego.wbfs"
+    a.write_bytes(b"original-a")
+
+    with pytest.raises(RuntimeError):
+        with library.DestinationGuard(a) as guard:
+            respaldo = guard._saved[0][1]
+            assert respaldo.exists()  # apartado, listo para restaurar
+            raise RuntimeError("falló")
+
+    assert not respaldo.exists()  # se lo movió de vuelta, no quedó duplicado
+    assert a.exists()
+
+
+def test_destination_guard_restore_con_una_parte_que_falla_levanta_rollback_failed(
+        tmp_path, monkeypatch):
+    """El caso central: un WBFS dividido (wbfs/wbf1) donde restaurar UNA
+    de las partes falla. Antes esto se ignoraba en silencio y `_saved`
+    se vaciaba igual, como si hubiera salido bien -acá se confirma que
+    ahora se levanta `RollbackFailedError` con el detalle correcto, que
+    la parte que SÍ se pudo restaurar vuelve a su lugar igual (no todo o
+    nada), y que `_saved` conserva justo lo pendiente."""
+    a = tmp_path / "juego.wbfs"
+    b = tmp_path / "juego.wbf1"
+    a.write_bytes(b"original-a")
+    b.write_bytes(b"original-b")
+
+    real_replace = os.replace
+
+    def _replace_que_falla_para_b(origen, destino):
+        if Path(destino) == b:
+            raise OSError("simulado: no se pudo restaurar juego.wbf1")
+        return real_replace(origen, destino)
+
+    monkeypatch.setattr(library.os, "replace", _replace_que_falla_para_b)
+
+    with pytest.raises(library.RollbackFailedError) as exc_info:
+        with library.DestinationGuard(a) as guard:
+            a.write_bytes(b"nuevo-a")
+            b.write_bytes(b"nuevo-b")
+            raise RuntimeError("la conversión falló")
+
+    error = exc_info.value
+
+    # La parte que SÍ se pudo restaurar (a) volvió a su lugar. La que
+    # falló (b) queda SIN el nombre público: `_cleanup_partials` ya
+    # había borrado el contenido nuevo que dejó la conversión fallida
+    # (para dejarle el lugar libre al respaldo) y el `os.replace` que
+    # tenía que traer de vuelta el respaldo es justo el que falló -así
+    # que el juego queda directamente inexistente, no solo corrupto.
+    # No se pierde nada igual: el respaldo (ver más abajo) sigue intacto.
+    assert a.read_bytes() == b"original-a"
+    assert not b.exists()
+
+    # `_saved` conserva EXACTAMENTE lo pendiente, no se vacía.
+    assert guard._saved == [(b, guard._saved[0][1])]
+    assert error.pending == guard._saved
+
+    # El respaldo de la parte que falló sigue existiendo, en la ruta que
+    # informa el error: es lo que permite rescatarlo a mano.
+    original_pendiente, respaldo_pendiente = error.pending[0]
+    assert original_pendiente == b
+    assert respaldo_pendiente.exists()
+    assert respaldo_pendiente.read_bytes() == b"original-b"
+
+    # El original que sí se restauró NO aparece en pending.
+    assert a not in [orig for orig, _resp in error.pending]
+
+    assert str(b) in str(error)
+    assert str(respaldo_pendiente) in str(error)
+
+
+def test_rollback_failed_error_encadena_el_error_original(tmp_path, monkeypatch):
+    """`__exit__` tiene que engancharle a `RollbackFailedError` la
+    excepción que estaba activa DENTRO del `with` (la de la conversión
+    fallida) como `original_error`: sin esto, `user_message()` no puede
+    distinguir "la conversión falló" de "encima no se pudo restaurar"."""
+    a = tmp_path / "juego.wbfs"
+    a.write_bytes(b"original-a")
+
+    real_replace = os.replace
+
+    def _falla_solo_al_restaurar(origen, destino):
+        # Apartar (`__enter__`) mueve el ORIGINAL a un nombre oculto
+        # (".juego.wbfs.respaldo-N"); restaurar mueve ese oculto DE
+        # VUELTA al nombre público. Fallar solo cuando el origen ya es
+        # el oculto es lo que aísla el fallo a la restauración -si
+        # fallara también al apartar, ni siquiera se llegaría a armar
+        # el `with` para probar esto.
+        if Path(origen).name.startswith("."):
+            raise OSError("no se pudo restaurar")
+        return real_replace(origen, destino)
+
+    monkeypatch.setattr(library.os, "replace", _falla_solo_al_restaurar)
+
+    with pytest.raises(library.RollbackFailedError) as exc_info:
+        with library.DestinationGuard(a):
+            raise RuntimeError("la conversión falló feo")
+
+    error = exc_info.value
+    assert isinstance(error.original_error, RuntimeError)
+    assert str(error.original_error) == "la conversión falló feo"
+
+    mensaje = error.user_message()
+    assert "la conversión falló feo" in mensaje
+    assert "no se pudo restaurar" in mensaje.lower() or "restaurar" in mensaje.lower()
+
+
+def test_rollback_failed_error_sin_original_error_usa_el_mensaje_base():
+    error = library.RollbackFailedError(
+        [(Path("/a/juego.wbfs"), Path("/a/.juego.wbfs.respaldo-1"))])
+    assert error.original_error is None
+    assert error.user_message() == str(error)
+
+
 # ============================================================
 # FILE: tests/test_operations.py
 # ============================================================
@@ -16223,9 +17590,15 @@ así que se cubre desde cero priorizando el manejo de errores -timeouts,
 JSON/ZIP mal formados, caída de la API con fallback a caché, dedupe de
 descargas concurrentes- por sobre el camino feliz.
 
-Nada toca la red de verdad: se fakea `urllib.request.urlopen` con objetos
-simples (sin `unittest.mock`), y `config.CACHE_DIR` se aísla a `tmp_path`
-en cada test."""
+Nada toca la red de verdad: se fakea con objetos simples (sin
+`unittest.mock`) el punto por el que cada camino sale a la red
+-`urllib.request.urlopen` para el catálogo, `oscwii_client.open_allowlisted`
+para los íconos, que es por donde pasan las descargas cuya URL viene del
+catálogo (ver la lista blanca del módulo)-, y `config.CACHE_DIR` se aísla
+a `tmp_path` en cada test.
+
+Que un ícono NO se baje de un host fuera de la lista blanca se prueba
+aparte, en test_oscwii_url_allowlist.py, contra un servidor HTTP real."""
 from __future__ import annotations
 
 import json
@@ -16238,7 +17611,7 @@ from pathlib import Path
 import pytest
 
 from wiibackup_manager import config, oscwii_client
-from wiibackup_manager.oscwii_client import HomebrewApp
+from wiibackup_manager.oscwii_client import OSC_CONTENTS_URL, HomebrewApp
 
 
 # --------------------------------------------------------------- fixtures --
@@ -16265,6 +17638,9 @@ class FakeResponse:
 
     def read(self) -> bytes:
         return self._data
+
+    def geturl(self) -> str:
+        return OSC_CONTENTS_URL
 
     def __enter__(self):
         return self
@@ -16715,9 +18091,9 @@ def test_icon_cache_path_slug_vacio_usa_app():
 
 
 def test_get_icon_path_sin_icon_url_no_toca_red(monkeypatch):
-    monkeypatch.setattr(urllib.request, "urlopen",
-                         lambda *a, **kw: (_ for _ in ()).throw(
-                             AssertionError("no debería llamar a la red")))
+    monkeypatch.setattr(oscwii_client, "open_allowlisted",
+                        lambda *a, **kw: (_ for _ in ()).throw(
+                            AssertionError("no debería llamar a la red")))
     assert oscwii_client.get_icon_path(_app(icon_url="")) is None
 
 
@@ -16728,20 +18104,20 @@ def test_get_icon_path_sin_icon_url_no_toca_red(monkeypatch):
     OSError("desconectado"),
 ])
 def test_get_icon_path_error_de_red(monkeypatch, excepcion):
-    monkeypatch.setattr(urllib.request, "urlopen",
-                         lambda *a, **kw: (_ for _ in ()).throw(excepcion))
+    monkeypatch.setattr(oscwii_client, "open_allowlisted",
+                        lambda *a, **kw: (_ for _ in ()).throw(excepcion))
     assert oscwii_client.get_icon_path(_app()) is None
 
 
 def test_get_icon_path_status_no_200(monkeypatch):
-    monkeypatch.setattr(urllib.request, "urlopen",
-                         lambda *a, **kw: FakeResponse(503, b""))
+    monkeypatch.setattr(oscwii_client, "open_allowlisted",
+                        lambda *a, **kw: FakeResponse(503, b""))
     assert oscwii_client.get_icon_path(_app()) is None
 
 
 def test_get_icon_path_respuesta_no_es_png(monkeypatch):
-    monkeypatch.setattr(urllib.request, "urlopen",
-                         lambda *a, **kw: FakeResponse(200, b"<html>404</html>"))
+    monkeypatch.setattr(oscwii_client, "open_allowlisted",
+                        lambda *a, **kw: FakeResponse(200, b"<html>404</html>"))
     app = _app()
     result = oscwii_client.get_icon_path(app)
     assert result is None
@@ -16750,8 +18126,8 @@ def test_get_icon_path_respuesta_no_es_png(monkeypatch):
 
 def test_get_icon_path_exitoso_guarda_y_devuelve(monkeypatch):
     data = oscwii_client.PNG_MAGIC + b"contenido-de-mentira"
-    monkeypatch.setattr(urllib.request, "urlopen",
-                         lambda *a, **kw: FakeResponse(200, data))
+    monkeypatch.setattr(oscwii_client, "open_allowlisted",
+                        lambda *a, **kw: FakeResponse(200, data))
     result = oscwii_client.get_icon_path(_app())
     assert result.read_bytes() == data
 
@@ -16761,9 +18137,9 @@ def test_get_icon_path_usa_cache_sin_pedir_red(monkeypatch):
     cache_path = oscwii_client.icon_cache_path(app.slug)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_bytes(oscwii_client.PNG_MAGIC + b"ya cacheado")
-    monkeypatch.setattr(urllib.request, "urlopen",
-                         lambda *a, **kw: (_ for _ in ()).throw(
-                             AssertionError("no debería llamar a la red")))
+    monkeypatch.setattr(oscwii_client, "open_allowlisted",
+                        lambda *a, **kw: (_ for _ in ()).throw(
+                            AssertionError("no debería llamar a la red")))
     result = oscwii_client.get_icon_path(app)
     assert result == cache_path
 
@@ -16774,16 +18150,16 @@ def test_get_icon_path_force_ignora_cache_existente(monkeypatch):
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_bytes(oscwii_client.PNG_MAGIC + b"viejo")
     nuevo = oscwii_client.PNG_MAGIC + b"nuevo"
-    monkeypatch.setattr(urllib.request, "urlopen",
-                         lambda *a, **kw: FakeResponse(200, nuevo))
+    monkeypatch.setattr(oscwii_client, "open_allowlisted",
+                        lambda *a, **kw: FakeResponse(200, nuevo))
     result = oscwii_client.get_icon_path(app, force=True)
     assert result.read_bytes() == nuevo
 
 
 def test_get_icon_path_falla_escritura_temporal(monkeypatch):
     data = oscwii_client.PNG_MAGIC + b"x"
-    monkeypatch.setattr(urllib.request, "urlopen",
-                         lambda *a, **kw: FakeResponse(200, data))
+    monkeypatch.setattr(oscwii_client, "open_allowlisted",
+                        lambda *a, **kw: FakeResponse(200, data))
 
     def boom_write_bytes(self, *a, **kw):
         raise OSError("disco lleno")
@@ -16794,8 +18170,8 @@ def test_get_icon_path_falla_escritura_temporal(monkeypatch):
 
 def test_get_icon_path_falla_escritura_y_tambien_falla_la_limpieza(monkeypatch):
     data = oscwii_client.PNG_MAGIC + b"x"
-    monkeypatch.setattr(urllib.request, "urlopen",
-                         lambda *a, **kw: FakeResponse(200, data))
+    monkeypatch.setattr(oscwii_client, "open_allowlisted",
+                        lambda *a, **kw: FakeResponse(200, data))
 
     def boom_write_bytes(self, *a, **kw):
         raise OSError("disco lleno")
@@ -17077,6 +18453,814 @@ def test_extraccion_cortada_no_deja_temporales_en_la_unidad(tmp_path, monkeypatc
     assert quedaron == [], f"quedaron temporales huérfanos: {quedaron}"
 
 
+# ---------------------------------------------- Colisiones de nombres --
+# El destino real de una instalación es una SD/USB con FAT32 o exFAT, que
+# NO distingue mayúsculas. Dos entradas que en Linux son dos archivos
+# distintos pueden ser una sola allá, y la segunda pisa a la primera sin
+# que nada lo avise: lo que queda instalado no es lo que el catálogo dice.
+# Todo el ZIP se rechaza, no solo la entrada repetida.
+def test_validate_zip_rechaza_colision_de_mayusculas_en_archivos(tmp_path):
+    zip_path = tmp_path / "colision.zip"
+    _make_zip(zip_path, {
+        "apps/Foo/boot.dol": b"A" * 10,
+        "apps/Foo/meta.xml": b"<app>bueno</app>",
+        "apps/Foo/META.XML": b"<app>malicioso</app>",
+    })
+
+    dest_root = tmp_path / "usb"
+    (dest_root / "apps").mkdir(parents=True)
+
+    zf, status, err = oscwii_installer._validate_zip(zip_path, dest_root)
+    assert zf is None
+    assert status is InstallStatus.UNSAFE_ZIP
+    assert "META.XML" in err and "meta.xml" in err
+
+
+def test_validate_zip_rechaza_colision_de_mayusculas_en_carpetas(tmp_path):
+    """Dos "unidades" que solo se diferencian por mayúsculas son una sola
+    carpeta en el destino: `_stage_and_swap_unit` instalaría una encima
+    de la otra y una de las dos desaparecería entera."""
+    zip_path = tmp_path / "colision-carpetas.zip"
+    _make_zip(zip_path, {
+        "apps/Foo/boot.dol": b"A" * 10,
+        "apps/foo/boot.dol": b"B" * 10,
+    })
+
+    dest_root = tmp_path / "usb"
+    (dest_root / "apps").mkdir(parents=True)
+
+    zf, status, err = oscwii_installer._validate_zip(zip_path, dest_root)
+    assert zf is None
+    assert status is InstallStatus.UNSAFE_ZIP
+    assert "apps/Foo" in err and "apps/foo" in err
+
+
+def test_validate_zip_rechaza_conflicto_archivo_carpeta(tmp_path):
+    """"apps/Foo" no puede ser un archivo y a la vez la carpeta que
+    "apps/Foo/bar.txt" necesita: es un conflicto de estructura, no de
+    nombre, y en el destino tampoco puede existir de las dos formas."""
+    zip_path = tmp_path / "archivo-y-carpeta.zip"
+    _make_zip(zip_path, {
+        "apps/Foo": b"soy un archivo",
+        "apps/Foo/bar.txt": b"y yo estoy adentro de una carpeta",
+    })
+
+    dest_root = tmp_path / "usb"
+    (dest_root / "apps").mkdir(parents=True)
+
+    zf, status, err = oscwii_installer._validate_zip(zip_path, dest_root)
+    assert zf is None
+    assert status is InstallStatus.UNSAFE_ZIP
+    assert "apps/Foo" in err
+    assert "carpeta" in err
+
+
+def test_validate_zip_rechaza_conflicto_archivo_carpeta_con_mayusculas(tmp_path):
+    """El mismo conflicto, pero escrito con otra combinación de
+    mayúsculas: en FAT sigue siendo el mismo nombre."""
+    zip_path = tmp_path / "archivo-y-carpeta-mayusculas.zip"
+    _make_zip(zip_path, {
+        "apps/foo": b"soy un archivo",
+        "apps/FOO/bar.txt": b"y yo estoy adentro de una carpeta",
+    })
+
+    dest_root = tmp_path / "usb"
+    (dest_root / "apps").mkdir(parents=True)
+
+    zf, status, err = oscwii_installer._validate_zip(zip_path, dest_root)
+    assert zf is None
+    assert status is InstallStatus.UNSAFE_ZIP
+
+
+def test_validate_zip_rechaza_la_misma_ruta_dos_veces(tmp_path):
+    """Un ZIP puede traer la misma entrada repetida; cuál de las dos gana
+    depende de quién lo lea. Contenido ambiguo, se rechaza."""
+    zip_path = tmp_path / "duplicada.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("apps/Foo/boot.dol", b"bueno")
+        zf.writestr("apps/Foo/boot.dol", b"malicioso")
+
+    dest_root = tmp_path / "usb"
+    (dest_root / "apps").mkdir(parents=True)
+
+    zf, status, err = oscwii_installer._validate_zip(zip_path, dest_root)
+    assert zf is None
+    assert status is InstallStatus.UNSAFE_ZIP
+    assert "dos veces" in err
+
+
+def test_validate_zip_acepta_entradas_de_carpeta_explicitas(tmp_path):
+    """No-regresión: que un ZIP traiga entradas de carpeta propias
+    ("apps/", "apps/Foo/") además de los archivos es lo normal, y esas
+    carpetas coinciden a propósito con las que implican los archivos. Eso
+    no es una colisión."""
+    zip_path = tmp_path / "con-carpetas.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("apps/", b"")
+        zf.writestr("apps/Foo/", b"")
+        zf.writestr("apps/Foo/boot.dol", b"A" * 10)
+        zf.writestr("apps/Foo/meta.xml", b"<app/>")
+        zf.writestr("controllers/", b"")
+        zf.writestr("controllers/perfil.ini", b"[c]\n")
+
+    dest_root = tmp_path / "usb"
+    (dest_root / "apps").mkdir(parents=True)
+
+    zf, status, err = oscwii_installer._validate_zip(zip_path, dest_root)
+    try:
+        assert status is None, err
+        assert zf is not None
+    finally:
+        if zf is not None:
+            zf.close()
+
+
+def test_install_app_no_extrae_nada_de_un_zip_con_colision(tmp_path, monkeypatch):
+    """De punta a punta: el ZIP entero se rechaza y no se escribe ni la
+    entrada que sí era única."""
+    dest_root = tmp_path / "usb"
+    dest_root.mkdir()
+
+    def _fake_download_zip(app, dest_path, cancel_event, on_progress):
+        _make_zip(dest_path, {
+            "apps/TestApp/boot.dol": b"A" * 100,
+            "apps/TestApp/meta.xml": b"<app>bueno</app>",
+            "apps/TestApp/Meta.xml": b"<app>malicioso</app>",
+        })
+        return True, "", "", ""
+    monkeypatch.setattr(oscwii_installer, "_download_zip", _fake_download_zip)
+
+    result = oscwii_installer.install_app(_fake_app(), dest_root)
+
+    assert not result.ok
+    assert result.status is InstallStatus.UNSAFE_ZIP
+    assert not (dest_root / "apps" / "TestApp").exists()
+
+
+# ============================================================
+# FILE: tests/test_oscwii_installer_atomic_unit.py
+# ============================================================
+"""Instalación de Homebrew como transacción atómica por carpeta.
+
+ChatGPT encontró que `install_app` era atómico ARCHIVO por archivo
+(`_extract_member`, vía `fsutil.atomic_target`) pero no para la app
+entera: si la extracción se cortaba a mitad de una actualización, cada
+archivo individual quedaba válido, pero la carpeta `apps/<App>/` podía
+terminar con una mezcla de archivos de la versión vieja y la nueva -la
+app rota aunque ningún archivo suelto lo estuviera.
+
+`_stage_and_swap_unit` (ver su docstring en oscwii_installer.py) es el
+mismo patrón que `library.DestinationGuard` (Sesión 2) llevado de
+archivos WBFS a una carpeta completa: extraer TODO a una carpeta de
+staging oculta y recién intercambiarla -con respaldo si había una
+versión anterior- cuando la extracción completa ya salió bien. Estas
+pruebas cubren, contra el filesystem real (no mocks del propio
+intercambio, solo de la descarga y -donde hace falta- de `os.replace`
+puntual): instalación nueva, actualización exitosa, actualización que
+falla a mitad de la extracción, y fallo durante el intercambio final."""
+from __future__ import annotations
+
+import os
+import zipfile
+from pathlib import Path
+
+import pytest
+
+from wiibackup_manager import library, oscwii_installer
+from wiibackup_manager.oscwii_client import HomebrewApp
+from wiibackup_manager.oscwii_installer import InstallStatus
+
+
+def _make_zip(path, entries: dict):
+    with zipfile.ZipFile(path, "w") as zf:
+        for name, data in entries.items():
+            zf.writestr(name, data)
+
+
+def _fake_app(**overrides) -> HomebrewApp:
+    kwargs = dict(slug="TestApp", name="Test App",
+                 zip_url="https://hbb1.oscwii.org/api/contents/TestApp/TestApp.zip")
+    kwargs.update(overrides)
+    return HomebrewApp(**kwargs)
+
+
+def _con_descarga_de(monkeypatch, zip_entries: dict):
+    """Hace que `install_app` "descargue" un ZIP armado en memoria con
+    `zip_entries`, sin tocar la red."""
+    def _fake_download_zip(app, dest_path, cancel_event, on_progress):
+        _make_zip(dest_path, zip_entries)
+        return True, "", "d41d8cd98f00b204e9800998ecf8427e", \
+               "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    monkeypatch.setattr(oscwii_installer, "_download_zip", _fake_download_zip)
+
+
+def _sin_rastros_de_staging_o_respaldo(dest_root: Path) -> bool:
+    return not any(dest_root.rglob(".*.wbm-staging-*")) and \
+        not any(dest_root.rglob(".*.wbm-respaldo-*"))
+
+
+# --------------------------------------------------------- Instalación nueva --
+def test_instalacion_nueva_sin_app_previa(tmp_path, monkeypatch):
+    dest_root = tmp_path / "usb"
+    dest_root.mkdir()
+
+    _con_descarga_de(monkeypatch, {
+        "apps/TestApp/boot.dol": b"contenido nuevo" * 10,
+        "apps/TestApp/meta.xml": b"<app version='1'/>",
+    })
+
+    result = oscwii_installer.install_app(_fake_app(), dest_root)
+
+    assert result.ok, result.error
+    assert result.status is InstallStatus.OK
+    app_dir = dest_root / "apps" / "TestApp"
+    assert app_dir.is_dir()
+    assert (app_dir / "boot.dol").read_bytes() == b"contenido nuevo" * 10
+    assert (app_dir / "meta.xml").read_bytes() == b"<app version='1'/>"
+    assert len(result.installed_paths) == 2
+    assert _sin_rastros_de_staging_o_respaldo(dest_root)
+
+
+# ------------------------------------------------------- Actualización OK --
+def test_actualizacion_exitosa_sobre_app_existente(tmp_path, monkeypatch):
+    dest_root = tmp_path / "usb"
+    app_dir = dest_root / "apps" / "TestApp"
+    app_dir.mkdir(parents=True)
+    (app_dir / "boot.dol").write_bytes(b"version vieja")
+    (app_dir / "meta.xml").write_bytes(b"<app version='1'/>")
+    # Un archivo que la versión nueva ya NO trae: tiene que desaparecer,
+    # no quedar mezclado -es justo lo que un intercambio de carpeta
+    # entera garantiza y una extracción archivo-por-archivo no.
+    (app_dir / "solo-en-la-vieja.txt").write_bytes(b"obsoleto")
+
+    _con_descarga_de(monkeypatch, {
+        "apps/TestApp/boot.dol": b"version nueva" * 20,
+        "apps/TestApp/meta.xml": b"<app version='2'/>",
+    })
+
+    result = oscwii_installer.install_app(_fake_app(), dest_root)
+
+    assert result.ok, result.error
+    assert result.status is InstallStatus.OK
+    assert (app_dir / "boot.dol").read_bytes() == b"version nueva" * 20
+    assert (app_dir / "meta.xml").read_bytes() == b"<app version='2'/>"
+    assert not (app_dir / "solo-en-la-vieja.txt").exists()
+    assert _sin_rastros_de_staging_o_respaldo(dest_root)
+
+
+# ------------------------------------------ Falla a mitad de la extracción --
+def test_actualizacion_que_falla_a_mitad_de_extraccion_deja_la_vieja_intacta(
+        tmp_path, monkeypatch):
+    """La app vieja tiene que quedar EXACTAMENTE como estaba -no solo
+    "algún archivo válido", sino ni un byte tocado- si la extracción a
+    staging se corta antes de terminar. La staging (todavía incompleta)
+    nunca llega a intercambiarse con la carpeta final."""
+    dest_root = tmp_path / "usb"
+    app_dir = dest_root / "apps" / "TestApp"
+    app_dir.mkdir(parents=True)
+    (app_dir / "boot.dol").write_bytes(b"version vieja funcional")
+    (app_dir / "meta.xml").write_bytes(b"<app version='1'/>")
+    contenido_original = {
+        p.name: p.read_bytes() for p in app_dir.iterdir()
+    }
+
+    _con_descarga_de(monkeypatch, {
+        "apps/TestApp/boot.dol": b"version nueva" * 20,
+        "apps/TestApp/meta.xml": b"<app version='2'/>",
+        "apps/TestApp/extra.bin": b"algo mas",
+    })
+
+    real_copyfileobj = oscwii_installer.shutil.copyfileobj
+    llamadas = {"n": 0}
+
+    def _falla_en_el_segundo_archivo(src, dst, *a, **kw):
+        llamadas["n"] += 1
+        if llamadas["n"] == 2:
+            dst.write(b"a medio escribir")
+            raise OSError("simulado: unidad desconectada a mitad de la extracción")
+        return real_copyfileobj(src, dst, *a, **kw)
+
+    monkeypatch.setattr(oscwii_installer.shutil, "copyfileobj",
+                        _falla_en_el_segundo_archivo)
+
+    result = oscwii_installer.install_app(_fake_app(), dest_root)
+
+    assert not result.ok
+    assert result.status is InstallStatus.IO_ERROR, result.error
+
+    # La app vieja: ni un byte distinto, ni un archivo de más o de menos.
+    actual = {p.name: p.read_bytes() for p in app_dir.iterdir()}
+    assert actual == contenido_original
+
+    # Nada de la staging incompleta quedó tirado en el destino.
+    assert _sin_rastros_de_staging_o_respaldo(dest_root)
+
+
+# --------------------------------------- Falla durante el intercambio final --
+def test_falla_en_el_intercambio_final_recupera_la_version_anterior(
+        tmp_path, monkeypatch):
+    """La extracción a staging termina perfecta (el ZIP entero, sin
+    cortes), pero el paso que promueve la staging a carpeta final falla
+    -disco lleno justo ahí, permisos, lo que sea. Tiene que poder
+    recuperarse el estado anterior: la app vieja vuelve a su lugar, la
+    instalación se reporta como fallida pero NADA se pierde."""
+    dest_root = tmp_path / "usb"
+    app_dir = dest_root / "apps" / "TestApp"
+    app_dir.mkdir(parents=True)
+    (app_dir / "boot.dol").write_bytes(b"version vieja funcional")
+    (app_dir / "meta.xml").write_bytes(b"<app version='1'/>")
+    contenido_original = {
+        p.name: p.read_bytes() for p in app_dir.iterdir()
+    }
+
+    _con_descarga_de(monkeypatch, {
+        "apps/TestApp/boot.dol": b"version nueva" * 20,
+        "apps/TestApp/meta.xml": b"<app version='2'/>",
+    })
+
+    real_replace = os.replace
+
+    def _falla_solo_al_promover_staging(origen, destino):
+        if ".wbm-staging-" in Path(origen).name:
+            raise OSError("simulado: no se pudo promover la staging")
+        return real_replace(origen, destino)
+
+    monkeypatch.setattr(oscwii_installer.os, "replace",
+                        _falla_solo_al_promover_staging)
+
+    result = oscwii_installer.install_app(_fake_app(), dest_root)
+
+    assert not result.ok
+    # Se pudo recuperar (no es el caso catastrófico de RollbackFailedError):
+    # la instalación fracasó, pero la versión anterior está intacta.
+    assert result.status is InstallStatus.IO_ERROR, result.error
+
+    actual = {p.name: p.read_bytes() for p in app_dir.iterdir()}
+    assert actual == contenido_original
+    assert _sin_rastros_de_staging_o_respaldo(dest_root)
+
+
+def test_falla_en_el_intercambio_y_tambien_falla_la_recuperacion(
+        tmp_path, monkeypatch):
+    """El caso catastrófico, mismo patrón que
+    `library.RollbackFailedError` en `DestinationGuard`: ni promover la
+    staging ni devolver el respaldo funcionan. No se pierde nada -el
+    respaldo con la versión vieja sigue existiendo en disco- pero tiene
+    que reportarse con su propio status, distinguible de un error
+    común, y el respaldo tiene que quedar ahí para rescatarlo a mano."""
+    dest_root = tmp_path / "usb"
+    app_dir = dest_root / "apps" / "TestApp"
+    app_dir.mkdir(parents=True)
+    (app_dir / "boot.dol").write_bytes(b"version vieja funcional")
+    contenido_original = (app_dir / "boot.dol").read_bytes()
+
+    _con_descarga_de(monkeypatch, {
+        "apps/TestApp/boot.dol": b"version nueva" * 20,
+    })
+
+    real_replace = os.replace
+
+    def _falla_al_promover_y_al_recuperar(origen, destino):
+        nombre = Path(origen).name
+        if ".wbm-staging-" in nombre or ".wbm-respaldo-" in nombre:
+            raise OSError("simulado: falla también al restaurar")
+        return real_replace(origen, destino)
+
+    monkeypatch.setattr(oscwii_installer.os, "replace",
+                        _falla_al_promover_y_al_recuperar)
+
+    result = oscwii_installer.install_app(_fake_app(), dest_root)
+
+    assert not result.ok
+    assert result.status is InstallStatus.ROLLBACK_FAILED, result.error
+    assert "no se pudo promover" in result.error.lower() or \
+        "restaurar" in result.error.lower()
+
+    # El respaldo con la versión vieja sigue existiendo -rescatable a
+    # mano- aunque `app_dir` mismo haya quedado sin el nombre público.
+    respaldos = list(dest_root.rglob(".*.wbm-respaldo-*"))
+    assert respaldos, "el respaldo debería seguir en disco"
+    assert (respaldos[0] / "boot.dol").read_bytes() == contenido_original
+
+
+# ------------------------------------- No-regresión: apps/ + controllers/ --
+def test_zip_con_apps_y_controllers_instala_los_dos(tmp_path, monkeypatch):
+    """Caso real de Nintendont (ver test_oscwii_installer.py): el ZIP
+    trae una carpeta "apps/Nintendont/" (una unidad, va por
+    `_stage_and_swap_unit`) y archivos sueltos directo en "controllers/"
+    (sin subcarpeta, van por el `_extract_member` de siempre). Los dos
+    caminos coexistiendo en la misma instalación no puede romper
+    ninguno de los dos."""
+    dest_root = tmp_path / "usb"
+    dest_root.mkdir()
+
+    _con_descarga_de(monkeypatch, {
+        "apps/Nintendont/boot.dol": b"nintendont" * 50,
+        "apps/Nintendont/meta.xml": b"<app/>",
+        "controllers/gcadapter.ini": b"[controller]\n",
+    })
+
+    result = oscwii_installer.install_app(_fake_app(slug="nintendont"), dest_root)
+
+    assert result.ok, result.error
+    assert (dest_root / "apps" / "Nintendont" / "boot.dol").read_bytes() == b"nintendont" * 50
+    assert (dest_root / "controllers" / "gcadapter.ini").read_bytes() == b"[controller]\n"
+    assert len(result.installed_paths) == 3
+    assert _sin_rastros_de_staging_o_respaldo(dest_root)
+
+
+# ============================================================
+# FILE: tests/test_oscwii_url_allowlist.py
+# ============================================================
+"""Lista blanca de descarga (`oscwii_client`), y sus dos usuarios.
+
+Ni `app.zip_url` ni `app.icon_url` las elige esta app: salen del catálogo
+que devuelve la API de Open Shop Channel (o del caché en disco de ese
+catálogo), o sea contenido de red. Si ese catálogo cambia -o queda
+comprometido- una entrada puede apuntar a cualquier dominio, y antes de
+este arreglo tanto el instalador (bajando el ZIP que después extrae) como
+el cliente (bajando el ícono de la tarjeta) las pedían igual. Peor:
+urllib sigue las redirecciones por su cuenta, así que ni siquiera hacía
+falta que la URL del catálogo fuera la sospechosa, alcanzaba con un
+`Location:`.
+
+La validación es una sola (`oscwii_client.url_rejection_reason` +
+`open_allowlisted`) justamente para que no haya dos listas que se
+desincronicen; estas pruebas la ejercitan por los dos caminos.
+
+Las pruebas de acá abajo levantan un servidor HTTP de verdad en 127.0.0.1
+(con redirecciones de verdad) en vez de simular urllib: lo que se quiere
+probar es justamente el comportamiento de urllib al seguir un salto, que
+un mock reproduciría según lo que uno ya cree que hace. Para eso esos
+tests amplían a mano las constantes de la lista blanca (127.0.0.1 y http)
+-lo que se prueba es el mecanismo-; que la lista REAL sea solo https y
+solo el host de OSC lo cubren los tests de `_url_rejection_reason`, que
+corren contra las constantes tal como quedan en producción.
+"""
+from __future__ import annotations
+
+import http.server
+import threading
+import zipfile
+
+import pytest
+
+from wiibackup_manager import config, oscwii_client, oscwii_installer
+from wiibackup_manager.oscwii_client import HomebrewApp, UnsafeDownloadURL
+from wiibackup_manager.oscwii_installer import InstallStatus
+
+ZIP_ENTRIES = {
+    "apps/TestApp/boot.dol": b"A" * 100,
+    "apps/TestApp/meta.xml": b"<app/>",
+}
+
+
+def _zip_bytes(tmp_path) -> bytes:
+    path = tmp_path / "fuente.zip"
+    with zipfile.ZipFile(path, "w") as zf:
+        for name, data in ZIP_ENTRIES.items():
+            zf.writestr(name, data)
+    return path.read_bytes()
+
+
+def _fake_app(zip_url: str = "https://hbb1.oscwii.org/api/contents/T/T.zip",
+              icon_url: str = "") -> HomebrewApp:
+    return HomebrewApp(slug="TestApp", name="Test App", zip_url=zip_url,
+                       icon_url=icon_url)
+
+
+# ------------------------------------------------ _url_rejection_reason --
+# Contra las constantes REALES: acá no se toca la lista blanca.
+def test_la_url_real_del_catalogo_se_acepta():
+    assert oscwii_client.url_rejection_reason(
+        "https://hbb1.oscwii.org/api/contents/WiiDonut/WiiDonut.zip") is None
+
+
+def test_el_host_de_la_api_esta_en_la_lista():
+    """La lista se deriva de `oscwii_client.OSC_API_BASE`: si algún día se
+    apunta el cliente a otro servidor, la lista de descarga lo acompaña en
+    vez de quedar desactualizada en silencio."""
+    assert (oscwii_client.OSC_API_BASE.split("//")[1]
+            in oscwii_client.ALLOWED_DOWNLOAD_HOSTS)
+
+
+def test_http_sin_tls_se_rechaza():
+    motivo = oscwii_client.url_rejection_reason(
+        "http://hbb1.oscwii.org/api/contents/TestApp/TestApp.zip")
+    assert motivo is not None
+    assert "esquema" in motivo
+
+
+def test_otro_host_se_rechaza():
+    motivo = oscwii_client.url_rejection_reason(
+        "https://atacante.example/api/contents/TestApp/TestApp.zip")
+    assert motivo is not None
+    assert "atacante.example" in motivo
+
+
+def test_un_host_permitido_como_prefijo_de_otro_se_rechaza():
+    """"hbb1.oscwii.org.atacante.example" empieza igual que el host bueno:
+    la comparación es por host completo, no por prefijo ni por "termina
+    en oscwii.org"."""
+    assert oscwii_client.url_rejection_reason(
+        "https://hbb1.oscwii.org.atacante.example/x.zip") is not None
+    assert oscwii_client.url_rejection_reason(
+        "https://noesoscwii.org/x.zip") is not None
+
+
+def test_credenciales_embebidas_no_disfrazan_el_host():
+    """"https://hbb1.oscwii.org@atacante.example/x.zip" va a
+    atacante.example aunque a ojo parezca del host bueno."""
+    motivo = oscwii_client.url_rejection_reason(
+        "https://hbb1.oscwii.org@atacante.example/x.zip")
+    assert motivo is not None
+
+
+def test_esquemas_raros_se_rechazan():
+    for url in ("file:///etc/passwd", "ftp://hbb1.oscwii.org/x.zip",
+                "data:application/zip;base64,UEsDBA==", "hbb1.oscwii.org/x.zip",
+                ""):
+        assert oscwii_client.url_rejection_reason(url) is not None, url
+
+
+def test_el_punto_final_del_host_no_rechaza():
+    """"hbb1.oscwii.org." es el mismo host (FQDN absoluto) y se acepta."""
+    assert oscwii_client.url_rejection_reason(
+        "https://hbb1.oscwii.org./api/contents/TestApp/TestApp.zip") is None
+
+
+# ------------------------------------------- Servidor HTTP de verdad --
+PNG_DE_MENTIRA = b"\x89PNG\r\n\x1a\n" + b"contenido-de-mentira"
+PNG_DEL_IMPOSTOR = b"\x89PNG\r\n\x1a\n" + b"vengo-de-otro-host"
+
+
+class _Handler(http.server.BaseHTTPRequestHandler):
+    """Sirve el ZIP en /TestApp.zip, el ícono en /icon.png, y dos
+    redirecciones: una que se queda en el mismo host y otra que se va a un
+    dominio que no está en la lista."""
+
+    zip_bytes = b""
+
+    def _otro_host(self, ruta: str) -> str:
+        """Una URL al MISMO servidor pero por un nombre de host que no
+        está en la lista blanca. Es lo que hace fuerte a los tests de
+        redirección: el destino existe y contesta, así que si la lista no
+        se aplicara la descarga saldría bien y el test fallaría. Con un
+        host inventado (que no resuelve) el rechazo se confundiría con un
+        error de DNS -eso se prueba aparte, en el test del `.invalid`."""
+        return f"http://localhost:{self.server.server_address[1]}{ruta}"
+
+    def do_GET(self):
+        if self.path == "/TestApp.zip":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Length", str(len(self.zip_bytes)))
+            self.end_headers()
+            self.wfile.write(self.zip_bytes)
+        elif self.path == "/icon.png":
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(PNG_DE_MENTIRA)))
+            self.end_headers()
+            self.wfile.write(PNG_DE_MENTIRA)
+        elif self.path == "/redir-interno":
+            self.send_response(302)
+            self.send_header("Location", "/TestApp.zip")
+            self.end_headers()
+        elif self.path == "/icon-del-impostor.png":
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(PNG_DEL_IMPOSTOR)))
+            self.end_headers()
+            self.wfile.write(PNG_DEL_IMPOSTOR)
+        elif self.path == "/redir-externo":
+            self.send_response(302)
+            self.send_header("Location", self._otro_host("/TestApp.zip"))
+            self.end_headers()
+        elif self.path == "/redir-icono-externo":
+            self.send_response(302)
+            self.send_header("Location",
+                             self._otro_host("/icon-del-impostor.png"))
+            self.end_headers()
+        elif self.path == "/redir-inalcanzable":
+            self.send_response(302)
+            self.send_header("Location",
+                             "http://host-no-permitido.invalid/TestApp.zip")
+            self.end_headers()
+        else:
+            self.send_error(404)
+
+    def log_message(self, *args):  # sin ruido en la salida de pytest
+        pass
+
+
+@pytest.fixture
+def servidor(tmp_path, monkeypatch):
+    """Servidor HTTP real en 127.0.0.1, con la lista blanca ampliada para
+    aceptarlo (ver el docstring del módulo). Devuelve la base de la URL."""
+    _Handler.zip_bytes = _zip_bytes(tmp_path)
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    hilo = threading.Thread(target=httpd.serve_forever, daemon=True)
+    hilo.start()
+
+    # Un proxy configurado en el entorno del que corre la suite mandaría
+    # estos pedidos a otro lado (urllib respeta http_proxy).
+    for var in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("no_proxy", "*")
+
+    monkeypatch.setattr(oscwii_client, "ALLOWED_URL_SCHEMES",
+                        frozenset({"http"}))
+    monkeypatch.setattr(oscwii_client, "ALLOWED_DOWNLOAD_HOSTS",
+                        frozenset({"127.0.0.1"}))
+    # La caché de íconos vive bajo `config.CACHE_DIR`; aislarla es lo
+    # mismo que hace el fixture de test_oscwii_client.py.
+    monkeypatch.setattr(config, "CACHE_DIR", tmp_path / "cache")
+    try:
+        yield f"http://127.0.0.1:{httpd.server_address[1]}"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        hilo.join(timeout=5)
+
+
+def test_descarga_desde_un_host_permitido_funciona(servidor, tmp_path):
+    """No-regresión: con la URL permitida, la instalación sigue siendo la
+    de siempre -incluida la descarga de verdad por la red."""
+    dest_root = tmp_path / "usb"
+    dest_root.mkdir()
+
+    result = oscwii_installer.install_app(
+        _fake_app(f"{servidor}/TestApp.zip"), dest_root)
+
+    assert result.ok, result.error
+    assert (dest_root / "apps" / "TestApp" / "boot.dol").read_bytes() == b"A" * 100
+    assert (dest_root / "apps" / "TestApp" / "meta.xml").read_bytes() == b"<app/>"
+
+
+def test_una_redireccion_dentro_de_la_lista_se_sigue(servidor, tmp_path):
+    """Redirigir NO está prohibido: lo que importa es a dónde. Un salto
+    que termina en un host permitido tiene que funcionar igual que si la
+    URL hubiera sido la final desde el principio (OSC podría redirigir a
+    un mirror suyo en cualquier momento)."""
+    dest_root = tmp_path / "usb"
+    dest_root.mkdir()
+
+    result = oscwii_installer.install_app(
+        _fake_app(f"{servidor}/redir-interno"), dest_root)
+
+    assert result.ok, result.error
+    assert (dest_root / "apps" / "TestApp" / "boot.dol").read_bytes() == b"A" * 100
+
+
+def test_una_redireccion_fuera_de_la_lista_se_rechaza(servidor, tmp_path):
+    """La URL inicial es del host bueno y solo el destino del salto es el
+    de afuera: sin validar cada redirección, esto pasaba entero.
+
+    El salto apunta al MISMO servidor por otro nombre de host, o sea que
+    contesta con un ZIP perfectamente válido: si la lista blanca no se
+    aplicara a la redirección, esta instalación terminaría en OK."""
+    dest_root = tmp_path / "usb"
+    dest_root.mkdir()
+
+    result = oscwii_installer.install_app(
+        _fake_app(f"{servidor}/redir-externo"), dest_root)
+
+    assert not result.ok
+    assert result.status is InstallStatus.UNSAFE_URL
+    assert "localhost" in result.error
+    assert not (dest_root / "apps" / "TestApp").exists()
+
+
+def test_la_redireccion_se_corta_antes_de_conectarse_al_destino(servidor, tmp_path):
+    """El salto se rechaza en `redirect_request`, o sea ANTES de pedirle
+    nada al host nuevo: por eso el destino puede ser un dominio .invalid
+    (que ni siquiera resuelve) y el error igual es el de la lista blanca y
+    no uno de DNS."""
+    dest_root = tmp_path / "usb"
+    dest_root.mkdir()
+
+    result = oscwii_installer.install_app(
+        _fake_app(f"{servidor}/redir-inalcanzable"), dest_root)
+
+    assert result.status is InstallStatus.UNSAFE_URL
+    assert "host-no-permitido.invalid" in result.error
+
+
+# ----------------------------------------- Rechazo antes de tocar nada --
+def test_install_app_rechaza_un_host_no_permitido_sin_escribir_nada(tmp_path,
+                                                                    monkeypatch):
+    """Con las constantes reales: una entrada del catálogo que apunta a
+    otro dominio se corta antes de la descarga y antes de crear siquiera
+    `dest_root/apps`."""
+    dest_root = tmp_path / "usb"
+    dest_root.mkdir()
+
+    def _no_deberia_descargar(*_a, **_k):
+        raise AssertionError("no se tendría que haber intentado ninguna descarga")
+    monkeypatch.setattr(oscwii_installer, "_download_zip", _no_deberia_descargar)
+
+    result = oscwii_installer.install_app(
+        _fake_app("https://atacante.example/api/contents/TestApp/TestApp.zip"),
+        dest_root)
+
+    assert not result.ok
+    assert result.status is InstallStatus.UNSAFE_URL
+    assert "atacante.example" in result.error
+    assert list(dest_root.iterdir()) == []
+
+
+def test_download_zip_no_crea_el_archivo_destino_si_la_url_no_pasa(tmp_path):
+    """Defensa en profundidad: aunque a `_download_zip` se la llame
+    directo (sin el chequeo temprano de `install_app`), corta antes de
+    abrir el socket y antes de crear el archivo de destino."""
+    destino = tmp_path / "TestApp.zip"
+
+    with pytest.raises(UnsafeDownloadURL):
+        oscwii_installer._download_zip(
+            _fake_app("https://atacante.example/TestApp.zip"), destino,
+            None, None)
+
+    assert not destino.exists()
+
+
+# ============================================================================
+# La misma lista blanca por el otro camino: los íconos del catálogo
+# ============================================================================
+# `get_icon_path` baja `app.icon_url`, que sale del mismo catálogo que
+# `zip_url`. Un ícono es cosmético -si falla, la tarjeta se queda con el
+# placeholder- así que acá el rechazo se ve como un None; lo que importa
+# es que la descarga no ocurra.
+
+def test_icono_desde_un_host_permitido_se_baja(servidor):
+    """No-regresión: con la URL permitida, el ícono se baja y se cachea
+    igual que siempre."""
+    app = _fake_app(icon_url=f"{servidor}/icon.png")
+
+    resultado = oscwii_client.get_icon_path(app)
+
+    assert resultado is not None
+    assert resultado.read_bytes() == PNG_DE_MENTIRA
+
+
+def test_icono_con_redireccion_fuera_de_la_lista_no_se_baja(servidor):
+    """La URL inicial es del host bueno y solo el salto se va afuera:
+    mismo agujero que tenía la descarga del ZIP, cerrado por el mismo
+    handler.
+
+    Igual que en el test del ZIP, el destino del salto contesta de verdad
+    -y con un PNG válido, así que pasaría la validación de firma-: sin la
+    lista blanca este ícono se bajaría y se cachearía."""
+    app = _fake_app(icon_url=f"{servidor}/redir-icono-externo")
+
+    assert oscwii_client.get_icon_path(app) is None
+    assert not oscwii_client.icon_cache_path(app.slug).exists()
+
+
+def test_icono_de_un_host_no_permitido_no_toca_la_red(tmp_path, monkeypatch):
+    """Con las constantes reales: una `icon_url` a otro dominio se corta
+    antes de abrir el socket y sin crear siquiera la carpeta de caché."""
+    monkeypatch.setattr(config, "CACHE_DIR", tmp_path / "cache")
+
+    def _no_deberia_abrir(*_a, **_k):
+        raise AssertionError("no se tendría que haber intentado ninguna descarga")
+    monkeypatch.setattr(oscwii_client, "open_allowlisted", _no_deberia_abrir)
+
+    app = _fake_app(icon_url="https://atacante.example/api/contents/T/icon.png")
+
+    assert oscwii_client.get_icon_path(app) is None
+    assert not oscwii_client.icons_cache_dir().exists()
+
+
+def test_icono_por_http_sin_tls_no_se_baja(tmp_path, monkeypatch):
+    """El mismo host de OSC pero sin TLS tampoco pasa: un ícono en claro
+    lo puede cambiar cualquiera en el camino."""
+    monkeypatch.setattr(config, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(oscwii_client, "open_allowlisted",
+                        lambda *a, **kw: (_ for _ in ()).throw(
+                            AssertionError("no debería llamar a la red")))
+
+    app = _fake_app(icon_url="http://hbb1.oscwii.org/api/contents/T/icon.png")
+
+    assert oscwii_client.get_icon_path(app) is None
+
+
+def test_el_icono_cacheado_se_sigue_devolviendo(tmp_path, monkeypatch):
+    """No-regresión: el chequeo va después del acierto de caché, así que
+    un ícono ya bajado se sigue mostrando sin salir a la red."""
+    monkeypatch.setattr(config, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(oscwii_client, "open_allowlisted",
+                        lambda *a, **kw: (_ for _ in ()).throw(
+                            AssertionError("no debería llamar a la red")))
+
+    app = _fake_app(icon_url="https://hbb1.oscwii.org/api/contents/T/icon.png")
+    cache_path = oscwii_client.icon_cache_path(app.slug)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_bytes(PNG_DE_MENTIRA)
+
+    assert oscwii_client.get_icon_path(app) == cache_path
+
+
 # ============================================================
 # FILE: tests/test_queue_manager.py
 # ============================================================
@@ -17092,7 +19276,10 @@ llamada directa -documentado como parámetro inyectable en
 """
 from __future__ import annotations
 
+import os
+import subprocess
 import time
+from pathlib import Path
 
 from wiibackup_manager import library
 from wiibackup_manager.operations import OperationManager
@@ -17200,6 +19387,70 @@ def test_send_to_wbfs_drive_gc_no_divide_aunque_el_destino_lo_pida(make_game, tm
     destino = library.gc_dest_path(juego, dest_root)
     assert destino.read_bytes() == contenido
     assert not destino.with_suffix(".wbf1").exists()
+
+
+# ------------------------------------------- RollbackFailedError hasta la UI --
+def test_copy_con_rollback_fallido_distingue_los_dos_problemas_en_error_msg(
+        make_game, tmp_path, monkeypatch):
+    """El caso central que reportó la revisión de seguridad: `wit` falla
+    Y ADEMÁS `DestinationGuard` no puede devolver el original a su lugar
+    (acá, simulado para las dos partes de un WBFS dividido). El mensaje
+    que llega a `job.error_msg` -lo que ve el usuario en la fila de la
+    cola- tiene que nombrar los dos problemas, no solo "la conversión
+    falló" como si el original se hubiera recuperado sin drama."""
+    monkeypatch.setattr(library, "free_space", lambda path: 10 ** 12)
+    monkeypatch.setattr(library.wit_wrapper, "is_available", lambda _binary: True)
+
+    def _fake_convert(src, dest, target_format, binary, **kwargs):
+        # Simula lo que deja `wit` cuando falla a mitad de camino: los
+        # nombres finales ya tienen contenido nuevo (corrupto/parcial).
+        Path(dest).write_bytes(b"nuevo-corrupto")
+        Path(dest).with_suffix(".wbf1").write_bytes(b"nuevo-corrupto-1")
+        return subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="wit: fallo simulado")
+
+    monkeypatch.setattr(library.wit_wrapper, "convert", _fake_convert)
+
+    real_replace = os.replace
+
+    def _falla_solo_al_restaurar(origen, destino):
+        if Path(origen).name.startswith("."):
+            raise OSError("no se pudo restaurar (simulado)")
+        return real_replace(origen, destino)
+
+    monkeypatch.setattr(library.os, "replace", _falla_solo_al_restaurar)
+
+    # `fmt="ISO"` fuerza el camino de `wit` (una copia WBFS directa no
+    # pasa por DestinationGuard ni por wit_wrapper.convert).
+    juego = make_game(name="juego.iso", game_id="RMCP01", title="Mario Kart Wii",
+                      fmt="ISO", contenido=b"contenido de origen")
+    dest_root = tmp_path / "dest"
+    dest_root.mkdir()
+
+    # El destino ya tiene un WBFS dividido de una transferencia anterior:
+    # es lo que hace que `DestinationGuard` se active (`enabled=True`) y
+    # tenga algo que apartar/restaurar.
+    destino = library.game_dest_path(juego, dest_root)
+    destino.parent.mkdir(parents=True)
+    destino.write_bytes(b"original-wbfs")
+    destino.with_suffix(".wbf1").write_bytes(b"original-wbf1")
+
+    cola = hacer_cola()
+    job = cola.add_jobs([juego], dest_root, overwrite=True)[0]
+    esperar_final(job)
+    cola.shutdown(wait=5)
+
+    assert job.status is JobStatus.ERROR
+    # El motivo original (por qué falló la conversión)...
+    assert "wit: fallo simulado" in job.error_msg
+    # ...Y ADEMÁS que no se pudo restaurar -las dos cosas, no una sola.
+    assert "restaurar" in job.error_msg.lower()
+
+    # El original quedó SIN restaurar de verdad (no es solo el texto del
+    # error): el respaldo sigue ahí, rescatable a mano.
+    assert not destino.exists() or destino.read_bytes() != b"original-wbfs"
+    respaldos = list(dest_root.rglob(".*.respaldo-*"))
+    assert respaldos, "el respaldo temporal debería seguir existiendo"
 
 
 # ============================================================
