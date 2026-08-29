@@ -520,7 +520,7 @@ class HomebrewStoreView(Gtk.Box):
             op = self.ops.start(
                 OperationKind.INSTALLING_HOMEBREW,
                 write=[dest_root / "apps" / app.slug],
-                resources=[dest_root],
+                resources=drives.resources_for_mount_point(dest_root),
             )
         except OperationBusy as e:
             self._show_toast(_("No se puede ahora: {detail}.").format(detail=e.detail))

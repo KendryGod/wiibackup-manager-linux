@@ -26,12 +26,26 @@ Los "blindajes" a los que se refieren los docstrings de acá son:
 - BLINDAJE 2: vive en la interfaz (Objetivo 1/2 de la ventana), no acá:
   el diálogo de confirmación que obliga a escribir "FORMATEAR".
 - BLINDAJE 3 (`verify_still_safe`): re-chequeo, ya en el hilo de fondo,
-  de que el dispositivo sigue siendo removible y pesa lo mismo que
-  cuando se armó el diálogo.
+  de que el dispositivo sigue siendo removible, pesa lo mismo y tiene la
+  misma identidad física (serie/WWN vía udev) que cuando se armó el
+  diálogo. `format_as_wii_usb` lo corre DOS veces -antes de desmontar y
+  otra vez justo antes de `mkfs.vfat`- porque ahí en el medio hay una
+  ventana real: el desmontaje puede tardar, y es el momento en que menos
+  se está mirando el dispositivo.
 - BLINDAJE 4 (`check_no_critical_mounts` / `mounted_critical_paths`):
   última línea de defensa. Se corre siempre, pase lo que pase con los
   blindajes anteriores: si alguna partición del disco está montada en
   una ruta del sistema operativo, se aborta.
+
+Un blindaje más que no vive en las funciones de arriba sino en cómo se
+usa `OperationManager` (`operations.py`): Modo Fábrica registra el disco
+entero (`BlockDevice.path`, ej. `/dev/sdb`) como `resources` de una
+operación `FORMATTING` antes de tocarlo, y Transferencias/Homebrew hacen
+lo mismo con el disco físico detrás de su punto de montaje
+(`physical_disk_for_path`, más abajo) además del punto de montaje de
+siempre. Así el `OperationManager` bloquea formatear un disco mientras se
+le está escribiendo algo, y viceversa -sin esto, nada impedía lanzar
+`mkfs.vfat` sobre una unidad con una copia a mitad de camino.
 """
 from __future__ import annotations
 
@@ -218,6 +232,11 @@ def eject_mount_point(path: Path) -> tuple[bool, str]:
 # disco real de la máquina que corre la suite.
 _SYS_BLOCK = Path("/sys/block")
 _PROC_MOUNTS = Path("/proc/mounts")
+# /sys/class/block trae disco enteros Y particiones en un mismo nivel
+# (a diferencia de /sys/block, que solo lista discos enteros como
+# subcarpetas): es lo que permite mapear una partición montada de vuelta
+# al disco físico que la contiene. Ver `_whole_disk_path`.
+_SYS_CLASS_BLOCK = Path("/sys/class/block")
 
 # Puntos de montaje del sistema operativo que jamás deberían aparecer
 # colgando de un disco que se está por formatear. No es "la raíz nada
@@ -253,6 +272,19 @@ class DeviceChangedError(FactoryModeError):
     """BLINDAJE 3: el dispositivo cambió de tamaño desde que se armó la
     confirmación. Es la señal de que puede ser un disco distinto -mismo
     nombre de dispositivo, otro USB- y no el que el usuario aprobó."""
+
+
+class DeviceIdentityMismatchError(FactoryModeError):
+    """BLINDAJE 3: la identidad física del dispositivo (serie/WWN vía
+    udev) cambió desde que se armó la confirmación, aunque `/dev/sdX`,
+    la removibilidad y hasta el tamaño coincidan.
+
+    Es el caso que `DeviceChangedError` no cubre: dos USB del mismo
+    modelo tienen el mismo tamaño exacto, y el kernel recicla el mismo
+    nombre de dispositivo para el próximo que se conecta en ese puerto.
+    Sin esto, desconectar el USB confirmado y conectar OTRO idéntico en
+    tamaño antes de que termine el formateo pasaría los blindajes 1 y 3
+    (tamaño) igual."""
 
 
 class CriticalMountError(FactoryModeError):
@@ -318,14 +350,132 @@ def _device_model(device_path) -> str:
         return ""
 
 
+def device_identity(device_path, *, run=subprocess.run) -> str | None:
+    """Identidad física estable de `device_path`, vía la base de datos de
+    udev: el número de serie (o el WWN si el disco no expone serie), que
+    no cambia aunque el kernel reasigne `/dev/sdX` a otro dispositivo.
+
+    A diferencia de `removable`/`size` (que se leen directo de /sys/block
+    porque el kernel los expone ahí sin intermediarios), la identidad
+    física no vive en un archivo fijo: depende del bus (USB, ATA, NVMe)
+    y de qué reglas de udev corrieron para ESE dispositivo en particular.
+    `udevadm info` es la interfaz estable para pedirla sin tener que saber
+    de antemano con qué bus se está tratando -es la misma fuente que llena
+    los symlinks de `/dev/disk/by-id/`.
+
+    Se prueban, en orden, `ID_SERIAL` (serie completa, la más específica),
+    `ID_SERIAL_SHORT` (a veces `ID_SERIAL` no está pero esta sí) y
+    `ID_WWN` (World Wide Name, típico de discos que no exponen serie de
+    otra forma). None si ninguna está disponible -algunos lectores de
+    tarjetas SD integrados no exponen nada de esto- o si `udevadm` no
+    está instalado: quien llama (`verify_still_safe`) trata None como
+    "no se puede confirmar la identidad" y no como "coincide"."""
+    try:
+        resultado = run(
+            ["udevadm", "info", "--query=property", f"--name={device_path}"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if resultado.returncode != 0:
+        return None
+    propiedades: dict[str, str] = {}
+    for linea in resultado.stdout.splitlines():
+        clave, separador, valor = linea.partition("=")
+        if separador:
+            propiedades[clave] = valor
+    for clave in ("ID_SERIAL", "ID_SERIAL_SHORT", "ID_WWN"):
+        valor = propiedades.get(clave)
+        if valor:
+            return valor
+    return None
+
+
+def _whole_disk_path(device_path) -> Path | None:
+    """Disco entero detrás de `device_path`: si es una partición
+    (`/dev/sdb1`, `/dev/nvme0n1p1`) devuelve el disco que la contiene
+    (`/dev/sdb`, `/dev/nvme0n1`); si `device_path` ya es un disco entero,
+    lo devuelve tal cual. None si no aparece en /sys/class/block.
+
+    Partición vs. disco entero se distingue con el archivo `partition`
+    que el kernel expone -SOLO en subcarpetas de partición- bajo
+    `/sys/class/block/<nombre>/partition`: no se puede adivinar por el
+    nombre (`sdb1` vs. `nvme0n1p1` siguen convenciones de nombrado
+    distintas por bus), pero ese archivo es la misma señal para
+    cualquiera. Cuando es una partición, el directorio real (resuelto el
+    symlink de /sys/class/block) queda anidado un nivel adentro del disco
+    que la contiene, así que el nombre del padre es el disco entero."""
+    nombre = Path(device_path).name
+    entrada = _SYS_CLASS_BLOCK / nombre
+    try:
+        real = entrada.resolve(strict=True)
+    except OSError:
+        return None
+    if (entrada / "partition").exists():
+        return Path("/dev") / real.parent.name
+    return Path("/dev") / nombre
+
+
+def physical_disk_for_path(path) -> Path | None:
+    """El disco físico entero (ej. `/dev/sdb`) detrás del punto de
+    montaje `path`, o None si no se pudo determinar.
+
+    Existe para que Transferencias y la instalación de Homebrew declaren,
+    ante el `OperationManager`, el MISMO recurso físico que Modo Fábrica
+    -así una operación de formateo se bloquea mutuamente con cualquiera
+    que esté escribiendo en el mismo disco, sin importar en qué punto de
+    montaje ocurra esa escritura (Modo Fábrica desmonta el disco antes de
+    formatear: comparar contra el punto de montaje no serviría de nada
+    ahí, porque para ese momento ya no existe).
+
+    None cuando `path` no corresponde a ningún punto de montaje que
+    `findmnt` reconozca, o cuando el dispositivo que reporta no aparece
+    en /sys/class/block (por ejemplo, un filesystem de red). Quien llama
+    debería tratar ese None como "no se pudo identificar el disco físico"
+    -no bloquea nada nuevo, pero tampoco rompe lo que ya funcionaba antes
+    de que existiera esta función."""
+    dispositivo = _block_device_for(Path(path))
+    if dispositivo is None:
+        return None
+    return _whole_disk_path(dispositivo)
+
+
+def resources_for_mount_point(path) -> list[Path]:
+    """Los `resources` que Transferencias y la instalación de Homebrew
+    tienen que declarar ante el `OperationManager` al escribir en el
+    punto de montaje `path`: el punto de montaje en sí (de siempre, es lo
+    que ya usaba el botón "Expulsar unidad") MÁS el disco físico que hay
+    detrás (`physical_disk_for_path`), si se lo pudo determinar.
+
+    El físico es lo que hace que choquen con Modo Fábrica formateando el
+    mismo disco -que declara el disco entero, no un punto de montaje,
+    porque lo desmonta como parte de formatear- sin dejar de chocar entre
+    sí por el punto de montaje de siempre. Si no se pudo determinar el
+    disco físico, se devuelve solo el punto de montaje: ni mejora ni
+    empeora el comportamiento que había antes de que existiera esta
+    función."""
+    punto = Path(path)
+    fisico = physical_disk_for_path(punto)
+    return [punto] if fisico is None else [punto, fisico]
+
+
 @dataclass(frozen=True)
 class BlockDevice:
     """Un disco candidato a Modo Fábrica. `size_bytes` queda congelado acá
     en el momento en que se listó -es justamente lo que `verify_still_safe`
-    vuelve a medir más tarde para detectar que cambió."""
+    vuelve a medir más tarde para detectar que cambió.
+
+    `identity` es lo mismo pero para la identidad física del dispositivo
+    (ver `device_identity`): puede ser `None` si no se pudo determinar
+    (dispositivo sin serie expuesta por udev), caso en el que
+    `verify_still_safe` no la vuelve a chequear -no tener el dato no es
+    lo mismo que poder confirmar que cambió, y bloquear Modo Fábrica
+    entero para esos dispositivos sería peor que la protección que se
+    gana en el resto."""
     path: Path
     model: str
     size_bytes: int
+    identity: str | None = None
 
     @property
     def size_gb(self) -> float:
@@ -362,7 +512,8 @@ def list_candidate_drives() -> list[BlockDevice]:
             continue
         candidatos.append(BlockDevice(path=device_path,
                                       model=_device_model(device_path),
-                                      size_bytes=size))
+                                      size_bytes=size,
+                                      identity=device_identity(device_path)))
     return candidatos
 
 
@@ -453,21 +604,25 @@ def _mount_points_of(device_path) -> list[tuple[str, str]]:
     return [(origen, punto) for origen, punto in filas if patron.match(origen)]
 
 
-def verify_still_safe(device: BlockDevice) -> None:
-    """BLINDAJE 3: re-chequeo, ya en el hilo de fondo y justo antes de
-    escribir, de que `device.path` sigue siendo removible y pesa lo mismo
-    que cuando se armó el diálogo de confirmación.
+def verify_still_safe(device: BlockDevice, *, run=subprocess.run) -> None:
+    """BLINDAJE 3: re-chequeo, ya en el hilo de fondo, de que
+    `device.path` sigue siendo removible, pesa lo mismo y tiene la misma
+    identidad física que cuando se armó el diálogo de confirmación.
+    `format_as_wii_usb` la llama DOS veces: acá y otra vez justo antes de
+    `mkfs.vfat`, así que esta función no asume en qué momento del flujo
+    está -siempre vuelve a preguntarle al kernel/udev, nunca confía en
+    una llamada anterior, ni siquiera una hecha un segundo antes.
 
     Entre que el usuario ve el diálogo (con el modelo y el tamaño
-    impresos) y aprieta el botón puede pasar cualquier cosa: que saque el
-    USB y conecte otro dispositivo en el mismo puerto (el kernel suele
-    reciclar `/dev/sdb` para el próximo que aparezca), o simplemente que
-    haya elegido mal en una máquina con varios discos conectados. Esta
-    función no confía en nada de lo que se sabía al armar el diálogo:
-    vuelve a preguntarle al kernel.
+    impresos) y aprieta el botón -o entre que se desmonta el disco y se
+    lo formatea, la otra ventana que cubre esta función- puede pasar
+    cualquier cosa: que saque el USB y conecte otro dispositivo en el
+    mismo puerto (el kernel suele reciclar `/dev/sdb` para el próximo que
+    aparezca), o que conecte uno del mismo tamaño exacto -el tamaño solo
+    no alcanza para distinguirlos, por eso la identidad física.
 
-    No devuelve nada: levanta `UnsafeDeviceError` o `DeviceChangedError`
-    si algo no cierra."""
+    No devuelve nada: levanta `UnsafeDeviceError`, `DeviceChangedError` o
+    `DeviceIdentityMismatchError` si algo no cierra."""
     if not is_removable_block_device(device.path):
         raise UnsafeDeviceError(
             f"{device.path} ya no es un dispositivo removible (o "
@@ -478,6 +633,17 @@ def verify_still_safe(device: BlockDevice) -> None:
             f"El tamaño de {device.path} cambió desde que se confirmó "
             f"({device.size_bytes} → {tamano_actual} bytes). Puede ser "
             "otro dispositivo: se aborta el formateo por seguridad.")
+    # Si no se pudo determinar la identidad al listar el dispositivo (ver
+    # `BlockDevice.identity`), no hay nada contra qué comparar: no tener
+    # el dato no es lo mismo que poder confirmar que cambió.
+    if device.identity is not None:
+        identidad_actual = device_identity(device.path, run=run)
+        if identidad_actual != device.identity:
+            raise DeviceIdentityMismatchError(
+                f"La identidad física de {device.path} cambió desde que "
+                f"se confirmó ({device.identity} → {identidad_actual}). "
+                "Puede ser otro dispositivo del mismo tamaño reconectado "
+                "en el mismo puerto: se aborta el formateo por seguridad.")
 
 
 def check_no_critical_mounts(device: BlockDevice) -> None:
@@ -556,7 +722,7 @@ def format_as_wii_usb(device: BlockDevice, *, run=subprocess.run,
     Devuelve el punto de montaje final. Levanta la subclase de
     `FactoryModeError` que corresponda si algún blindaje no pasa, o
     `RuntimeError` si `mkfs.vfat` (o el montaje posterior) fallan."""
-    verify_still_safe(device)
+    verify_still_safe(device, run=run)
     check_no_critical_mounts(device)
 
     _unmount_all(device.path, run=run)
@@ -569,6 +735,13 @@ def format_as_wii_usb(device: BlockDevice, *, run=subprocess.run,
             "después de intentar desmontarlo (umount pudo haber fallado "
             "por permisos u otro motivo). Se aborta el formateo por "
             "seguridad.")
+
+    # BLINDAJE 3 otra vez, ya con el disco desmontado: el desmontaje puede
+    # haber tardado (discos lentos, `udisksctl` reintentando), y esta es
+    # la ventana real entre "confirmamos que era el dispositivo correcto"
+    # y "empezamos a escribir sobre él" -no alcanza con haberlo chequeado
+    # antes de desmontar.
+    verify_still_safe(device, run=run)
 
     prefijo = [] if os.geteuid() == 0 else ["pkexec"]
     resultado = run(

@@ -139,7 +139,92 @@ def test_verify_still_safe_rechaza_si_el_dispositivo_desaparecio(sys_block):
         drives.verify_still_safe(device)
 
 
-# ------------------------------------------- Blindaje 4: montajes críticos --
+# ------------------------------------- Blindaje 3: identidad física (udev) --
+def _fake_udevadm(propiedades: dict[str, str]):
+    """`run` falso que simula `udevadm info --query=property --name=...`,
+    devolviendo `propiedades` como líneas CLAVE=valor (el formato real de
+    udevadm)."""
+    salida = "\n".join(f"{k}={v}" for k, v in propiedades.items()) + "\n"
+
+    def _run(cmd, **_k):
+        assert cmd[:2] == ["udevadm", "info"]
+        return subprocess.CompletedProcess(cmd, 0, salida, "")
+    return _run
+
+
+def test_device_identity_prefiere_id_serial(sys_block):
+    run = _fake_udevadm({"ID_SERIAL": "SanDisk_Ultra_AA11",
+                         "ID_SERIAL_SHORT": "AA11", "ID_WWN": "0xdead"})
+    assert drives.device_identity("/dev/sdb", run=run) == "SanDisk_Ultra_AA11"
+
+
+def test_device_identity_cae_a_serial_short_si_falta_id_serial(sys_block):
+    run = _fake_udevadm({"ID_SERIAL_SHORT": "AA11", "ID_WWN": "0xdead"})
+    assert drives.device_identity("/dev/sdb", run=run) == "AA11"
+
+
+def test_device_identity_cae_a_wwn_como_ultimo_recurso(sys_block):
+    run = _fake_udevadm({"ID_WWN": "0xdead"})
+    assert drives.device_identity("/dev/sdb", run=run) == "0xdead"
+
+
+def test_device_identity_none_si_no_hay_ninguna_propiedad(sys_block):
+    """Algunos lectores de tarjetas SD integrados no exponen serie ni WWN:
+    None, no una excepción -quien llama decide qué hacer con la falta de
+    dato (`verify_still_safe` no bloquea Modo Fábrica por esto solo)."""
+    run = _fake_udevadm({"ID_MODEL": "SD_Reader"})
+    assert drives.device_identity("/dev/sdb", run=run) is None
+
+
+def test_device_identity_none_si_udevadm_falla(sys_block):
+    def _run(cmd, **_k):
+        return subprocess.CompletedProcess(cmd, 2, "", "no such device")
+    assert drives.device_identity("/dev/sdb", run=_run) is None
+
+
+def test_device_identity_none_si_udevadm_no_esta_instalado(sys_block):
+    def _run(cmd, **_k):
+        raise FileNotFoundError("udevadm")
+    assert drives.device_identity("/dev/sdb", run=_run) is None
+
+
+def test_verify_still_safe_pasa_si_la_identidad_coincide(sys_block):
+    _make_block_device(sys_block, "sdb", removable=True, size_sectors=1000)
+    device = drives.BlockDevice(path=_dev("sdb"), model="X",
+                                size_bytes=1000 * 512, identity="SERIE-A")
+    run = _fake_udevadm({"ID_SERIAL": "SERIE-A"})
+    drives.verify_still_safe(device, run=run)  # no levanta nada
+
+
+def test_verify_still_safe_rechaza_si_la_identidad_cambio(sys_block):
+    """El caso central del blindaje: mismo /dev/sdb, mismo tamaño (el
+    kernel reasignó el nombre a otro USB de igual capacidad), pero la
+    serie que reporta udev ya no es la que se confirmó."""
+    _make_block_device(sys_block, "sdb", removable=True, size_sectors=1000)
+    device = drives.BlockDevice(path=_dev("sdb"), model="X",
+                                size_bytes=1000 * 512, identity="SERIE-A")
+    run = _fake_udevadm({"ID_SERIAL": "SERIE-B"})
+    with pytest.raises(drives.DeviceIdentityMismatchError):
+        drives.verify_still_safe(device, run=run)
+
+
+def test_verify_still_safe_no_chequea_identidad_si_no_se_pudo_capturar(sys_block):
+    """Si al listar el dispositivo no se pudo determinar su identidad
+    (`BlockDevice.identity is None`), `verify_still_safe` no la vuelve a
+    pedir: no hay nada contra qué comparar, y tratar "no sé" como
+    "cambió" bloquearía Modo Fábrica entero para esos dispositivos."""
+    _make_block_device(sys_block, "sdb", removable=True, size_sectors=1000)
+    device = drives.BlockDevice(path=_dev("sdb"), model="X",
+                                size_bytes=1000 * 512, identity=None)
+
+    def _no_deberia_llamarse(cmd, **_k):
+        raise AssertionError("no debería consultar udevadm si no hay "
+                             "identidad previa contra qué comparar")
+
+    drives.verify_still_safe(device, run=_no_deberia_llamarse)  # no levanta nada
+
+
+# ------------------------------------- Blindaje 4: montajes críticos --
 @pytest.mark.parametrize("punto_critico", ["/", "/home", "/boot", "/boot/efi"])
 def test_check_no_critical_mounts_aborta_si_hay_una_particion_del_sistema(
         proc_mounts, punto_critico):
@@ -180,6 +265,93 @@ def test_mounted_critical_paths_falla_cerrado_sin_proc_mounts(tmp_path, monkeypa
     todo estuviera montado en rutas críticas."""
     monkeypatch.setattr(drives, "_PROC_MOUNTS", tmp_path / "no-existe")
     assert drives.mounted_critical_paths("/dev/sdb") == sorted(drives.CRITICAL_MOUNTPOINTS)
+
+
+# ------------------------------- Recurso físico (para el OperationManager) --
+@pytest.fixture
+def sys_class_block(tmp_path, monkeypatch):
+    """Un /sys/class/block de juguete: symlinks planos apuntando a un
+    árbol de directorios reales, igual que el de verdad (donde una
+    partición vive anidada adentro de la carpeta de su disco, y el
+    archivo `partition` solo existe en las particiones)."""
+    devices = tmp_path / "devices_block"
+    devices.mkdir()
+    class_block = tmp_path / "class_block"
+    class_block.mkdir()
+    monkeypatch.setattr(drives, "_SYS_CLASS_BLOCK", class_block)
+
+    def _agregar_disco(nombre: str, particiones: tuple[str, ...] = ()) -> None:
+        disco_dir = devices / nombre
+        disco_dir.mkdir()
+        (class_block / nombre).symlink_to(disco_dir)
+        for particion in particiones:
+            part_dir = disco_dir / particion
+            part_dir.mkdir()
+            (part_dir / "partition").write_text("1\n")
+            (class_block / particion).symlink_to(part_dir)
+
+    return _agregar_disco
+
+
+def _fake_findmnt(origen_por_destino: dict[str, str]):
+    """`run` falso que simula `findmnt -n -o SOURCE --target <path>`."""
+    def _run(cmd, **_k):
+        assert cmd[0] == "findmnt"
+        destino = cmd[-1]
+        origen = origen_por_destino.get(destino)
+        if origen is None:
+            return subprocess.CompletedProcess(cmd, 1, "", "")
+        return subprocess.CompletedProcess(cmd, 0, origen + "\n", "")
+    return _run
+
+
+def test_whole_disk_path_de_una_particion_da_el_disco_entero(sys_class_block):
+    sys_class_block("sdb", particiones=("sdb1", "sdb2"))
+    assert drives._whole_disk_path("/dev/sdb1") == Path("/dev/sdb")
+
+
+def test_whole_disk_path_de_un_disco_entero_se_devuelve_igual(sys_class_block):
+    sys_class_block("sdb")
+    assert drives._whole_disk_path("/dev/sdb") == Path("/dev/sdb")
+
+
+def test_whole_disk_path_none_si_no_esta_en_sys_class_block(sys_class_block):
+    sys_class_block("sdb")
+    assert drives._whole_disk_path("/dev/no-existe") is None
+
+
+def test_physical_disk_for_path_resuelve_particion_montada(sys_class_block, monkeypatch):
+    sys_class_block("sdb", particiones=("sdb1",))
+    monkeypatch.setattr(drives.subprocess, "run",
+                        _fake_findmnt({"/run/media/usuario/MIUSB": "/dev/sdb1"}))
+    resultado = drives.physical_disk_for_path("/run/media/usuario/MIUSB")
+    assert resultado == Path("/dev/sdb")
+
+
+def test_physical_disk_for_path_none_si_findmnt_no_reconoce_el_punto(
+        sys_class_block, monkeypatch):
+    sys_class_block("sdb", particiones=("sdb1",))
+    monkeypatch.setattr(drives.subprocess, "run", _fake_findmnt({}))
+    assert drives.physical_disk_for_path("/no/es/un/montaje") is None
+
+
+def test_resources_for_mount_point_incluye_el_disco_fisico(sys_class_block, monkeypatch):
+    sys_class_block("sdb", particiones=("sdb1",))
+    monkeypatch.setattr(drives.subprocess, "run",
+                        _fake_findmnt({"/run/media/usuario/MIUSB": "/dev/sdb1"}))
+    recursos = drives.resources_for_mount_point("/run/media/usuario/MIUSB")
+    assert recursos == [Path("/run/media/usuario/MIUSB"), Path("/dev/sdb")]
+
+
+def test_resources_for_mount_point_solo_el_punto_si_no_hay_fisico(
+        sys_class_block, monkeypatch):
+    """Sin poder determinar el disco físico (ej. findmnt no reconoce el
+    punto), se degrada al comportamiento de siempre -solo el punto de
+    montaje- en vez de romper la operación entera."""
+    sys_class_block("sdb", particiones=("sdb1",))
+    monkeypatch.setattr(drives.subprocess, "run", _fake_findmnt({}))
+    recursos = drives.resources_for_mount_point("/algo/raro")
+    assert recursos == [Path("/algo/raro")]
 
 
 # ---------------------------------------- format_as_wii_usb: orquestación --
@@ -271,3 +443,38 @@ def test_format_as_wii_usb_propaga_error_de_mkfs(sys_block, proc_mounts):
     device = drives.BlockDevice(path=_dev("sdb"), model="X", size_bytes=1000 * 512)
     with pytest.raises(RuntimeError, match="ocupado"):
         drives.format_as_wii_usb(device, run=_fake_run)
+
+
+def test_format_as_wii_usb_aborta_si_la_identidad_cambia_entre_desmontar_y_mkfs(
+        sys_block, proc_mounts):
+    """El caso que motiva el segundo chequeo: el Blindaje 3 pasa antes de
+    desmontar (misma serie que se confirmó), pero para cuando está por
+    correr `mkfs.vfat` -después de desmontar, que puede tardar- la serie
+    que reporta udev ya es otra. Nada después del desmontaje debería
+    llegar a ejecutarse: ni `mkfs.vfat` ni el montaje posterior."""
+    _make_block_device(sys_block, "sdb", removable=True, size_sectors=1000)
+    proc_mounts([])  # nada montado: blindaje 4 pasa limpio
+
+    llamadas_udevadm = []
+
+    def _fake_run(cmd, **_k):
+        if cmd[0] == "umount":
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if cmd[:2] == ["udevadm", "info"]:
+            llamadas_udevadm.append(cmd)
+            # Primera consulta (antes de desmontar): la serie confirmada.
+            # Segunda consulta (justo antes de mkfs.vfat): otro disco.
+            serie = "SERIE-A" if len(llamadas_udevadm) == 1 else "SERIE-B"
+            return subprocess.CompletedProcess(cmd, 0, f"ID_SERIAL={serie}\n", "")
+        raise AssertionError(f"no debería llegar a ejecutar {cmd} "
+                             "-el segundo chequeo de identidad tiene que "
+                             "frenar antes de mkfs.vfat")
+
+    device = drives.BlockDevice(path=_dev("sdb"), model="X",
+                                size_bytes=1000 * 512, identity="SERIE-A")
+    with pytest.raises(drives.DeviceIdentityMismatchError):
+        drives.format_as_wii_usb(device, run=_fake_run)
+
+    assert len(llamadas_udevadm) == 2, (
+        "tienen que ser exactamente dos consultas a udevadm: una antes de "
+        "desmontar y otra justo antes de mkfs.vfat")

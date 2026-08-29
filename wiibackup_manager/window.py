@@ -565,7 +565,23 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         estructura de carpetas) en un hilo de fondo, para no congelar la
         interfaz mientras `pkexec` pide contraseña y `mkfs.vfat` escribe.
         El resultado vuelve al hilo de GTK con `GLib.idle_add`, igual que
-        el resto de las operaciones largas de la ventana."""
+        el resto de las operaciones largas de la ventana.
+
+        Antes de arrancar nada, declara el disco entero (`device.path`,
+        no un punto de montaje: `format_as_wii_usb` lo desmonta) como
+        recurso ocupado ante el `OperationManager`. Es lo que impide
+        formatear una unidad mientras Transferencias o la instalación de
+        Homebrew le están escribiendo algo encima -y viceversa: si el
+        disco ya está ocupado, `ops.start` levanta `OperationBusy` acá y
+        ni siquiera se llega a mostrar la barra de progreso."""
+        try:
+            op = self.ops.start(OperationKind.FORMATTING,
+                                resources=[device.path])
+        except OperationBusy as e:
+            self._show_toast(
+                _("No se puede formatear ahora: {detail}.").format(detail=e.detail))
+            return
+
         self._factory_busy = True
         self._factory_prepare_btn.set_sensitive(False)
         self._factory_refresh_btn.set_sensitive(False)
@@ -582,6 +598,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 GLib.idle_add(self._on_factory_format_done, False, str(e))
             else:
                 GLib.idle_add(self._on_factory_format_done, True, str(punto_montaje))
+            finally:
+                self.ops.finish(op)
 
         threading.Thread(target=worker, daemon=True, name="factory-format").start()
 

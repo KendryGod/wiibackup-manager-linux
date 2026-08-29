@@ -23,12 +23,23 @@ mentira PERO REAL: un archivo de unos cientos de MB expuesto con
    verdad, y no hace falta: lo que se prueba es que la función SABE
    encontrar la partición correcta y frenar, no que conozca de memoria
    la lista de rutas del sistema operativo.
-3) El camino feliz corre `format_as_wii_usb` DE VERDAD (mismo código que
+3) BLINDAJE 3 (identidad física) aborta si la serie que reporta udev
+   cambia entre el chequeo de antes de desmontar y el de justo antes de
+   `mkfs.vfat`. Un loop device no tiene serie de verdad -no es un bus con
+   identidad física, es un archivo-, así que acá se simula igual que la
+   Fase 1 simula que ES removable: reemplazando `drives.device_identity`
+   por una versión que, para este loop device puntual, devuelve un valor
+   la primera vez que se la llama y OTRO distinto la segunda -exactamente
+   lo que pasaría si el kernel reciclara `/dev/sdb` para un USB distinto
+   entre esos dos momentos. `format_as_wii_usb` en sí no se toca: nada
+   más se le inyecta un `run` que registra los comandos para confirmar
+   que `mkfs.vfat` nunca llegó a correr.
+4) El camino feliz corre `format_as_wii_usb` DE VERDAD (mismo código que
    usaría la interfaz) sobre el loop device: Blindaje 1 se fuerza a pasar
    -es la única forma de llegar hasta acá con un loop device, que nunca
    es removible de verdad- y de ahí en más todo es real: blindaje 3
-   (tamaño), blindaje 4 (montajes), `mkfs.vfat`, montaje y creación de
-   apps/games/wbfs.
+   (tamaño e identidad), blindaje 4 (montajes), `mkfs.vfat`, montaje y
+   creación de apps/games/wbfs.
 
 Requiere root: crear/soltar un loop device y formatear con `mkfs.vfat`
 son operaciones de root en cualquier distro. Se corre con
@@ -83,7 +94,7 @@ def crear_loop_device(tamano_mb: int, workdir: Path) -> tuple[Path, Path]:
 def fase_1_blindaje_1(loop_dev: Path) -> None:
     """El loop device tiene que quedar afuera de la lista blanca, igual
     que un disco interno: es exactamente lo que hace que sea seguro
-    usarlo para la Fase 3 sin arriesgar nada -si el Blindaje 1 fallara acá
+    usarlo para las Fases 3 y 4 sin arriesgar nada -si el Blindaje 1 fallara acá
     (falso positivo), format_as_wii_usb() ni siquiera necesitaría el
     monkeypatch de más abajo, que es la señal de que algo anda mal."""
     print("\n=== Fase 1: Blindaje 1 (lista blanca de removibles) ===")
@@ -127,8 +138,73 @@ def fase_2_blindaje_4(loop_dev: Path, workdir: Path) -> None:
 
 
 # --------------------------------------------------------------- Fase 3 --
-def fase_3_formateo_real(loop_dev: Path) -> None:
-    print("\n=== Fase 3: camino feliz — formateo real sobre el loop device ===")
+def fase_3_identidad(loop_dev: Path) -> None:
+    print("\n=== Fase 3: Blindaje 3 (identidad física entre desmontar y mkfs) ===")
+    original_is_removable = drives.is_removable_block_device
+    original_identity = drives.device_identity
+
+    def _forzar_removible(device_path):
+        if Path(device_path) == loop_dev:
+            return True
+        return original_is_removable(device_path)
+
+    llamadas = {"n": 0}
+
+    def _identidad_simulada(device_path, **kwargs):
+        # Solo se simula PARA ESTE loop device: si algún otro código de
+        # camino llegara a consultar la identidad de otro dispositivo
+        # (no debería pasar acá), se lo deja pasar a la función real.
+        if Path(device_path) != loop_dev:
+            return original_identity(device_path, **kwargs)
+        llamadas["n"] += 1
+        return "LOOP-SERIE-INICIAL" if llamadas["n"] == 1 else "LOOP-SERIE-DISTINTA"
+
+    comandos_ejecutados: list[list[str]] = []
+
+    def _run_real_pero_registrado(cmd, **kwargs):
+        comandos_ejecutados.append(cmd)
+        return subprocess.run(cmd, **kwargs)
+
+    drives.is_removable_block_device = _forzar_removible
+    drives.device_identity = _identidad_simulada
+    try:
+        tamano = drives.device_size_bytes(loop_dev)
+        device = drives.BlockDevice(path=loop_dev, model="Loop de prueba",
+                                    size_bytes=tamano or 0,
+                                    identity="LOOP-SERIE-INICIAL")
+        try:
+            drives.format_as_wii_usb(device, run=_run_real_pero_registrado,
+                                     label="WII_TEST")
+        except drives.DeviceIdentityMismatchError:
+            marcar("Fase 3: format_as_wii_usb aborta con "
+                   "DeviceIdentityMismatchError cuando la identidad cambia "
+                   "entre desmontar y mkfs.vfat", True)
+        except Exception as e:  # noqa: BLE001
+            marcar("Fase 3: format_as_wii_usb aborta con "
+                   "DeviceIdentityMismatchError cuando la identidad cambia "
+                   "entre desmontar y mkfs.vfat", False,
+                   f"levantó {type(e).__name__} en vez: {e}")
+        else:
+            marcar("Fase 3: format_as_wii_usb aborta con "
+                   "DeviceIdentityMismatchError cuando la identidad cambia "
+                   "entre desmontar y mkfs.vfat", False,
+                   "no levantó ninguna excepción -- llegó a formatear")
+
+        marcar("Fase 3: se consultó la identidad exactamente dos veces "
+               "(antes de desmontar y otra vez antes de mkfs.vfat)",
+               llamadas["n"] == 2, f"llamadas={llamadas['n']}")
+
+        hubo_mkfs = any("mkfs.vfat" in c for c in comandos_ejecutados)
+        marcar("Fase 3: mkfs.vfat NO llegó a ejecutarse",
+               not hubo_mkfs, str(comandos_ejecutados))
+    finally:
+        drives.is_removable_block_device = original_is_removable
+        drives.device_identity = original_identity
+
+
+# --------------------------------------------------------------- Fase 4 --
+def fase_4_formateo_real(loop_dev: Path) -> None:
+    print("\n=== Fase 4: camino feliz — formateo real sobre el loop device ===")
     # Blindaje 1 (adentro de verify_still_safe) rechazaría el loop device
     # de verdad -es justo lo que confirmó la Fase 1-, así que se lo fuerza
     # a pasar para poder ejercitar el resto del camino de punta a punta.
@@ -148,22 +224,22 @@ def fase_3_formateo_real(loop_dev: Path) -> None:
         try:
             punto_montaje = drives.format_as_wii_usb(device, label="WII_TEST")
         except Exception as e:  # noqa: BLE001
-            marcar("Fase 3: format_as_wii_usb corrió sin levantar excepción",
+            marcar("Fase 4: format_as_wii_usb corrió sin levantar excepción",
                    False, str(e))
             return
-        marcar("Fase 3: format_as_wii_usb corrió sin levantar excepción", True,
+        marcar("Fase 4: format_as_wii_usb corrió sin levantar excepción", True,
                f"montado en {punto_montaje}")
 
         carpetas_ok = all((punto_montaje / c).is_dir() for c in drives.FACTORY_FOLDERS)
-        marcar("Fase 3: se crearon apps/games/wbfs en el punto de montaje",
+        marcar("Fase 4: se crearon apps/games/wbfs en el punto de montaje",
                carpetas_ok, str(sorted(p.name for p in punto_montaje.iterdir())))
 
         fstype = drives.filesystem_of(punto_montaje)
-        marcar("Fase 3: el filesystem resultante es FAT32/vfat",
+        marcar("Fase 4: el filesystem resultante es FAT32/vfat",
                fstype in {"vfat", "fat32"}, f"filesystem_of={fstype}")
 
         ok_desmonte, detalle = drives.eject_mount_point(punto_montaje)
-        marcar("Fase 3: se pudo desmontar el punto de montaje al terminar",
+        marcar("Fase 4: se pudo desmontar el punto de montaje al terminar",
                ok_desmonte, detalle)
     finally:
         drives.is_removable_block_device = original_is_removable
@@ -196,7 +272,8 @@ def main() -> int:
 
         fase_1_blindaje_1(loop_dev)
         fase_2_blindaje_4(loop_dev, workdir)
-        fase_3_formateo_real(loop_dev)
+        fase_3_identidad(loop_dev)
+        fase_4_formateo_real(loop_dev)
     finally:
         if loop_dev is not None:
             subprocess.run(["umount", str(loop_dev)], capture_output=True)

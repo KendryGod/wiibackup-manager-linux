@@ -10,7 +10,16 @@ información falsa:
   lista queda mostrando el resultado más viejo;
 - escanear mientras se copia/convierte dentro de la biblioteca, con lo que
   el escaneo llega a ver archivos a medio escribir y los identifica mal;
-- expulsar el USB mientras se le está copiando un juego encima.
+- expulsar el USB mientras se le está copiando un juego encima;
+- formatear un USB (Modo Fábrica) mientras se le está copiando un juego o
+  instalando homebrew encima -o al revés: arrancar una copia sobre un
+  disco que Modo Fábrica está formateando en ese momento. Acá es donde
+  `resources` no puede ser el punto de montaje nomás: Modo Fábrica lo
+  desmonta como parte de formatear, así que declara el disco físico
+  entero (`drives.physical_disk_for_path` / `BlockDevice.path`) y
+  Transferencias/Homebrew declaran ESE MISMO recurso además del punto de
+  montaje, para que ambos lados choquen entre sí sin importar cuál
+  arrancó primero.
 
 Cada operación declara TRES cosas, y de ahí salen todos los conflictos:
 
@@ -64,6 +73,7 @@ class OperationKind(Enum):
     DELETING = "Eliminando"
     RENAMING = "Renombrando"
     INSTALLING_HOMEBREW = "Instalando homebrew"
+    FORMATTING = "Formateando la unidad"
 
     @property
     def label(self) -> str:

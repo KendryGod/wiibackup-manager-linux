@@ -51,7 +51,7 @@ from typing import Callable, Optional
 
 from gi.repository import GLib
 
-from . import library, oplog, wit_wrapper
+from . import drives, library, oplog, wit_wrapper
 from .i18n import _
 from .library import Game, TransferItem
 from .operations import OperationBusy, OperationKind, OperationOutcome
@@ -563,7 +563,7 @@ class TransferQueue:
                     OperationKind.TRANSFERRING,
                     read=[job.game.path],
                     write=[dest],
-                    resources=[job.dest_root],
+                    resources=drives.resources_for_mount_point(job.dest_root),
                 )
             except OperationBusy as e:
                 if not aviso_dado:
