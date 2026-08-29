@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import zipfile
 
+import pytest
+
 from wiibackup_manager import oscwii_installer
 from wiibackup_manager.oscwii_client import HomebrewApp
 from wiibackup_manager.oscwii_installer import InstallStatus
@@ -146,3 +148,32 @@ def test_install_app_con_destino_valido_instala_normal(tmp_path, monkeypatch):
     assert result.status is InstallStatus.OK
     assert (dest_root / "apps" / "TestApp" / "boot.dol").read_bytes() == b"A" * 100
     assert (dest_root / "apps" / "TestApp" / "meta.xml").read_bytes() == b"<app/>"
+
+
+# ------------------------------------------------------- _extract_member --
+def test_extraccion_cortada_no_deja_temporales_en_la_unidad(tmp_path, monkeypatch):
+    """Una extracción que se corta a mitad (unidad desconectada, disco
+    lleno) no puede dejar un `.boot.dol.parcial-<pid>` tirado en la unidad
+    del usuario.
+
+    Mientras `_extract_member` armaba el temporal a mano era el único de
+    los cuatro lugares con este patrón que no limpiaba ante un error; al
+    pasar a `fsutil.atomic_target` la limpieza quedó garantizada para
+    todos. Esta prueba es la guarda de que no se vuelva a perder."""
+    zip_path = tmp_path / "app.zip"
+    _make_zip(zip_path, {"apps/TestApp/boot.dol": b"A" * 100})
+    dest_root = tmp_path / "usb"
+    (dest_root / "apps").mkdir(parents=True)
+
+    def _falla_a_mitad(src, dst, *a, **kw):
+        dst.write(b"AA")  # algo ya se escribió al temporal
+        raise OSError("unidad desconectada")
+    monkeypatch.setattr(oscwii_installer.shutil, "copyfileobj", _falla_a_mitad)
+
+    with zipfile.ZipFile(zip_path) as zf:
+        info = zf.infolist()[0]
+        with pytest.raises(OSError):
+            oscwii_installer._extract_member(zf, info, dest_root)
+
+    quedaron = list((dest_root / "apps" / "TestApp").iterdir())
+    assert quedaron == [], f"quedaron temporales huérfanos: {quedaron}"

@@ -90,15 +90,14 @@ llegaba a dispararse con una instalación real.
 """
 from __future__ import annotations
 
-import os
 import shutil
-import sys
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Optional
 
 from . import oplog
+from .fsutil import atomic_target, installed_data_dirs
 from .oscwii_client import HomebrewApp
 
 if TYPE_CHECKING:
@@ -191,34 +190,15 @@ class GoldenConfigResult:
 
 # ------------------------------------------------- Ubicar assets/configs --
 #
-# Mismo problema -y misma solución- que `i18n._candidate_dirs`: la app
-# puede correr desde el repo clonado sin instalar, desde
-# `pip install --user`, desde un venv, o desde una instalación de
-# sistema, y en cada caso la carpeta de assets termina en un lugar
-# distinto. Ver `pyproject.toml` (`[tool.setuptools.data-files]`) para
-# dónde queda cada uno de esos casos al instalar.
+# Mismo problema -y ahora, literalmente, la misma solución- que el
+# catálogo de traducciones de `i18n`: la app puede correr desde el repo
+# clonado sin instalar, desde `pip install --user`, desde un venv, o desde
+# una instalación de sistema, y en cada caso la carpeta de assets termina
+# en un lugar distinto. La búsqueda vive en `fsutil.installed_data_dirs`;
+# acá solo se dice qué rutas buscar. Ver `pyproject.toml`
+# (`[tool.setuptools.data-files]`) para dónde queda cada caso al instalar.
 def _candidate_asset_dirs() -> list:
-    paquete = Path(__file__).resolve().parent
-    candidatos = [
-        # Repo clonado sin instalar.
-        paquete.parent / "assets" / "configs",
-    ]
-    for padre in paquete.parents:
-        if padre.name in ("site-packages", "dist-packages"):
-            candidatos.append(padre.parent.parent.parent / "share"
-                              / "wiibackup-manager" / "configs")
-            break
-    candidatos += [
-        Path(sys.prefix) / "share" / "wiibackup-manager" / "configs",
-        Path.home() / ".local" / "share" / "wiibackup-manager" / "configs",
-        Path("/usr/local/share/wiibackup-manager/configs"),
-        Path("/usr/share/wiibackup-manager/configs"),
-    ]
-    vistos = []
-    for c in candidatos:
-        if c not in vistos:
-            vistos.append(c)
-    return vistos
+    return installed_data_dirs("assets/configs", "wiibackup-manager/configs")
 
 
 def find_asset(relative: str) -> Optional[Path]:
@@ -267,21 +247,12 @@ def _asset_is_valid(spec: GoldenConfigSpec, asset_path: Path) -> tuple:
 
 # --------------------------------------------------------------- Copia --
 def _copy_atomic(src: Path, dest: Path) -> None:
-    """Copia `src` a `dest` de forma atómica: temporal + `os.replace`,
-    mismo patrón que `oscwii_installer._extract_member` y
-    `gametdb._store_cover`. Levanta OSError si algo falla; quien llama lo
+    """Copia `src` a `dest` de forma atómica (ver `fsutil.atomic_target`,
+    el mismo helper que usan `oscwii_installer._extract_member` y
+    `gametdb._store_cover`). Levanta OSError si algo falla; quien llama lo
     convierte en un `GoldenConfigResult` de error."""
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_name(f".{dest.name}.parcial-{os.getpid()}")
-    try:
+    with atomic_target(dest, mkparents=True) as tmp:
         shutil.copyfile(src, tmp)
-        os.replace(tmp, dest)
-    except OSError:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
 
 
 # -------------------------------------------------------------------- API --

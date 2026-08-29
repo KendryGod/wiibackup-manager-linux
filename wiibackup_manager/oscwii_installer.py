@@ -39,7 +39,6 @@ como ya hace `queue_manager.TransferQueue` para las transferencias.
 from __future__ import annotations
 
 import hashlib
-import os
 import shutil
 import stat
 import tempfile
@@ -53,6 +52,7 @@ from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
 
 from . import drives, library
+from .fsutil import atomic_target
 from .oscwii_client import HomebrewApp
 
 REQUEST_TIMEOUT = 20
@@ -308,18 +308,22 @@ def _validate_zip(zip_path: Path, dest_root: Path) -> tuple:
 def _extract_member(zf: zipfile.ZipFile, info: zipfile.ZipInfo,
                     dest_root: Path) -> Path:
     """Copia UNA entrada ya validada a su destino final, de forma atómica
-    (temporal + `os.replace`, igual que `gametdb._store_cover`). Nunca usa
-    `ZipFile.extract`: eso resolvería la ruta interna por su cuenta, y acá
-    ya se decidió a mano exactamente dónde tiene que caer cada archivo.
-    Copia bytes nomás -nunca cambia permisos de ejecución, nunca corre
-    nada- así que el resultado es siempre un archivo de datos, jamás un
-    programa en marcha."""
+    (`fsutil.atomic_target`, el mismo helper que usa
+    `gametdb._store_cover`). Nunca usa `ZipFile.extract`: eso resolvería la
+    ruta interna por su cuenta, y acá ya se decidió a mano exactamente
+    dónde tiene que caer cada archivo. Copia bytes nomás -nunca cambia
+    permisos de ejecución, nunca corre nada- así que el resultado es
+    siempre un archivo de datos, jamás un programa en marcha.
+
+    Si la copia se corta a mitad (unidad desconectada, disco lleno), el
+    temporal se borra antes de propagar el error: mientras esta función
+    armaba el temporal a mano se olvidaba de eso, y una instalación
+    fallida dejaba un `.boot.dol.parcial-<pid>` tirado en la unidad del
+    usuario para siempre."""
     target = dest_root / info.filename
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(f".{target.name}.parcial-{os.getpid()}")
-    with zf.open(info) as src, tmp.open("wb") as dst:
-        shutil.copyfileobj(src, dst)
-    os.replace(tmp, target)
+    with atomic_target(target, mkparents=True) as tmp:
+        with zf.open(info) as src, tmp.open("wb") as dst:
+            shutil.copyfileobj(src, dst)
     return target
 
 

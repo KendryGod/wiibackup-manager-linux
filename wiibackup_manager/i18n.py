@@ -40,41 +40,20 @@ from __future__ import annotations
 
 import gettext
 import locale
-import sys
-from pathlib import Path
+
+from .fsutil import installed_data_dirs
 
 DOMAIN = "wiibackup-manager"
 
 
 def _candidate_dirs() -> list:
     """Directorios donde puede estar el catálogo, del más específico al
-    más general."""
-    paquete = Path(__file__).resolve().parent
-    candidatos = [
-        # Repo clonado sin instalar: <repo>/data/locale
-        paquete.parent / "data" / "locale",
-    ]
-    # El prefijo deducido de dónde quedó instalado el paquete, que es el
-    # único que distingue los tres casos: site-packages de ~/.local (pip
-    # --user), de un venv, o del sistema. `sys.prefix` no sirve solo para
-    # esto: con `pip install --user` sigue siendo /usr, así que un
-    # catálogo viejo del sistema le ganaría al recién instalado.
-    for padre in paquete.parents:
-        if padre.name in ("site-packages", "dist-packages"):
-            # …/<prefix>/lib/pythonX.Y/site-packages → <prefix>
-            candidatos.append(padre.parent.parent.parent / "share" / "locale")
-            break
-    candidatos += [
-        Path(sys.prefix) / "share" / "locale",
-        Path.home() / ".local" / "share" / "locale",
-        Path("/usr/local/share/locale"),
-        Path("/usr/share/locale"),
-    ]
-    vistos = []
-    for c in candidatos:
-        if c not in vistos:
-            vistos.append(c)
-    return vistos
+    más general.
+
+    La búsqueda en sí (repo clonado / venv / pip --user / sistema) vive en
+    `fsutil.installed_data_dirs`, compartida con la carpeta de configs
+    maestras de `golden_configs`: acá solo se dice qué rutas buscar."""
+    return installed_data_dirs("data/locale", "locale")
 
 
 def _load() -> gettext.NullTranslations:

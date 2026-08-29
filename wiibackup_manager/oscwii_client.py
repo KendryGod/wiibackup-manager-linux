@@ -49,7 +49,6 @@ tarjeta/USB (SD:/apps/<carpeta>/boot.dol + meta.xml + icon.png).
 from __future__ import annotations
 
 import json
-import os
 import threading
 import urllib.error
 import urllib.request
@@ -60,6 +59,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import config
+from .fsutil import PNG_MAGIC, atomic_target
 
 OSC_API_BASE = "https://hbb1.oscwii.org"
 OSC_CONTENTS_URL = f"{OSC_API_BASE}/api/v3/contents"
@@ -361,7 +361,6 @@ def _run_list_job() -> None:
 # termina de cargar cada uno, igual que hace `game_row.build_cover_widget`
 # con las carátulas de GameTDB.
 ICONS_CACHE_DIRNAME = "oscwii_icons"
-PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
 
 def icons_cache_dir() -> Path:
@@ -418,15 +417,10 @@ def get_icon_path(app: HomebrewApp, force: bool = False) -> Optional[Path]:
     if not _looks_like_png(data):
         return None
 
-    tmp = cache_path.with_name(f".{cache_path.name}.parcial-{os.getpid()}")
     try:
-        tmp.write_bytes(data)
-        os.replace(tmp, cache_path)
+        with atomic_target(cache_path) as tmp:
+            tmp.write_bytes(data)
     except OSError:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
         return None
     return cache_path
 
