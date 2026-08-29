@@ -12,6 +12,8 @@ en el caso del extractor de ZIP, no hacía)."""
 from __future__ import annotations
 
 import os
+import stat
+import threading
 from pathlib import Path
 
 import pytest
@@ -85,15 +87,25 @@ def test_una_excepcion_que_no_es_oserror_tambien_limpia(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
-def test_si_el_bloque_no_escribe_nada_falla_y_no_deja_rastro(tmp_path):
-    """`os.replace` de un temporal que nunca se creó levanta OSError; lo
-    importante es que no quede a medias ni se cree el destino."""
+def test_si_el_bloque_no_escribe_nada_el_destino_queda_vacio(tmp_path):
+    """Cambio de contrato al pasar a `mkstemp`, anotado a propósito.
+
+    Antes el temporal no existía hasta que el bloque lo creaba, así que un
+    bloque que no escribía nada hacía fallar el `os.replace` con OSError y
+    el destino no se creaba. Ahora `mkstemp` crea el archivo por
+    adelantado -que es justamente de dónde sale la unicidad garantizada
+    del nombre-, así que "no escribir nada" produce un destino vacío en
+    vez de un error.
+
+    Es el resultado correcto para el único caso real que llega acá: un
+    miembro de ZIP de 0 bytes tiene que instalarse como un archivo de 0
+    bytes, no hacer fracasar la instalación entera. Lo que sí sigue
+    valiendo es que no quede ningún temporal tirado."""
     dest = tmp_path / "archivo.bin"
-    with pytest.raises(OSError):
-        with fsutil.atomic_target(dest):
-            pass
-    assert not dest.exists()
-    assert list(tmp_path.iterdir()) == []
+    with fsutil.atomic_target(dest):
+        pass
+    assert dest.read_bytes() == b""
+    assert [p.name for p in tmp_path.iterdir()] == ["archivo.bin"]
 
 
 def test_falla_de_replace_borra_el_temporal(tmp_path, monkeypatch):
@@ -125,10 +137,11 @@ def test_una_limpieza_que_falla_no_tapa_el_error_original(tmp_path, monkeypatch)
             raise RuntimeError("el error de verdad")
 
 
-def test_el_temporal_es_oculto_y_lleva_el_pid(tmp_path):
-    """Contrato con `tools/manual_queue_e2e.py`, que busca exactamente
-    este patrón de nombre para detectar temporales huérfanos, y con el
-    escaneo de la biblioteca, que ignora los archivos ocultos."""
+def test_el_temporal_es_oculto_y_hermano_del_destino(tmp_path):
+    """Contrato con `tools/manual_queue_e2e.py`, que busca los temporales
+    huérfanos por `rglob(".*")`, y con el escaneo de la biblioteca, que
+    ignora los archivos ocultos. Hermano del destino, además, porque el
+    `os.replace` final solo es atómico dentro del mismo filesystem."""
     dest = tmp_path / "Juego.iso"
     visto = {}
     with fsutil.atomic_target(dest) as tmp:
@@ -136,8 +149,86 @@ def test_el_temporal_es_oculto_y_lleva_el_pid(tmp_path):
         visto["carpeta"] = tmp.parent
         tmp.write_bytes(b"x")
 
-    assert visto["nombre"] == f".Juego.iso.parcial-{os.getpid()}"
+    assert visto["nombre"].startswith(".Juego.iso.parcial-")
     assert visto["carpeta"] == tmp_path  # hermano del destino, mismo filesystem
+
+
+def test_dos_llamadas_al_mismo_destino_usan_temporales_distintos(tmp_path):
+    """El nombre lo da `mkstemp` (O_CREAT|O_EXCL), no una convención con
+    el PID adentro: dos llamadas al MISMO destino no pueden coincidir ni
+    aunque salgan del mismo proceso."""
+    dest = tmp_path / "archivo.bin"
+    with fsutil.atomic_target(dest) as a, fsutil.atomic_target(dest) as b:
+        assert a != b
+        a.write_bytes(b"a")
+        b.write_bytes(b"b")
+
+
+def test_dos_threads_al_mismo_destino_no_se_pisan_el_temporal(tmp_path):
+    """El caso concreto que el esquema por PID no cubría.
+
+    Dos threads del MISMO proceso escribiendo al mismo destino calculaban
+    el mismo nombre de temporal (`.<nombre>.parcial-<pid>`), así que el
+    segundo truncaba y sobrescribía lo que el primero todavía estaba
+    escribiendo, y el `os.replace` del segundo se encontraba sin archivo.
+
+    La barrera del medio es lo que hace que el test sirva: fuerza a que
+    los dos threads estén DENTRO del bloque, con lo suyo ya escrito, al
+    mismo tiempo. Recién ahí cada uno relee su temporal: si lo
+    compartieran, uno de los dos leería el contenido del otro."""
+    dest = tmp_path / "archivo.bin"
+    contenidos = {"A": b"A" * 4096, "B": b"B" * 4096}
+    barrera = threading.Barrier(2)
+    lock = threading.Lock()
+    temporales: list = []
+    errores: list = []
+
+    def escribir(clave: str) -> None:
+        try:
+            with fsutil.atomic_target(dest) as tmp:
+                with lock:
+                    temporales.append(tmp)
+                tmp.write_bytes(contenidos[clave])
+                # Los dos ya escribieron: a partir de acá, cualquier
+                # mezcla entre ellos es visible.
+                barrera.wait(timeout=10)
+                assert tmp.read_bytes() == contenidos[clave], (
+                    f"el temporal de {clave} lo pisó el otro thread")
+        except BaseException as e:  # noqa: BLE001 - se revisa abajo
+            errores.append(e)
+            barrera.abort()
+
+    hilos = [threading.Thread(target=escribir, args=(c,)) for c in contenidos]
+    for h in hilos:
+        h.start()
+    for h in hilos:
+        h.join(timeout=20)
+        assert not h.is_alive(), "un thread quedó colgado"
+
+    assert not errores, errores
+    assert len(set(temporales)) == 2, f"compartieron el temporal: {temporales}"
+    # Gana uno de los dos -cuál, depende de quién haga el `os.replace`
+    # último-, pero el destino queda con UNO de los dos contenidos entero,
+    # nunca con una mezcla.
+    assert dest.read_bytes() in contenidos.values()
+    assert [p.name for p in tmp_path.iterdir()] == ["archivo.bin"]
+
+
+def test_el_destino_conserva_los_permisos_de_siempre(tmp_path):
+    """`mkstemp` crea en 0600, pero el temporal de este helper termina
+    SIENDO el archivo final: sin corregirlo, la caché, las configs
+    maestras y las apps instaladas habrían cambiado de permisos en
+    silencio. La referencia es un archivo creado con un `open()` normal,
+    o sea con el mismo umask que regía antes."""
+    referencia = tmp_path / "referencia.bin"
+    referencia.write_bytes(b"x")
+
+    dest = tmp_path / "archivo.bin"
+    with fsutil.atomic_target(dest) as tmp:
+        tmp.write_bytes(b"x")
+
+    assert (stat.S_IMODE(dest.stat().st_mode)
+            == stat.S_IMODE(referencia.stat().st_mode))
 
 
 def test_mkparents_crea_la_carpeta_del_destino(tmp_path):
