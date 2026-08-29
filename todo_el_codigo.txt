@@ -2885,13 +2885,14 @@ import io
 import os
 import re
 import shutil
+import tempfile
 import time
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import drives, wit_wrapper
+from . import drives, fsutil, wit_wrapper
 from .disc_header import (
     UNKNOWN_GAME_ID,
     DiscInfo,
@@ -3259,15 +3260,40 @@ def _copy_with_progress(
     bueno que el cliente ya tenía en esa unidad ya no existía, y lo único
     que hacía el `except` era borrar la basura que había quedado. Con el
     temporal, un fallo en cualquier punto deja el destino original
-    exactamente como estaba."""
+    exactamente como estaba.
+
+    El temporal lo crea `tempfile.mkstemp` en la MISMA carpeta que `dest`
+    -condición para que el `os.replace` final sea atómico- con nombre
+    único garantizado por el sistema operativo (`O_CREAT|O_EXCL`), igual
+    que `fsutil.atomic_target` y `config.write_text_atomic`. Antes el
+    nombre llevaba el PID adentro, que alcanza para que no se pisen dos
+    PROCESOS pero no dos THREADS del mismo proceso: dos copias
+    simultáneas hacia el mismo destino calculaban el mismo temporal y la
+    segunda truncaba los datos que la primera todavía estaba escribiendo
+    -acá, GB de un ISO del cliente-. Hoy la cola serializa las
+    transferencias, pero esta función es pública a través de
+    `copy_atomic`/`copy_no_replace` y su garantía tiene que valer sola.
+
+    Los permisos del resultado los sigue fijando `shutil.copystat`, que
+    copia el modo de `src` (es lo que la hace equivalente a `copy2`), así
+    que el 0600 con el que `mkstemp` crea el temporal no llega nunca al
+    archivo final. Se ajusta igual apenas se crea: en una copia de varios
+    GB el temporal es visible en la unidad durante minutos, y ahí tiene
+    que verse con los permisos de siempre y no con unos más cerrados."""
     written = 0
     last_report = time.monotonic()
-    # Oculto y con el PID adentro: no lo toma un escaneo de la biblioteca
-    # y dos copias simultáneas hacia el mismo destino no se pisan el
-    # temporal entre sí.
-    tmp = dest.with_name(f".{dest.name}.parcial-{os.getpid()}")
+    # Oculto (no lo toma un escaneo de la biblioteca) y con nombre único
+    # de verdad: lo elige el sistema operativo, no una convención del
+    # código, así que ni dos procesos ni dos threads pueden coincidir.
+    fd, nombre = tempfile.mkstemp(dir=dest.parent,
+                                  prefix=f".{dest.name}.parcial-")
+    tmp = Path(nombre)
+    fsutil.ajustar_permisos_por_defecto(tmp)
     try:
-        with open(src, "rb") as fsrc, open(tmp, "wb") as fdst:
+        # `os.fdopen` primero, y no `open(src)` primero: si abrir el
+        # origen falla, el `with` igual cierra el descriptor que
+        # `mkstemp` ya entregó en vez de filtrarlo.
+        with os.fdopen(fd, "wb") as fdst, open(src, "rb") as fsrc:
             while True:
                 if cancel is not None and cancel.cancelled:
                     raise wit_wrapper.OperationCancelled(
@@ -16845,6 +16871,8 @@ ajeno y armar la ruta de destino de una unidad WBFS.
 from __future__ import annotations
 
 import os
+import stat
+import threading
 from pathlib import Path
 
 import pytest
@@ -17375,6 +17403,254 @@ def test_rollback_failed_error_sin_original_error_usa_el_mensaje_base():
         [(Path("/a/juego.wbfs"), Path("/a/.juego.wbfs.respaldo-1"))])
     assert error.original_error is None
     assert error.user_message() == str(error)
+
+
+# ------------------------------------------ Copia atómica con progreso --
+# `_copy_with_progress` es por donde pasan los ISO/WBFS de verdad
+# (`copy_atomic`, `copy_no_replace` y las transferencias a GameCube), y no
+# tenía pruebas propias. Se agregan junto con el cambio de nombre del
+# temporal a `tempfile.mkstemp`: lo que más importa verificar es que ese
+# cambio no se llevó puesto nada de lo que esta función ya garantizaba
+# -bajar a disco antes del intercambio, cortar al cancelar, dejar el
+# destino viejo intacto ante cualquier fallo, y copiar los permisos del
+# origen como hace `shutil.copy2`.
+
+class _EnElChunk:
+    """Se hace pasar por un `CancellationToken` para meterse en medio de
+    la copia.
+
+    `_copy_with_progress` consulta `.cancelled` antes de leer cada bloque,
+    así que es el único punto de la función donde un test puede pararse a
+    mitad de camino sin parchear nada de adentro. `progress_cb` no sirve
+    para esto: solo se llama una vez por segundo, y la última vez ya es
+    después del `os.replace`.
+
+    `en_consulta` es en qué consulta actuar. Para un origen de N bloques
+    exactos, la consulta N+1 es la que ve el archivo agotado: ahí el
+    temporal ya tiene TODO el contenido escrito y todavía no se hizo el
+    intercambio, que es justo el instante que interesa."""
+
+    def __init__(self, en_consulta: int, accion=None, cancelar_en=None):
+        self.en_consulta = en_consulta
+        self.accion = accion
+        self.cancelar_en = cancelar_en
+        self.consultas = 0
+
+    @property
+    def cancelled(self) -> bool:
+        self.consultas += 1
+        if self.cancelar_en is not None and self.consultas >= self.cancelar_en:
+            return True
+        if self.accion is not None and self.consultas == self.en_consulta:
+            self.accion()
+        return False
+
+
+def _consultas_hasta_el_final(tamaño: int) -> int:
+    """Cuántas veces se consulta `.cancelled` hasta que el origen se
+    agota: una por bloque más la que se encuentra con el archivo
+    terminado."""
+    bloques, resto = divmod(tamaño, library._COPY_CHUNK_BYTES)
+    return bloques + (1 if resto else 0) + 1
+
+
+def test_copia_exitosa_deja_el_contenido_y_ningun_temporal(tmp_path):
+    src = tmp_path / "Juego.iso"
+    src.write_bytes(b"A" * 4096)
+    dest = tmp_path / "destino" / "Juego.iso"
+    dest.parent.mkdir()
+
+    library.copy_atomic(src, dest)
+
+    assert dest.read_bytes() == b"A" * 4096
+    assert [p.name for p in dest.parent.iterdir()] == ["Juego.iso"]
+
+
+def test_dos_copias_concurrentes_al_mismo_destino_no_se_pisan(tmp_path):
+    """El caso que el nombre de temporal por PID no cubría.
+
+    Dos threads del MISMO proceso copiando al mismo destino calculaban el
+    mismo `.<nombre>.parcial-<pid>`, así que el segundo abría con "wb" el
+    archivo que el primero estaba escribiendo -truncándole GB de ISO a
+    mitad de camino- y el `os.replace` del primero terminaba moviendo
+    datos de los dos mezclados, o directamente fallaba por no encontrar
+    su temporal.
+
+    Las dos barreras son para mirar el instante exacto: `listos` espera a
+    que los DOS threads tengan su contenido entero escrito (última
+    consulta de `.cancelled`, con el origen ya agotado) y todavía no
+    hayan hecho el intercambio; ahí el hilo principal inspecciona la
+    carpeta; recién entonces `seguir` los suelta."""
+    chunk = library._COPY_CHUNK_BYTES
+    origenes = {}
+    for clave, byte in (("A", b"A"), ("B", b"B")):
+        src = tmp_path / f"origen-{clave}.iso"
+        src.write_bytes(byte * (2 * chunk))
+        origenes[clave] = src
+
+    dest = tmp_path / "destino" / "Juego.iso"
+    dest.parent.mkdir()
+
+    listos = threading.Barrier(3)
+    seguir = threading.Barrier(3)
+    errores: list = []
+
+    def esperar_al_otro() -> None:
+        listos.wait(timeout=30)
+        seguir.wait(timeout=30)
+
+    def copiar(clave: str) -> None:
+        try:
+            token = _EnElChunk(_consultas_hasta_el_final(2 * chunk),
+                               accion=esperar_al_otro)
+            library._copy_with_progress(origenes[clave], dest,
+                                        lambda _n: None, cancel=token)
+        except BaseException as e:  # noqa: BLE001 - se revisa abajo
+            errores.append(e)
+            listos.abort()
+            seguir.abort()
+
+    hilos = [threading.Thread(target=copiar, args=(c,)) for c in origenes]
+    for h in hilos:
+        h.start()
+
+    # Los dos threads están parados entre las dos barreras: contenido
+    # completo en sus temporales, ningún `os.replace` hecho todavía.
+    listos.wait(timeout=30)
+    temporales = sorted(p for p in dest.parent.iterdir() if p.name != dest.name)
+    contenidos = {p: p.read_bytes() for p in temporales}
+    seguir.wait(timeout=30)
+
+    for h in hilos:
+        h.join(timeout=60)
+        assert not h.is_alive(), "un thread quedó colgado"
+
+    assert not errores, errores
+    assert len(temporales) == 2, f"compartieron el temporal: {temporales}"
+    # Cada temporal tiene SU contenido entero: ninguno truncó ni mezcló
+    # los bytes del otro.
+    assert sorted(contenidos.values()) == sorted(
+        [b"A" * (2 * chunk), b"B" * (2 * chunk)])
+    # Gana el que haga el `os.replace` último, pero el destino queda con
+    # uno de los dos originales entero, nunca con una mezcla.
+    assert dest.read_bytes() in (b"A" * (2 * chunk), b"B" * (2 * chunk))
+    assert [p.name for p in dest.parent.iterdir()] == ["Juego.iso"]
+
+
+def test_los_permisos_del_destino_los_da_el_origen(tmp_path):
+    """`mkstemp` crea en 0600, pero acá el modo final lo fija
+    `shutil.copystat` copiando el del origen -es lo que hace a esta
+    función equivalente a `shutil.copy2`-, así que el 0600 no llega nunca
+    al archivo final."""
+    src = tmp_path / "Juego.iso"
+    src.write_bytes(b"x" * 128)
+    os.chmod(src, 0o640)
+    dest = tmp_path / "Juego-copia.iso"
+
+    library.copy_atomic(src, dest)
+
+    assert stat.S_IMODE(dest.stat().st_mode) == 0o640
+
+
+def test_el_temporal_es_oculto_y_hermano_del_destino(tmp_path):
+    """Oculto para que no lo tome un escaneo de la biblioteca (ni lo vea
+    el usuario en la unidad), y hermano del destino porque el
+    `os.replace` final solo es atómico dentro del mismo filesystem."""
+    src = tmp_path / "Juego.iso"
+    src.write_bytes(b"x" * library._COPY_CHUNK_BYTES)
+    dest = tmp_path / "destino" / "Juego.iso"
+    dest.parent.mkdir()
+
+    visto: list = []
+    token = _EnElChunk(_consultas_hasta_el_final(library._COPY_CHUNK_BYTES),
+                       accion=lambda: visto.extend(
+                           p for p in dest.parent.iterdir()))
+    library._copy_with_progress(src, dest, lambda _n: None, cancel=token)
+
+    assert len(visto) == 1
+    assert visto[0].name.startswith(".Juego.iso.parcial-")
+    assert visto[0].parent == dest.parent
+
+
+def test_un_origen_vacio_produce_un_destino_vacio(tmp_path):
+    """A diferencia de `fsutil.atomic_target` -donde pasar a `mkstemp`
+    cambió el caso "no se escribió nada" de OSError a destino vacío- acá
+    no cambia nada: el temporal siempre se creó por adelantado (antes con
+    `open(tmp, "wb")`, ahora con `mkstemp`), así que un origen vacío
+    siempre produjo un destino vacío, que es lo correcto."""
+    src = tmp_path / "vacio.iso"
+    src.write_bytes(b"")
+    dest = tmp_path / "destino.iso"
+
+    library.copy_atomic(src, dest)
+
+    assert dest.exists()
+    assert dest.read_bytes() == b""
+
+
+def test_la_cancelacion_corta_y_no_deja_rastro(tmp_path):
+    """La cancelación se revisa entre bloques y sigue funcionando igual:
+    corta en el momento, no crea el destino y no deja el temporal."""
+    src = tmp_path / "Juego.iso"
+    src.write_bytes(b"x" * (3 * library._COPY_CHUNK_BYTES))
+    dest = tmp_path / "destino" / "Juego.iso"
+    dest.parent.mkdir()
+
+    token = _EnElChunk(0, cancelar_en=2)  # cancela con la copia empezada
+
+    with pytest.raises(library.wit_wrapper.OperationCancelled):
+        library._copy_with_progress(src, dest, lambda _n: None, cancel=token)
+
+    assert not dest.exists()
+    assert list(dest.parent.iterdir()) == []
+
+
+def test_el_destino_viejo_queda_intacto_si_la_copia_falla(tmp_path):
+    """Lo que justifica todo el rodeo del temporal: un fallo a mitad de
+    camino no puede dejar al cliente sin el respaldo que ya tenía."""
+    src = tmp_path / "Juego.iso"
+    src.write_bytes(b"nuevo" * 100)
+    dest = tmp_path / "Juego.iso.dest"
+    dest.write_bytes(b"el respaldo bueno")
+
+    def _falla(_n):
+        raise OSError("USB desenchufado")
+
+    token = _EnElChunk(1, accion=lambda: _falla(0))
+    with pytest.raises(OSError):
+        library._copy_with_progress(src, dest, lambda _n: None, cancel=token)
+
+    assert dest.read_bytes() == b"el respaldo bueno"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["Juego.iso",
+                                                          "Juego.iso.dest"]
+
+
+def test_baja_a_disco_antes_de_intercambiar(tmp_path, monkeypatch):
+    """Durabilidad: sin el `fsync` previo, el rename puede quedar
+    registrado mientras los datos siguen en cache y un tirón del cable
+    deja el destino nuevo incompleto y el viejo ya borrado. El cambio de
+    temporal no puede haberse llevado eso puesto."""
+    src = tmp_path / "Juego.iso"
+    src.write_bytes(b"x" * 4096)
+    dest = tmp_path / "destino.iso"
+
+    orden: list = []
+    fsync_real, replace_real = library.os.fsync, library.os.replace
+
+    def fsync_espia(fd):
+        orden.append("fsync")
+        return fsync_real(fd)
+
+    def replace_espia(a, b):
+        orden.append("replace")
+        return replace_real(a, b)
+
+    monkeypatch.setattr(library.os, "fsync", fsync_espia)
+    monkeypatch.setattr(library.os, "replace", replace_espia)
+
+    library.copy_atomic(src, dest)
+
+    assert orden == ["fsync", "replace"]
 
 
 # ============================================================

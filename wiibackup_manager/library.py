@@ -7,13 +7,14 @@ import io
 import os
 import re
 import shutil
+import tempfile
 import time
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import drives, wit_wrapper
+from . import drives, fsutil, wit_wrapper
 from .disc_header import (
     UNKNOWN_GAME_ID,
     DiscInfo,
@@ -381,15 +382,40 @@ def _copy_with_progress(
     bueno que el cliente ya tenía en esa unidad ya no existía, y lo único
     que hacía el `except` era borrar la basura que había quedado. Con el
     temporal, un fallo en cualquier punto deja el destino original
-    exactamente como estaba."""
+    exactamente como estaba.
+
+    El temporal lo crea `tempfile.mkstemp` en la MISMA carpeta que `dest`
+    -condición para que el `os.replace` final sea atómico- con nombre
+    único garantizado por el sistema operativo (`O_CREAT|O_EXCL`), igual
+    que `fsutil.atomic_target` y `config.write_text_atomic`. Antes el
+    nombre llevaba el PID adentro, que alcanza para que no se pisen dos
+    PROCESOS pero no dos THREADS del mismo proceso: dos copias
+    simultáneas hacia el mismo destino calculaban el mismo temporal y la
+    segunda truncaba los datos que la primera todavía estaba escribiendo
+    -acá, GB de un ISO del cliente-. Hoy la cola serializa las
+    transferencias, pero esta función es pública a través de
+    `copy_atomic`/`copy_no_replace` y su garantía tiene que valer sola.
+
+    Los permisos del resultado los sigue fijando `shutil.copystat`, que
+    copia el modo de `src` (es lo que la hace equivalente a `copy2`), así
+    que el 0600 con el que `mkstemp` crea el temporal no llega nunca al
+    archivo final. Se ajusta igual apenas se crea: en una copia de varios
+    GB el temporal es visible en la unidad durante minutos, y ahí tiene
+    que verse con los permisos de siempre y no con unos más cerrados."""
     written = 0
     last_report = time.monotonic()
-    # Oculto y con el PID adentro: no lo toma un escaneo de la biblioteca
-    # y dos copias simultáneas hacia el mismo destino no se pisan el
-    # temporal entre sí.
-    tmp = dest.with_name(f".{dest.name}.parcial-{os.getpid()}")
+    # Oculto (no lo toma un escaneo de la biblioteca) y con nombre único
+    # de verdad: lo elige el sistema operativo, no una convención del
+    # código, así que ni dos procesos ni dos threads pueden coincidir.
+    fd, nombre = tempfile.mkstemp(dir=dest.parent,
+                                  prefix=f".{dest.name}.parcial-")
+    tmp = Path(nombre)
+    fsutil.ajustar_permisos_por_defecto(tmp)
     try:
-        with open(src, "rb") as fsrc, open(tmp, "wb") as fdst:
+        # `os.fdopen` primero, y no `open(src)` primero: si abrir el
+        # origen falla, el `with` igual cierra el descriptor que
+        # `mkstemp` ya entregó en vez de filtrarlo.
+        with os.fdopen(fd, "wb") as fdst, open(src, "rb") as fsrc:
             while True:
                 if cancel is not None and cancel.cancelled:
                     raise wit_wrapper.OperationCancelled(
