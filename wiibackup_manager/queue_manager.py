@@ -161,6 +161,11 @@ class QueueSummary:
     skipped: int = 0
     errors: int = 0
     cancelled: int = 0
+    # Generación de la tanda que este resumen cierra (ver
+    # `TransferQueue.batch_id`). La interfaz lo compara contra el número
+    # actual de la cola: si no coinciden, este resumen quedó viejo y no
+    # hay que mostrarlo.
+    batch_id: int = 0
 
     @property
     def total(self) -> int:
@@ -222,7 +227,9 @@ class TransferQueue:
 
     `on_job_changed(job)` se llama para CADA cambio de estado (encolado,
     arranque, avance, final) ya en el hilo de GTK. `on_queue_idle(summary)`
-    se llama una sola vez, cuando la cola se quedó sin trabajo."""
+    se llama una sola vez, cuando la cola se quedó sin trabajo; quien lo
+    reciba tiene que descartarlo si `summary.batch_id` ya no coincide con
+    `cola.batch_id` (ver `batch_id`)."""
 
     def __init__(self, ops=None,
                  on_job_changed: Optional[Callable[[TransferJob], None]] = None,
@@ -256,6 +263,15 @@ class TransferQueue:
         self._worker: Optional[threading.Thread] = None
         self._stopping = False
         self._tally = {"done": 0, "skipped": 0, "errors": 0, "cancelled": 0}
+        # Número de tanda. Sube cada vez que la cola pasa de vacía a
+        # activa (ver `add_jobs`), y viaja adentro del `QueueSummary` para
+        # que la interfaz pueda descartar un aviso de "cola terminada"
+        # que quedó viejo: el aviso sale del hilo de fondo y se ejecuta
+        # después, en el hilo de GTK, así que entre una cosa y la otra el
+        # usuario puede haber encolado una tanda nueva -y el toast
+        # "Cola terminada" aparecía encima de una copia que recién
+        # arrancaba.
+        self._batch_id = 0
 
     # ------------------------------------------------------------ Encolar --
     def add_jobs(self, items, dest_root, wit_binary: str = "wit",
@@ -291,6 +307,12 @@ class TransferQueue:
             return []
 
         with self._wake:
+            # De vacía a activa: empieza una tanda nueva. Sumar tareas a
+            # una tanda que ya está corriendo NO la cambia -es la misma
+            # tanda, más larga- así que el resumen final sigue siendo el
+            # de esa tanda y no se descarta por esto.
+            if not self._pending and self._active is None:
+                self._batch_id += 1
             for job in nuevos:
                 self._jobs[job.id] = job
                 self._order.append(job.id)
@@ -322,6 +344,14 @@ class TransferQueue:
         self._worker.start()
 
     # ---------------------------------------------------------- Consultas --
+    @property
+    def batch_id(self) -> int:
+        """Número de la tanda en curso (o de la última, si la cola está
+        quieta). La interfaz lo compara contra `QueueSummary.batch_id`
+        para saber si un aviso de "cola terminada" sigue vigente."""
+        with self._lock:
+            return self._batch_id
+
     @property
     def jobs(self) -> list[TransferJob]:
         """Todas las tareas conocidas, en el orden en que se encolaron."""
@@ -504,7 +534,8 @@ class TransferQueue:
         resumen = QueueSummary(done=self._tally["done"],
                                skipped=self._tally["skipped"],
                                errors=self._tally["errors"],
-                               cancelled=self._tally["cancelled"])
+                               cancelled=self._tally["cancelled"],
+                               batch_id=self._batch_id)
         for clave in self._tally:
             self._tally[clave] = 0
         return resumen

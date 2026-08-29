@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
 import time
 from pathlib import Path
 
 from wiibackup_manager import library
 from wiibackup_manager.operations import OperationManager
-from wiibackup_manager.queue_manager import JobStatus, TransferQueue
+from wiibackup_manager.queue_manager import JobStatus, QueueSummary, TransferQueue
 
 
 def sync_dispatch(func, *args) -> None:
@@ -185,3 +186,179 @@ def test_copy_con_rollback_fallido_distingue_los_dos_problemas_en_error_msg(
     assert not destino.exists() or destino.read_bytes() != b"original-wbfs"
     respaldos = list(dest_root.rglob(".*.respaldo-*"))
     assert respaldos, "el respaldo temporal debería seguir existiendo"
+
+
+# --------------------------------------------------- Tandas (batch_id) --
+# El aviso de "cola terminada" sale del hilo de la cola y se ejecuta
+# después, en el hilo de GTK. Entre una cosa y la otra el usuario puede
+# encolar una tanda nueva, y el toast "Cola terminada" aparecía encima de
+# una copia que recién arrancaba. El número de tanda viaja adentro del
+# resumen para que la interfaz pueda descartar el aviso viejo.
+
+def _cola_con_dispatch_diferido(resumenes: list):
+    """Cola cuyo `dispatch` NO ejecuta el callback: lo apila, igual que
+    `GLib.idle_add` deja el trabajo para el próximo giro del bucle. Es lo
+    que permite reproducir la ventana entre el aviso y su ejecución."""
+    pendientes: list = []
+    cola = TransferQueue(OperationManager(),
+                         on_queue_idle=resumenes.append,
+                         dispatch=lambda func, *args: pendientes.append((func, args)))
+    return cola, pendientes
+
+
+def _esperar(condicion, timeout=10.0) -> bool:
+    t0 = time.monotonic()
+    while not condicion() and time.monotonic() - t0 < timeout:
+        time.sleep(0.01)
+    return condicion()
+
+
+def test_la_primera_tanda_es_la_numero_uno(make_game, tmp_path):
+    juego = make_game(name="juego.iso", game_id="GZ2E01", console="gc",
+                      contenido=b"x" * 1024)
+    dest_root = tmp_path / "dest"
+    dest_root.mkdir()
+
+    cola = hacer_cola()
+    assert cola.batch_id == 0, "sin nada encolado todavía no hubo ninguna tanda"
+    job = cola.add_jobs([juego], dest_root)[0]
+    assert cola.batch_id == 1
+    esperar_final(job)
+    cola.shutdown(wait=5)
+
+
+def test_sumar_a_una_tanda_en_curso_no_abre_una_nueva(make_game, tmp_path):
+    """Encolar con la cola andando es justamente la gracia de tener cola:
+    esas tareas son parte de la MISMA tanda, así que el resumen final
+    sigue siendo el de esa tanda y no hay que descartarlo."""
+    juegos = [make_game(name=f"juego{i}.iso", game_id="GZ2E01", console="gc",
+                        contenido=b"x" * 1024) for i in range(2)]
+    dest_root = tmp_path / "dest"
+    dest_root.mkdir()
+
+    visto: list = []
+    sumado = threading.Event()
+
+    def on_job_changed(job):
+        # Al arrancar la primera tarea la cola está ACTIVA: sumar acá no
+        # puede abrir una tanda nueva.
+        if job.status is JobStatus.RUNNING and not sumado.is_set():
+            sumado.set()
+            cola.add_jobs([juegos[1]], dest_root)
+            visto.append(cola.batch_id)
+
+    cola = TransferQueue(OperationManager(), on_job_changed=on_job_changed,
+                         dispatch=sync_dispatch)
+    job = cola.add_jobs([juegos[0]], dest_root)[0]
+    esperar_final(job)
+    _esperar(lambda: bool(visto))
+    cola.shutdown(wait=5)
+
+    assert visto == [1], "la tanda en curso no tenía que cambiar de número"
+
+
+def test_un_resumen_que_llega_tarde_no_coincide_con_la_tanda_nueva(make_game, tmp_path):
+    """El caso del hallazgo, de punta a punta: el resumen queda pendiente
+    en el bucle, el usuario encola otra cosa, y recién ahí se ejecuta el
+    callback. El número que trae ya no es el de la cola."""
+    juego = make_game(name="juego.iso", game_id="GZ2E01", console="gc",
+                      contenido=b"x" * 1024)
+    otro = make_game(name="otro.iso", game_id="GZ2E01", console="gc",
+                     contenido=b"x" * 1024)
+    dest_root = tmp_path / "dest"
+    dest_root.mkdir()
+
+    resumenes: list = []
+    cola, pendientes = _cola_con_dispatch_diferido(resumenes)
+    job = cola.add_jobs([juego], dest_root)[0]
+    esperar_final(job)
+    assert _esperar(lambda: bool(pendientes)), "la cola nunca avisó que terminó"
+
+    # El aviso todavía no se ejecutó (sigue "en el bucle de GTK") y el
+    # usuario encola una tanda nueva.
+    cola.add_jobs([otro], dest_root)
+    assert cola.batch_id == 2
+
+    # Ahora sí se ejecuta el aviso viejo.
+    func, args = pendientes.pop(0)
+    func(*args)
+    cola.shutdown(wait=5)
+
+    assert len(resumenes) == 1
+    assert resumenes[0].batch_id == 1
+    assert resumenes[0].batch_id != cola.batch_id, (
+        "la interfaz no tendría forma de saber que este resumen quedó viejo")
+
+
+def test_un_resumen_que_llega_a_tiempo_sigue_siendo_valido(make_game, tmp_path):
+    """La otra mitad: sin tanda nueva en el medio, el número coincide y el
+    aviso se muestra como siempre."""
+    juego = make_game(name="juego.iso", game_id="GZ2E01", console="gc",
+                      contenido=b"x" * 1024)
+    dest_root = tmp_path / "dest"
+    dest_root.mkdir()
+
+    resumenes: list = []
+    cola, pendientes = _cola_con_dispatch_diferido(resumenes)
+    job = cola.add_jobs([juego], dest_root)[0]
+    esperar_final(job)
+    assert _esperar(lambda: bool(pendientes))
+
+    func, args = pendientes.pop(0)
+    func(*args)
+    cola.shutdown(wait=5)
+
+    assert resumenes[0].batch_id == cola.batch_id == 1
+
+
+# ------------------------------------------- El descarte en la interfaz --
+# La otra mitad del arreglo vive en `TransferView._on_queue_idle`. Se lo
+# llama con un `self` de mentira -lo mínimo que ese método toca- para
+# ejercitar el código real sin necesitar un display: importar el módulo no
+# abre ninguna ventana, y así este test corre en cualquier terminal y no
+# solo bajo Xvfb.
+
+class _VistaDeMentira:
+    def __init__(self, cola):
+        self.queue = cola
+        self.toasts: list = []
+        self.refrescos = 0
+
+    def _show_toast(self, texto):
+        self.toasts.append(texto)
+
+    def _update_dest_space_label(self):
+        self.refrescos += 1
+
+    def _update_eject_button(self):
+        self.refrescos += 1
+
+    def _update_queue_header(self):
+        self.refrescos += 1
+
+
+class _ColaDeMentira:
+    def __init__(self, batch_id):
+        self.batch_id = batch_id
+        self.jobs: list = []
+
+
+def _llamar_on_queue_idle(monkeypatch, batch_id_cola, batch_id_resumen):
+    from wiibackup_manager.widgets import gtk_helpers, transfer_view
+    monkeypatch.setattr(gtk_helpers, "widget_is_alive", lambda w: True)
+    vista = _VistaDeMentira(_ColaDeMentira(batch_id_cola))
+    resumen = QueueSummary(done=3, batch_id=batch_id_resumen)
+    transfer_view.TransferView._on_queue_idle(vista, resumen)
+    return vista
+
+
+def test_la_vista_descarta_el_resumen_viejo(monkeypatch):
+    vista = _llamar_on_queue_idle(monkeypatch, batch_id_cola=2, batch_id_resumen=1)
+    assert vista.toasts == [], (
+        "mostró 'cola terminada' con una tanda nueva ya en marcha")
+
+
+def test_la_vista_muestra_el_resumen_de_la_tanda_actual(monkeypatch):
+    vista = _llamar_on_queue_idle(monkeypatch, batch_id_cola=1, batch_id_resumen=1)
+    assert len(vista.toasts) == 1
+    assert "3" in vista.toasts[0]

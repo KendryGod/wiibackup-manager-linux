@@ -989,6 +989,16 @@ class TransferView(Gtk.Box):
         hace falta: el avance de cada uno ya se ve en su fila."""
         if not gtk_helpers.widget_is_alive(self):
             return
+        if summary.batch_id != self.queue.batch_id:
+            # El aviso salió del hilo de la cola y llegó acá por
+            # `GLib.idle_add`; en el medio el usuario encoló una tanda
+            # nueva, así que este resumen ya no describe lo que está
+            # pasando -mostrarlo diría "Cola terminada" encima de una
+            # copia que recién arranca. Se descarta entero: la tanda nueva
+            # ya está mandando sus propios avisos por `_on_job_changed`,
+            # que son los que mantienen al día el encabezado, el espacio
+            # libre y el botón de expulsar.
+            return
         self._update_dest_space_label()
         self._update_eject_button()
         self._update_queue_header()
