@@ -95,6 +95,7 @@ _INSTALL_STATUS_LABELS = {
     InstallStatus.UNSAFE_DEST_ROOT: _("El destino elegido no es válido"),
     InstallStatus.NO_SPACE: _("No hay espacio suficiente en el destino"),
     InstallStatus.IO_ERROR: _("Error al escribir en el destino"),
+    InstallStatus.ROLLBACK_FAILED: _("Error grave: no se pudo restaurar la versión anterior"),
 }
 
 

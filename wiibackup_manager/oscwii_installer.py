@@ -24,11 +24,35 @@ Flujo de `install_app`, en orden, y por qué:
    escriba a través de él hacia otro lado). Si UNA sola entrada no pasa,
    se aborta todo: no se extrae nada, ni siquiera las entradas que sí
    eran seguras.
-5. Extraer SOLO dentro de esas carpetas permitidas de `dest_root`,
-   copiando bytes (nunca ejecutando ni el binario -.dol/.elf- ni ningún
-   script) a un archivo temporal por entrada y renombrándolo al final
-   (mismo patrón atómico que `gametdb._store_cover` y
-   `config.write_text_atomic`).
+5. Extraer SOLO dentro de esas carpetas permitidas de `dest_root`. Cada
+   ZIP toca una o más "unidades" -una subcarpeta de primer nivel dentro
+   de una carpeta permitida, típicamente `apps/<NombreDeLaApp>`- y cada
+   unidad se instala como bloque atómico, no archivo por archivo:
+
+   a. Se extrae la unidad ENTERA a una carpeta de staging oculta,
+      hermana de su carpeta final (mismo filesystem, para que el
+      intercambio de abajo sea un `os.replace` simple y no una copia).
+      Si algo falla durante la extracción, se borra la staging entera y
+      la carpeta final -la versión anterior de la app, si había una- no
+      se toca para nada.
+   b. Con la extracción completa: si la unidad no existía antes, la
+      staging pasa a ocupar su lugar directo. Si ya existía
+      (actualización), se la aparta primero a un nombre oculto de
+      respaldo, entra la staging en su lugar, y el respaldo se borra
+      solo si el intercambio completo salió bien. Sin esto, una
+      actualización que fallaba a mitad de camino podía dejar una
+      mezcla de archivos de la versión vieja y la nueva -cada archivo
+      individual escrito de forma válida, pero la app entera rota-;
+      mismo patrón que `library.DestinationGuard` (Sesión 2), llevado
+      de archivos WBFS individuales a una carpeta completa. Ver
+      `_stage_and_swap_unit`.
+
+   Los pocos archivos sueltos que un ZIP puede traer directo dentro de
+   una carpeta permitida sin ninguna subcarpeta (sin "unidad" que
+   intercambiar) se siguen escribiendo uno por uno con el patrón atómico
+   de siempre (`_extract_member`, mismo que `gametdb._store_cover` y
+   `config.write_text_atomic`) -nunca ejecutando ni el binario
+   (.dol/.elf) ni ningún script, solo copiando bytes.
 
 Nada de esto usa GLib: igual que `gametdb.py`, este módulo es agnóstico de
 la interfaz. `install_app` es una función sincrónica y bloqueante; quien
@@ -39,6 +63,7 @@ como ya hace `queue_manager.TransferQueue` para las transferencias.
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import stat
 import tempfile
@@ -91,6 +116,12 @@ class InstallStatus(Enum):
     NO_SPACE = "no_space"
     IO_ERROR = "io_error"
     CANCELLED = "cancelled"
+    # La instalación falló Y ADEMÁS `_stage_and_swap_unit` no pudo
+    # devolver la versión anterior a su lugar (ver
+    # `library.RollbackFailedError`): distinto de `IO_ERROR` porque acá
+    # la app puede haber quedado directamente inexistente, no solo con
+    # la instalación nueva sin aplicar.
+    ROLLBACK_FAILED = "rollback_failed"
 
     @property
     def is_ok(self) -> bool:
@@ -327,6 +358,128 @@ def _extract_member(zf: zipfile.ZipFile, info: zipfile.ZipInfo,
     return target
 
 
+# ---------------------------------------------- Unidades (carpeta atómica) --
+def _group_members(members: list) -> tuple[dict, list]:
+    """Separa los miembros del ZIP (ya validados, sin carpetas) en:
+
+    - unidades: subcarpetas de primer nivel dentro de una carpeta
+      permitida (ej. "apps/WiiDonut", o "controllers/Nintendont" si el
+      ZIP trae esa estructura) que se instalan como bloque atómico con
+      `_stage_and_swap_unit`.
+    - sueltos: archivos que caen directo dentro de una carpeta permitida
+      SIN ninguna subcarpeta (ej. "controllers/perfil.ini"). Para un
+      archivo suelto no hay una "carpeta completa" que intercambiar -ya
+      es atómico con `_extract_member` de siempre- así que agruparlo
+      igual no compraría ninguna protección de más, solo complejidad."""
+    unidades: dict = {}
+    sueltos: list = []
+    for info in members:
+        parts = PurePosixPath(info.filename).parts
+        if len(parts) >= 3:
+            clave = f"{parts[0]}/{parts[1]}"
+            unidades.setdefault(clave, []).append(info)
+        else:
+            sueltos.append(info)
+    return unidades, sueltos
+
+
+def _stage_and_swap_unit(zf: zipfile.ZipFile, unit_members: list,
+                         final_dir: Path,
+                         cancel_event: Optional[threading.Event],
+                         on_step: Callable[[], None]) -> list[Path]:
+    """Instala UNA unidad -una subcarpeta de primer nivel del ZIP, ej.
+    "apps/WiiDonut"- como bloque atómico: todo o nada, nunca una mezcla
+    de archivos viejos y nuevos. Mismo patrón que
+    `library.DestinationGuard` (Sesión 2), llevado de archivos WBFS
+    individuales a una carpeta completa:
+
+    1. Se extrae TODO el contenido de la unidad a una carpeta de staging
+       oculta, hermana de `final_dir` (mismo filesystem: el intercambio
+       final es un `os.replace` simple, nunca una copia entre discos).
+       Si algo falla acá, se borra la staging entera y se propaga el
+       error SIN TOCAR `final_dir` -la app vieja, si había una, queda
+       exactamente como estaba.
+    2. Con la extracción completa y sin errores: si `final_dir` no
+       existía, la staging pasa a ocupar su lugar directo. Si ya existía
+       (actualización), se la aparta primero a un nombre oculto de
+       respaldo, entra la staging en su lugar, y el respaldo se borra
+       recién si el intercambio completo salió bien.
+    3. Si el intercambio falla DESPUÉS de haber apartado el respaldo, se
+       intenta devolverlo a su lugar antes de propagar el error -la app
+       vieja se recupera, la instalación nueva es la que fracasó. Si eso
+       TAMBIÉN falla (el caso que no se puede ignorar en silencio, mismo
+       espíritu que `DestinationGuard._restore`), se levanta
+       `library.RollbackFailedError`: la estructura es distinta -acá un
+       solo par carpeta-original/carpeta-respaldo, en `DestinationGuard`
+       varios pares de archivos WBFS- pero el problema es el mismo, y
+       vale la misma excepción.
+
+    Devuelve las rutas finales escritas (para `InstallResult.installed_paths`)."""
+    parent = final_dir.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    pid = os.getpid()
+    staging_dir = parent / f".{final_dir.name}.wbm-staging-{pid}"
+    backup_dir = parent / f".{final_dir.name}.wbm-respaldo-{pid}"
+
+    # Por si quedó un staging huérfano de un intento anterior con el
+    # mismo PID: no debería pasar, pero `rmtree` de algo que no existe
+    # no es un error (`ignore_errors=True`).
+    shutil.rmtree(staging_dir, ignore_errors=True)
+    staging_dir.mkdir()
+
+    relativos: list[PurePosixPath] = []
+    try:
+        for info in unit_members:
+            _check_cancel(cancel_event)
+            relativo = PurePosixPath(*PurePosixPath(info.filename).parts[2:])
+            destino = staging_dir / Path(*relativo.parts)
+            destino.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(info) as src, destino.open("wb") as dst:
+                shutil.copyfileobj(src, dst)
+            relativos.append(relativo)
+            on_step()
+    except BaseException:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+
+    if not final_dir.exists():
+        try:
+            os.replace(staging_dir, final_dir)
+        except BaseException:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise
+        return [final_dir / Path(*r.parts) for r in relativos]
+
+    try:
+        os.replace(final_dir, backup_dir)
+    except OSError:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+
+    try:
+        os.replace(staging_dir, final_dir)
+    except OSError as e:
+        try:
+            os.replace(backup_dir, final_dir)
+        except OSError:
+            # Catastrófico: ni el intercambio ni la restauración del
+            # respaldo funcionaron. La staging -que SÍ tiene la versión
+            # nueva completa- se deja intacta a propósito, junto con el
+            # respaldo: dos candidatos rescatables a mano es mejor que
+            # borrar alguno de los dos por las dudas.
+            raise library.RollbackFailedError(
+                [(final_dir, backup_dir)], original_error=e) from e
+        # Se pudo restaurar la versión anterior: la instalación nueva
+        # fracasó pero la app queda funcional, así que no hace falta
+        # conservar la staging.
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+    else:
+        shutil.rmtree(backup_dir, ignore_errors=True)
+
+    return [final_dir / Path(*r.parts) for r in relativos]
+
+
 # -------------------------------------------------------------------- API --
 def install_app(app: HomebrewApp, dest_root: Path, *,
                 cancel_event: Optional[threading.Event] = None,
@@ -397,12 +550,26 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
                         f"necesita {library.format_size(needed)} y quedan "
                         f"{library.format_size(free)} en el destino")
 
+                unidades, sueltos = _group_members(members)
+                total = len(members)
+                hechos = [0]
+
+                def _paso() -> None:
+                    hechos[0] += 1
+                    _report(on_progress, "extract",
+                           (hechos[0] / total) if total else 1.0)
+
                 written: list = []
-                for idx, info in enumerate(members):
+                for unit_key, unit_members in unidades.items():
+                    _check_cancel(cancel_event)
+                    final_dir = dest_root / unit_key
+                    written.extend(_stage_and_swap_unit(
+                        zf, unit_members, final_dir, cancel_event, _paso))
+
+                for info in sueltos:
                     _check_cancel(cancel_event)
                     written.append(_extract_member(zf, info, dest_root))
-                    _report(on_progress, "extract", (idx + 1) / len(members)
-                           if members else 1.0)
+                    _paso()
             finally:
                 zf.close()
 
@@ -412,6 +579,15 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
     except CancelRequested:
         return InstallResult(InstallStatus.CANCELLED, app.slug,
                              "instalación cancelada")
+    except library.RollbackFailedError as e:
+        # Caso grave: la instalación falló Y ADEMÁS no se pudo devolver
+        # la versión anterior a su lugar (ver `_stage_and_swap_unit`).
+        # `user_message` distingue esto de un `IO_ERROR` común -acá la
+        # app puede haber quedado directamente inexistente, y el
+        # respaldo que sigue existiendo (`e.pending`) es la única forma
+        # de rescatarla a mano.
+        return InstallResult(InstallStatus.ROLLBACK_FAILED, app.slug,
+                             e.user_message())
     except OSError as e:
         return InstallResult(InstallStatus.IO_ERROR, app.slug, str(e))
     except Exception as e:  # noqa: BLE001 - red de seguridad final
