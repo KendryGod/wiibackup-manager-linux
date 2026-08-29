@@ -32,6 +32,7 @@ include = ["wiibackup_manager*"]
 # Un idioma nuevo se agrega acá con su propia línea.
 "share/locale/en/LC_MESSAGES" = ["data/locale/en/LC_MESSAGES/wiibackup-manager.mo"]
 "share/icons/hicolor/16x16/apps" = ["data/icons/hicolor/16x16/apps/com.gamefixsps.WiiBackupManager.png"]
+"share/icons/hicolor/24x24/apps" = ["data/icons/hicolor/24x24/apps/com.gamefixsps.WiiBackupManager.png"]
 "share/icons/hicolor/32x32/apps" = ["data/icons/hicolor/32x32/apps/com.gamefixsps.WiiBackupManager.png"]
 "share/icons/hicolor/48x48/apps" = ["data/icons/hicolor/48x48/apps/com.gamefixsps.WiiBackupManager.png"]
 "share/icons/hicolor/64x64/apps" = ["data/icons/hicolor/64x64/apps/com.gamefixsps.WiiBackupManager.png"]
