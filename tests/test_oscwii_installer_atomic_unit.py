@@ -1,9 +1,9 @@
 """Instalación de Homebrew como transacción atómica por carpeta.
 
 ChatGPT encontró que `install_app` era atómico ARCHIVO por archivo
-(`_extract_member`, vía `fsutil.atomic_target`) pero no para la app
-entera: si la extracción se cortaba a mitad de una actualización, cada
-archivo individual quedaba válido, pero la carpeta `apps/<App>/` podía
+(`_extract_member`, vía `atomicfs.atomic_write_target`) pero no para la
+app entera: si la extracción se cortaba a mitad de una actualización,
+cada archivo individual quedaba válido, pero la carpeta `apps/<App>/` podía
 terminar con una mezcla de archivos de la versión vieja y la nueva -la
 app rota aunque ningún archivo suelto lo estuviera.
 
@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from wiibackup_manager import library, oscwii_installer
+from wiibackup_manager import atomicfs, library, oscwii_installer
 from wiibackup_manager.oscwii_client import HomebrewApp
 from wiibackup_manager.oscwii_installer import InstallStatus
 
@@ -183,7 +183,7 @@ def test_falla_en_el_intercambio_final_recupera_la_version_anterior(
             raise OSError("simulado: no se pudo promover la staging")
         return real_replace(origen, destino)
 
-    monkeypatch.setattr(oscwii_installer.os, "replace",
+    monkeypatch.setattr(atomicfs.os, "replace",
                         _falla_solo_al_promover_staging)
 
     result = oscwii_installer.install_app(_fake_app(), dest_root)
@@ -224,7 +224,7 @@ def test_falla_en_el_intercambio_y_tambien_falla_la_recuperacion(
             raise OSError("simulado: falla también al restaurar")
         return real_replace(origen, destino)
 
-    monkeypatch.setattr(oscwii_installer.os, "replace",
+    monkeypatch.setattr(atomicfs.os, "replace",
                         _falla_al_promover_y_al_recuperar)
 
     result = oscwii_installer.install_app(_fake_app(), dest_root)

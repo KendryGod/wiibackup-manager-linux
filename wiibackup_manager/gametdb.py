@@ -26,7 +26,8 @@ from typing import Callable, Optional
 
 from . import config
 from .disc_header import is_valid_game_id, validate_game_id
-from .fsutil import PNG_MAGIC, atomic_target
+from .atomicfs import atomic_write_target
+from .fsutil import PNG_MAGIC
 from .i18n import _
 from .inflight import InflightRegistry
 
@@ -132,9 +133,9 @@ def _is_valid_cached_cover(path: Path) -> bool:
 class _CoverRejected(Exception):
     """Interna: la imagen que se bajó no se pudo decodificar.
 
-    Existe para poder salir del bloque de `fsutil.atomic_target` sin que
-    el temporal se mueva a la caché: ese helper reemplaza el destino
-    cuando el bloque termina bien y lo descarta cuando sale por una
+    Existe para poder salir del bloque de `atomicfs.atomic_write_target`
+    sin que el temporal se mueva a la caché: ese helper reemplaza el
+    destino cuando el bloque termina bien y lo descarta cuando sale por una
     excepción, así que "esta imagen no sirve" tiene que viajar como
     excepción y no como un `return`."""
 
@@ -144,14 +145,14 @@ def _store_cover(cache_path: Path, data: bytes) -> bool:
 
     Se escribe primero a un temporal, se comprueba que la imagen se pueda
     decodificar ENTERA y recién entonces se la mueve al nombre definitivo
-    (ver `fsutil.atomic_target`). Así la caché nunca tiene un archivo a
-    medias: o está la carátula completa o no está, y el próximo intento la
-    vuelve a pedir.
+    (ver `atomicfs.atomic_write_target`). Así la caché nunca tiene un
+    archivo a medias: o está la carátula completa o no está, y el
+    próximo intento la vuelve a pedir.
 
     Devuelve False si la imagen no sirve (descarga cortada, el servidor
     devolvió cualquier cosa), sin dejar nada en la caché."""
     try:
-        with atomic_target(cache_path) as tmp:
+        with atomic_write_target(cache_path) as tmp:
             tmp.write_bytes(data)
             if not _decodes_as_image(tmp):
                 raise _CoverRejected()

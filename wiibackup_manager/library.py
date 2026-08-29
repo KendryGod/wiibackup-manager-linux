@@ -7,14 +7,13 @@ import io
 import os
 import re
 import shutil
-import tempfile
 import time
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import drives, fsutil, wit_wrapper
+from . import atomicfs, drives, fsutil, wit_wrapper
 from .disc_header import (
     UNKNOWN_GAME_ID,
     DiscInfo,
@@ -405,38 +404,25 @@ def _copy_with_progress(
     temporal, un fallo en cualquier punto deja el destino original
     exactamente como estaba.
 
-    El temporal lo crea `tempfile.mkstemp` en la MISMA carpeta que `dest`
-    -condición para que el `os.replace` final sea atómico- con nombre
-    único garantizado por el sistema operativo (`O_CREAT|O_EXCL`), igual
-    que `fsutil.atomic_target` y `config.write_text_atomic`. Antes el
-    nombre llevaba el PID adentro, que alcanza para que no se pisen dos
-    PROCESOS pero no dos THREADS del mismo proceso: dos copias
-    simultáneas hacia el mismo destino calculaban el mismo temporal y la
-    segunda truncaba los datos que la primera todavía estaba escribiendo
-    -acá, GB de un ISO del cliente-. Hoy la cola serializa las
-    transferencias, pero esta función es pública a través de
-    `copy_atomic`/`copy_no_replace` y su garantía tiene que valer sola.
+    El temporal, el intercambio y la limpieza ante cualquier fallo son
+    `atomicfs.atomic_write_stream`, la misma primitiva que usa el resto de
+    la app para no dejar nunca un destino a medio escribir. Se usa la
+    variante de "archivo abierto" y no la de "ruta" porque acá se escribe
+    de a bloques: el descriptor que devolvió `mkstemp` se usa tal cual, sin
+    reabrir la ruta.
 
-    Los permisos del resultado los sigue fijando `shutil.copystat`, que
-    copia el modo de `src` (es lo que la hace equivalente a `copy2`), así
-    que el 0600 con el que `mkstemp` crea el temporal no llega nunca al
-    archivo final. Se ajusta igual apenas se crea: en una copia de varios
-    GB el temporal es visible en la unidad durante minutos, y ahí tiene
-    que verse con los permisos de siempre y no con unos más cerrados."""
+    Lo que esta función agrega por encima de la primitiva es lo suyo: el
+    progreso, la cancelación entre bloques, el `fsync` antes del
+    intercambio (una copia de varios GB a un USB sí necesita durabilidad,
+    a diferencia de una carátula que se puede volver a bajar) y el
+    `copystat`, que es lo que la hace equivalente a `shutil.copy2` -y lo
+    que fija los permisos del resultado, copiados del origen."""
     written = 0
     last_report = time.monotonic()
-    # Oculto (no lo toma un escaneo de la biblioteca) y con nombre único
-    # de verdad: lo elige el sistema operativo, no una convención del
-    # código, así que ni dos procesos ni dos threads pueden coincidir.
-    fd, nombre = tempfile.mkstemp(dir=dest.parent,
-                                  prefix=f".{dest.name}.parcial-")
-    tmp = Path(nombre)
-    fsutil.ajustar_permisos_por_defecto(tmp)
-    try:
-        # `os.fdopen` primero, y no `open(src)` primero: si abrir el
-        # origen falla, el `with` igual cierra el descriptor que
-        # `mkstemp` ya entregó en vez de filtrarlo.
-        with os.fdopen(fd, "wb") as fdst, open(src, "rb") as fsrc:
+    with atomicfs.atomic_write_stream(
+            dest, fsync=True,
+            before_replace=lambda tmp: shutil.copystat(src, tmp)) as (fdst, _tmp):
+        with open(src, "rb") as fsrc:
             while True:
                 if cancel is not None and cancel.cancelled:
                     raise wit_wrapper.OperationCancelled(
@@ -451,22 +437,6 @@ def _copy_with_progress(
                 if now - last_report >= 1.0:
                     progress_cb(written)
                     last_report = now
-            # A disco ANTES del intercambio: si no, el rename puede quedar
-            # registrado mientras los datos siguen en cache, y un tirón del
-            # cable dejaría el destino nuevo incompleto y el viejo ya
-            # borrado.
-            fdst.flush()
-            os.fsync(fdst.fileno())
-        shutil.copystat(src, tmp)
-        os.replace(tmp, dest)
-    except BaseException:
-        # Solo se borra el temporal: el destino original -si había uno- no
-        # se tocó en ningún momento.
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
     progress_cb(written)
 
 
@@ -869,6 +839,13 @@ class RollbackFailedError(RuntimeError):
         ).format(motivo=str(self.original_error), detalle=str(self))
 
 
+# Marca del nombre oculto del respaldo: `.{nombre}.respaldo-{pid}`, en la
+# misma carpeta que el original (ver `atomicfs.hidden_sibling`). El nombre
+# tiene que ser reconocible: `_cleanup_partials` lo protege explícitamente
+# de la limpieza de temporales de `wit`, que barre `.{nombre}.{lo que sea}`.
+_MARCA_RESPALDO = "respaldo"
+
+
 class DestinationGuard:
     """Aparta lo que ya hay en el destino y lo devuelve si algo falla.
 
@@ -900,13 +877,24 @@ class DestinationGuard:
     def __init__(self, dest: Path, enabled: bool = True):
         self.dest = Path(dest)
         self.enabled = enabled
-        self._saved: list = []
+        # El mecanismo de apartar/devolver/descartar es compartido
+        # (`atomicfs.SetAside`); lo que esta clase pone encima es cuándo
+        # hacerlo y qué significa cada fallo.
+        self._aside = atomicfs.SetAside(_MARCA_RESPALDO)
         self._committed = False
         self._outputs_before: set = set()
         # Respaldos que la operación terminó bien pero no se pudieron
         # borrar (ver `_discard`). Quien usa el guard los lee DESPUÉS del
         # `with` para avisarle al usuario y anotarlo en el historial.
         self.orphaned_backups: list = []
+
+    @property
+    def _saved(self) -> list:
+        """Los pares `(original, respaldo)` todavía apartados. Vive en
+        `SetAside`; sigue expuesto con este nombre porque es lo que
+        `_cleanup_partials` protege de la limpieza y lo que viaja adentro
+        de `RollbackFailedError`."""
+        return self._aside.pairs
 
     def __enter__(self) -> "DestinationGuard":
         if not self.enabled:
@@ -915,11 +903,9 @@ class DestinationGuard:
             # ESTA operación de lo que ya estaba.
             self._outputs_before = wit_wrapper.output_files(self.dest)
             return self
-        marca = f".respaldo-{os.getpid()}"
         for original in wbfs_group(self.dest):
-            respaldo = original.with_name(f".{original.name}{marca}")
             try:
-                os.replace(original, respaldo)
+                self._aside.move_aside(original)
             except OSError as e:
                 # No se pudo apartar: se deshace lo ya apartado y se sale
                 # sin tocar nada, mejor que quedar a mitad de camino. Si
@@ -934,7 +920,6 @@ class DestinationGuard:
                     rollback_error.original_error = e
                     raise
                 raise
-            self._saved.append((original, respaldo))
         # La foto va DESPUÉS de apartar el respaldo, no antes: el respaldo
         # se llama `.{nombre}.respaldo-PID` y cae dentro del mismo glob con
         # el que `wit_wrapper` reconoce sus temporales
@@ -1009,17 +994,15 @@ class DestinationGuard:
         algo falló, `self._saved` queda con exactamente lo pendiente (no
         vacío, no lo restaurado con éxito) y se levanta
         `RollbackFailedError`: silenciar esto acá dejaba un juego a medio
-        restaurar sin que nadie -ni la app, ni el usuario- se enterara."""
-        fallidos: list[tuple[Path, Path]] = []
-        for original, respaldo in reversed(self._saved):
-            try:
-                os.replace(respaldo, original)
-            except OSError:
-                fallidos.append((original, respaldo))
-        if fallidos:
-            self._saved = [par for par in self._saved if par in fallidos]
-            raise RollbackFailedError(self._saved)
-        self._saved = []
+        restaurar sin que nadie -ni la app, ni el usuario- se enterara.
+
+        `SetAside.restore` hace el trabajo -intenta con todos, en orden
+        inverso, y deja pendiente exactamente lo que no pudo-; lo que
+        decide esta clase es que eso vale una excepción propia, con un
+        mensaje para el usuario."""
+        pendientes = self._aside.restore()
+        if pendientes:
+            raise RollbackFailedError(pendientes)
 
     def _discard(self) -> None:
         """Borra los respaldos: la operación salió bien y ya no hacen
@@ -1034,13 +1017,7 @@ class DestinationGuard:
         no se levanta nada: se anota en `orphaned_backups` y quien usa el
         guard lo reporta (`format_orphaned_backups` +
         `oplog.record_orphaned_backup`)."""
-        self.orphaned_backups = []
-        for _original, respaldo in self._saved:
-            try:
-                respaldo.unlink(missing_ok=True)
-            except OSError:
-                self.orphaned_backups.append(respaldo)
-        self._saved = []
+        self.orphaned_backups = self._aside.discard()
 
 
 def wbfs_dest_paths(games, drive_root: Path) -> list:

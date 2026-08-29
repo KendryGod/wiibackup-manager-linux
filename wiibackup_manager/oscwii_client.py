@@ -70,7 +70,8 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import config
-from .fsutil import PNG_MAGIC, atomic_target
+from .atomicfs import atomic_write_target
+from .fsutil import PNG_MAGIC
 from .inflight import InflightRegistry
 
 OSC_API_BASE = "https://hbb1.oscwii.org"
@@ -552,7 +553,7 @@ def get_icon_path(app: HomebrewApp, force: bool = False) -> Optional[Path]:
         return None
 
     try:
-        with atomic_target(cache_path) as tmp:
+        with atomic_write_target(cache_path) as tmp:
             tmp.write_bytes(data)
     except OSError:
         return None

@@ -97,7 +97,8 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Optional
 
 from . import oplog
-from .fsutil import atomic_target, installed_data_dirs
+from .atomicfs import atomic_write_target
+from .fsutil import installed_data_dirs
 from .oscwii_client import HomebrewApp
 
 if TYPE_CHECKING:
@@ -247,11 +248,12 @@ def _asset_is_valid(spec: GoldenConfigSpec, asset_path: Path) -> tuple:
 
 # --------------------------------------------------------------- Copia --
 def _copy_atomic(src: Path, dest: Path) -> None:
-    """Copia `src` a `dest` de forma atómica (ver `fsutil.atomic_target`,
-    el mismo helper que usan `oscwii_installer._extract_member` y
-    `gametdb._store_cover`). Levanta OSError si algo falla; quien llama lo
-    convierte en un `GoldenConfigResult` de error."""
-    with atomic_target(dest, mkparents=True) as tmp:
+    """Copia `src` a `dest` de forma atómica (ver
+    `atomicfs.atomic_write_target`, el mismo helper que usan
+    `oscwii_installer._extract_member` y `gametdb._store_cover`). Levanta
+    OSError si algo falla; quien llama lo convierte en un
+    `GoldenConfigResult` de error."""
+    with atomic_write_target(dest, mkparents=True) as tmp:
         shutil.copyfile(src, tmp)
 
 

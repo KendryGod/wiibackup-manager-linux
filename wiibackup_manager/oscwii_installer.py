@@ -80,7 +80,6 @@ como ya hace `queue_manager.TransferQueue` para las transferencias.
 from __future__ import annotations
 
 import hashlib
-import os
 import shutil
 import stat
 import tempfile
@@ -92,8 +91,8 @@ from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
 
-from . import drives, library
-from .fsutil import atomic_target
+from . import atomicfs, drives, library
+from .atomicfs import atomic_write_target
 from .oscwii_client import (HomebrewApp, UnsafeDownloadURL,
                             open_allowlisted, url_rejection_reason)
 
@@ -460,7 +459,7 @@ def _validate_zip(zip_path: Path, dest_root: Path) -> tuple:
 def _extract_member(zf: zipfile.ZipFile, info: zipfile.ZipInfo,
                     dest_root: Path) -> Path:
     """Copia UNA entrada ya validada a su destino final, de forma atómica
-    (`fsutil.atomic_target`, el mismo helper que usa
+    (`atomicfs.atomic_write_target`, el mismo helper que usa
     `gametdb._store_cover`). Nunca usa `ZipFile.extract`: eso resolvería la
     ruta interna por su cuenta, y acá ya se decidió a mano exactamente
     dónde tiene que caer cada archivo. Copia bytes nomás -nunca cambia
@@ -473,7 +472,7 @@ def _extract_member(zf: zipfile.ZipFile, info: zipfile.ZipInfo,
     fallida dejaba un `.boot.dol.parcial-<pid>` tirado en la unidad del
     usuario para siempre."""
     target = dest_root / info.filename
-    with atomic_target(target, mkparents=True) as tmp:
+    with atomic_write_target(target, mkparents=True) as tmp:
         with zf.open(info) as src, tmp.open("wb") as dst:
             shutil.copyfileobj(src, dst)
     return target
@@ -504,116 +503,66 @@ def _group_members(members: list) -> tuple[dict, list]:
     return unidades, sueltos
 
 
+# Marcas de los nombres ocultos que arma `atomicfs.hidden_sibling`: la
+# staging donde se extrae la unidad y el respaldo de la versión anterior
+# quedan como `.<NombreDeLaApp>.wbm-staging-<pid>` y
+# `.<NombreDeLaApp>.wbm-respaldo-<pid>`. El prefijo "wbm-" los distingue
+# de cualquier cosa que deje otro programa en la misma SD/USB.
+_MARCA_STAGING = "wbm-staging"
+_MARCA_RESPALDO = "wbm-respaldo"
+
+
 def _stage_and_swap_unit(zf: zipfile.ZipFile, unit_members: list,
                          final_dir: Path,
                          cancel_event: Optional[threading.Event],
                          on_step: Callable[[], None]) -> tuple[list, list]:
     """Instala UNA unidad -una subcarpeta de primer nivel del ZIP, ej.
     "apps/WiiDonut"- como bloque atómico: todo o nada, nunca una mezcla
-    de archivos viejos y nuevos. Mismo patrón que
-    `library.DestinationGuard` (Sesión 2), llevado de archivos WBFS
-    individuales a una carpeta completa:
+    de archivos viejos y nuevos.
 
-    1. Se extrae TODO el contenido de la unidad a una carpeta de staging
-       oculta, hermana de `final_dir` (mismo filesystem: el intercambio
-       final es un `os.replace` simple, nunca una copia entre discos).
-       Si algo falla acá, se borra la staging entera y se propaga el
-       error SIN TOCAR `final_dir` -la app vieja, si había una, queda
-       exactamente como estaba.
-    2. Con la extracción completa y sin errores: si `final_dir` no
-       existía, la staging pasa a ocupar su lugar directo. Si ya existía
-       (actualización), se la aparta primero a un nombre oculto de
-       respaldo, entra la staging en su lugar, y el respaldo se borra
-       recién si el intercambio completo salió bien.
-    3. Si el intercambio falla DESPUÉS de haber apartado el respaldo, se
-       intenta devolverlo a su lugar antes de propagar el error -la app
-       vieja se recupera, la instalación nueva es la que fracasó. Si eso
-       TAMBIÉN falla (el caso que no se puede ignorar en silencio, mismo
-       espíritu que `DestinationGuard._restore`), se levanta
-       `library.RollbackFailedError`: la estructura es distinta -acá un
-       solo par carpeta-original/carpeta-respaldo, en `DestinationGuard`
-       varios pares de archivos WBFS- pero el problema es el mismo, y
-       vale la misma excepción.
+    El mecanismo (staging hermana, intercambio, respaldo de la versión
+    anterior y su restauración si el intercambio falla) es
+    `atomicfs.staged_directory`, el mismo que documenta paso por paso
+    cómo y en qué orden pasa cada cosa. Lo que queda acá es lo propio de
+    instalar una app: qué se escribe en la staging (los miembros del ZIP
+    de esta unidad, sin sus dos primeros componentes de ruta), dónde se
+    revisa la cancelación, y qué significa un fallo de restauración para
+    el usuario -`library.RollbackFailedError`, la misma excepción que usa
+    `DestinationGuard` para el caso equivalente con archivos WBFS.
 
     Devuelve (rutas finales escritas, respaldos que no se pudieron
-    borrar). Lo segundo casi siempre viene vacío: es el respaldo del paso
-    2, que se borra cuando el intercambio ya salió bien. Si ESE borrado
-    falla, la app quedó instalada correctamente pero su versión anterior
-    sigue ocupando lugar en una carpeta oculta que el usuario no va a
-    encontrar solo, así que se reporta en vez de ignorarse (mismo criterio
-    que `library.DestinationGuard._discard`)."""
-    parent = final_dir.parent
-    parent.mkdir(parents=True, exist_ok=True)
-    pid = os.getpid()
-    staging_dir = parent / f".{final_dir.name}.wbm-staging-{pid}"
-    backup_dir = parent / f".{final_dir.name}.wbm-respaldo-{pid}"
-
-    # Por si quedó un staging huérfano de un intento anterior con el
-    # mismo PID: no debería pasar, pero `rmtree` de algo que no existe
-    # no es un error (`ignore_errors=True`).
-    shutil.rmtree(staging_dir, ignore_errors=True)
-    staging_dir.mkdir()
-
+    borrar). Lo segundo casi siempre viene vacío: es el respaldo de la
+    versión anterior, que se borra cuando el intercambio ya salió bien.
+    Si ESE borrado falla, la app quedó instalada correctamente pero su
+    versión anterior sigue ocupando lugar en una carpeta oculta que el
+    usuario no va a encontrar solo, así que se reporta en vez de
+    ignorarse (mismo criterio que `library.DestinationGuard._discard`)."""
     relativos: list[PurePosixPath] = []
     try:
-        for info in unit_members:
-            _check_cancel(cancel_event)
-            relativo = PurePosixPath(*PurePosixPath(info.filename).parts[2:])
-            destino = staging_dir / Path(*relativo.parts)
-            destino.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(info) as src, destino.open("wb") as dst:
-                shutil.copyfileobj(src, dst)
-            relativos.append(relativo)
-            on_step()
-    except BaseException:
-        shutil.rmtree(staging_dir, ignore_errors=True)
-        raise
+        with atomicfs.staged_directory(final_dir,
+                                       staging_marca=_MARCA_STAGING,
+                                       backup_marca=_MARCA_RESPALDO) as staging:
+            for info in unit_members:
+                _check_cancel(cancel_event)
+                relativo = PurePosixPath(*PurePosixPath(info.filename).parts[2:])
+                destino = staging.path / Path(*relativo.parts)
+                destino.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(info) as src, destino.open("wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                relativos.append(relativo)
+                on_step()
+    except atomicfs.SwapRollbackFailed as e:
+        # La primitiva reporta QUE no se pudo restaurar; qué significa eso
+        # para el usuario lo decide este módulo, y acá significa lo mismo
+        # que en `library.DestinationGuard`: la estructura es distinta -un
+        # solo par carpeta-original/carpeta-respaldo contra varios pares
+        # de archivos WBFS- pero el problema es el mismo, y vale la misma
+        # excepción. `from e.original_error` conserva la cadena original.
+        raise library.RollbackFailedError(
+            e.pending, original_error=e.original_error) from e.original_error
 
-    if not final_dir.exists():
-        try:
-            os.replace(staging_dir, final_dir)
-        except BaseException:
-            shutil.rmtree(staging_dir, ignore_errors=True)
-            raise
-        # Instalación nueva: no había versión anterior, así que tampoco
-        # hay respaldo que borrar.
-        return [final_dir / Path(*r.parts) for r in relativos], []
-
-    try:
-        os.replace(final_dir, backup_dir)
-    except OSError:
-        shutil.rmtree(staging_dir, ignore_errors=True)
-        raise
-
-    try:
-        os.replace(staging_dir, final_dir)
-    except OSError as e:
-        try:
-            os.replace(backup_dir, final_dir)
-        except OSError:
-            # Catastrófico: ni el intercambio ni la restauración del
-            # respaldo funcionaron. La staging -que SÍ tiene la versión
-            # nueva completa- se deja intacta a propósito, junto con el
-            # respaldo: dos candidatos rescatables a mano es mejor que
-            # borrar alguno de los dos por las dudas.
-            raise library.RollbackFailedError(
-                [(final_dir, backup_dir)], original_error=e) from e
-        # Se pudo restaurar la versión anterior: la instalación nueva
-        # fracasó pero la app queda funcional, así que no hace falta
-        # conservar la staging.
-        shutil.rmtree(staging_dir, ignore_errors=True)
-        raise
-    else:
-        huerfanos: list = []
-        try:
-            shutil.rmtree(backup_dir)
-        except OSError:
-            # La app nueva YA está en su lugar: esto no cambia el
-            # resultado de la instalación, pero deja la versión anterior
-            # entera ocupando espacio en una carpeta oculta.
-            huerfanos.append(backup_dir)
-
-    return [final_dir / Path(*r.parts) for r in relativos], huerfanos
+    return ([final_dir / Path(*r.parts) for r in relativos],
+            list(staging.orphaned_backups))
 
 
 # -------------------------------------------------------------------- API --

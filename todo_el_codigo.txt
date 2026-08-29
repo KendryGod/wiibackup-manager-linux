@@ -55,6 +55,404 @@ def main() -> int:
 
 
 # ============================================================
+# FILE: wiibackup_manager/atomicfs.py
+# ============================================================
+"""Primitivas para dejar algo en su lugar sin pasar por un estado a medias.
+
+Tres partes de la app resuelven el mismo problema -"reemplazar X sin que
+exista un instante en el que X esté a medio escribir, y sin perder lo que
+había si algo falla"- sobre cosas distintas:
+
+- `gametdb`, `oscwii_client`, `golden_configs` y el extractor de ZIP de
+  `oscwii_installer` reemplazan UN ARCHIVO chico que se escribe de una.
+- `library._copy_with_progress` reemplaza UN ARCHIVO grande que se copia
+  de a bloques, con progreso, cancelación y `fsync`.
+- `oscwii_installer` reemplaza UNA CARPETA entera (la app de Homebrew),
+  y `library.DestinationGuard` aparta UN GRUPO de archivos (las partes de
+  un WBFS dividido) mientras `wit` escribe encima.
+
+Los tres terminaban reimplementando el mismo mecanismo: armar un nombre
+oculto hermano del destino, escribir/apartar ahí, intercambiar con
+`os.replace` -atómico solo dentro del mismo filesystem, de ahí lo de
+"hermano"- y limpiar o devolver las cosas a su lugar cuando algo falla.
+Acá vive ese mecanismo, una sola vez.
+
+Lo que NO vive acá
+------------------
+Las decisiones. Qué excepción se levanta cuando no se puede devolver un
+respaldo a su lugar, qué mensaje ve el usuario, si un respaldo huérfano es
+un error o un aviso, si conviene reintentar: eso es política de cada
+módulo y se queda en cada módulo. Estas primitivas hacen el trabajo sucio
+y REPORTAN lo que salió mal (devolviendo los fallos, o levantando
+`SwapRollbackFailed`, que no sabe nada de usuarios ni de mensajes); quien
+llama decide qué significa.
+
+Por eso, por ejemplo, `SetAside.restore()` devuelve la lista de los que no
+pudo devolver en vez de levantar algo: `DestinationGuard` convierte eso en
+`library.RollbackFailedError` con su mensaje para el usuario, y podría
+convertirlo en otra cosa sin que este módulo se entere.
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import tempfile
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable, Iterator, Optional
+
+# --------------------------------------------------------------- Nombres --
+def hidden_sibling(target: Path, marca: str) -> Path:
+    """Ruta hermana y oculta de `target`: `.{nombre}.{marca}-{pid}`.
+
+    Hermana (misma carpeta) porque el `os.replace` final solo es atómico
+    dentro del mismo filesystem. Oculta (empieza con punto) porque el
+    escaneo de la biblioteca ignora esos archivos y porque
+    `tools/manual_queue_e2e.py` los busca así para detectar temporales
+    huérfanos.
+
+    El PID adentro separa a dos PROCESOS que trabajen sobre el mismo
+    destino. Para los temporales de escritura eso no alcanza -dos threads
+    del mismo proceso calcularían el mismo nombre- y por eso
+    `atomic_write_target` usa `tempfile.mkstemp`, que da unicidad de
+    verdad. Acá el PID sí alcanza: apartar un destino y volver a ponerlo
+    es parte de una operación que la app ya serializa (`OperationManager`
+    no deja dos operaciones sobre el mismo archivo), y el nombre tiene que
+    ser PREDECIBLE para poder reconocerlo -es lo que permite que
+    `DestinationGuard` proteja sus propios respaldos de la limpieza de
+    temporales de `wit`."""
+    return target.with_name(f".{target.name}.{marca}-{os.getpid()}")
+
+
+# ------------------------------------------------------ Permisos del temporal --
+_permisos_temporal: "int | None" = None
+
+
+def _permisos_por_defecto() -> int:
+    """Permisos que habría tenido el temporal si lo hubiera creado un
+    `open(..., "wb")` normal: 0666 recortado por el umask del proceso.
+
+    Hace falta porque `mkstemp` crea siempre en 0600 -lo correcto para un
+    temporal que se queda temporal, pero acá el temporal PASA A SER el
+    archivo final-. Sin esto, la caché de carátulas e íconos, las configs
+    maestras y las apps instaladas habrían quedado en 0600 de un día para
+    el otro: un cambio silencioso de permisos que el esquema anterior no
+    hacía.
+
+    El umask se lee de /proc y no con `os.umask()`, porque la única forma
+    de consultarlo con `os.umask` es fijarlo y volverlo a poner, y eso es
+    una carrera entre threads. Si /proc no está (o no trae el campo), se
+    asume el umask más común."""
+    global _permisos_temporal
+    if _permisos_temporal is None:
+        umask = 0o022
+        try:
+            with open("/proc/self/status", "r", encoding="ascii") as f:
+                for linea in f:
+                    if linea.startswith("Umask:"):
+                        umask = int(linea.split()[1], 8)
+                        break
+        except (OSError, ValueError, IndexError):
+            pass
+        _permisos_temporal = 0o666 & ~umask
+    return _permisos_temporal
+
+
+def _ajustar_permisos(tmp: Path) -> None:
+    """Mejor esfuerzo: en FAT/exFAT -el destino habitual de esta app- los
+    permisos los fija el montaje y `chmod` puede fallar, y eso no tiene
+    por qué hacer fracasar la escritura."""
+    try:
+        os.chmod(tmp, _permisos_por_defecto())
+    except OSError:
+        pass
+
+
+# ------------------------------------------------- Escritura de un archivo --
+@contextmanager
+def _temp_sibling(dest: Path, mkparents: bool) -> Iterator[tuple]:
+    """Núcleo compartido de la escritura atómica: crea el temporal, lo cede
+    como `(fd, ruta)` y, si el bloque termina sin excepción, lo mueve
+    encima de `dest`. Ante CUALQUIER excepción -incluida una que levante el
+    propio `os.replace`- borra el temporal y la deja propagar tal cual.
+
+    El temporal lo crea `tempfile.mkstemp` en la MISMA carpeta que `dest`,
+    con nombre `.{nombre}.parcial-<sufijo aleatorio>`: único garantizado
+    por el sistema operativo (`O_CREAT|O_EXCL` con reintentos), no por
+    convención del código, así que ni dos procesos ni dos threads pueden
+    coincidir.
+
+    Quién se queda con el descriptor lo decide quien envuelve a esta
+    función: `atomic_write_target` lo cierra y cede la ruta,
+    `atomic_write_stream` lo abre como archivo y cede el archivo."""
+    dest = Path(dest)
+    if mkparents:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+
+    fd, nombre = tempfile.mkstemp(dir=dest.parent,
+                                  prefix=f".{dest.name}.parcial-")
+    tmp = Path(nombre)
+    _ajustar_permisos(tmp)
+    try:
+        yield fd, tmp
+        os.replace(tmp, dest)
+    except BaseException:
+        # Borrar el temporal es "mejor esfuerzo": si tampoco se puede
+        # (permisos, unidad desconectada a mitad de camino), lo que
+        # importa es que la excepción original llegue a quien llama sin
+        # que esta la tape.
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+@contextmanager
+def atomic_write_target(dest: Path, *, mkparents: bool = False) -> Iterator[Path]:
+    """Cede la RUTA de un temporal hermano de `dest` y, si el bloque
+    termina sin excepción, lo mueve encima de `dest` con `os.replace`.
+
+    Así `dest` nunca existe a medio escribir: o está el contenido viejo
+    entero, o el nuevo entero, nunca una mezcla. Es la primitiva para
+    quien escribe el archivo de una (`write_bytes`, `copyfile`, copiar un
+    miembro de un ZIP); quien necesita el archivo abierto -para escribir
+    de a bloques, o para bajarlo a disco antes de intercambiar- tiene
+    `atomic_write_stream`.
+
+    `mkparents=True` crea la carpeta de `dest` antes de empezar, para
+    quienes escriben a una ruta que puede no existir todavía (el extractor
+    de ZIP, la copia de configs maestras).
+
+    NO hace `fsync`: para lo que se guarda con esto -cachés que se pueden
+    volver a bajar y copias de archivos chicos- alcanza con la atomicidad
+    del rename. Quien además necesita durabilidad ante un corte de luz usa
+    `atomic_write_stream(fsync=True)`.
+
+    Un bloque que no escribe nada deja un `dest` VACÍO, no un error: el
+    temporal lo crea `mkstemp` por adelantado (de ahí sale la unicidad del
+    nombre). Es el resultado correcto para el único caso real que llega
+    acá, un miembro de ZIP de 0 bytes."""
+    with _temp_sibling(dest, mkparents) as (fd, tmp):
+        # Los usuarios de esta forma abren la ruta ellos mismos, así que
+        # el descriptor se cierra en el acto. El archivo -y con él el
+        # nombre reservado- sigue existiendo: lo que se suelta es el
+        # descriptor, no la exclusividad.
+        os.close(fd)
+        yield tmp
+
+
+@contextmanager
+def atomic_write_stream(dest: Path, *, mkparents: bool = False,
+                        fsync: bool = False,
+                        before_replace: Optional[Callable[[Path], None]] = None
+                        ) -> Iterator[tuple]:
+    """Igual que `atomic_write_target`, pero cede el temporal YA ABIERTO
+    para escritura binaria, como `(archivo, ruta)`.
+
+    Es lo que necesita quien escribe de a bloques: usar el descriptor que
+    devolvió `mkstemp` en vez de reabrir la ruta cierra la ventana entre
+    crear el temporal y abrirlo, y el descriptor queda a cargo del `with`
+    -si el bloque falla, se cierra igual, sin filtrarse.
+
+    `fsync=True` baja los datos a disco ANTES del intercambio: sin eso el
+    rename puede quedar registrado mientras los datos siguen en cache, y
+    un tirón del cable dejaría el destino nuevo incompleto y el viejo ya
+    borrado. `before_replace(tmp)` corre con el archivo ya cerrado y justo
+    antes del `os.replace`, para lo que tenga que quedar aplicado sobre el
+    temporal y no sobre el destino (copiar la metadata del origen, por
+    ejemplo). Si levanta, el temporal se borra y `dest` no se toca."""
+    with _temp_sibling(dest, mkparents) as (fd, tmp):
+        with os.fdopen(fd, "wb") as f:
+            yield f, tmp
+            if fsync:
+                f.flush()
+                os.fsync(f.fileno())
+        if before_replace is not None:
+            before_replace(tmp)
+
+
+# ------------------------------------------------------- Apartar y devolver --
+class SetAside:
+    """Aparta rutas que ya existen a un nombre oculto hermano, para poder
+    devolverlas si algo sale mal.
+
+    Sirve tanto para archivos (las partes de un WBFS dividido, en
+    `library.DestinationGuard`) como para carpetas (la versión anterior de
+    una app de Homebrew): apartar es un `os.replace` dentro de la misma
+    carpeta, instantáneo y sin copiar datos, en los dos casos.
+
+    Es mecanismo puro: `restore()` y `discard()` DEVUELVEN lo que no
+    pudieron hacer en vez de levantar excepciones o escribir mensajes.
+    Cada módulo decide qué significa eso -`DestinationGuard` levanta
+    `library.RollbackFailedError` con un mensaje para el usuario, el
+    instalador de Homebrew reporta los respaldos huérfanos en su
+    `InstallResult`- y esta clase no tiene por qué saberlo."""
+
+    def __init__(self, marca: str) -> None:
+        self.marca = marca
+        self._pairs: list = []
+
+    @property
+    def pairs(self) -> list:
+        """Los pares `(original, respaldo)` todavía apartados."""
+        return list(self._pairs)
+
+    def move_aside(self, original: Path) -> Path:
+        """Aparta `original` y devuelve la ruta del respaldo. Deja
+        propagar el `OSError` si no se pudo: no haber podido apartar es
+        justamente lo que quien llama tiene que decidir cómo manejar (y
+        para eso están `restore`/`pairs`, que reflejan lo que sí quedó
+        apartado hasta ahí)."""
+        original = Path(original)
+        respaldo = hidden_sibling(original, self.marca)
+        os.replace(original, respaldo)
+        self._pairs.append((original, respaldo))
+        return respaldo
+
+    def restore(self) -> list:
+        """Devuelve cada respaldo a su nombre original y reporta los que
+        NO se pudieron devolver, como pares `(original, respaldo)`.
+
+        Se intenta con TODOS aunque alguno falle -en un WBFS dividido no
+        tiene sentido dejar dos partes sin restaurar porque la tercera se
+        atoró- y se restaura en orden inverso al que se apartaron. Los que
+        fallaron quedan en `pairs` (en el orden en que se apartaron, no en
+        el que se intentaron): son exactamente lo que sigue pendiente."""
+        fallidos: list = []
+        for original, respaldo in reversed(self._pairs):
+            try:
+                os.replace(respaldo, original)
+            except OSError:
+                fallidos.append((original, respaldo))
+        self._pairs = [par for par in self._pairs if par in fallidos]
+        return list(self._pairs)
+
+    def discard(self) -> list:
+        """Borra los respaldos -ya no hacen falta- y devuelve los que no
+        se pudieron borrar.
+
+        Un borrado que falla no es un error de la operación, pero tampoco
+        se ignora: el respaldo es un archivo (o una carpeta) oculto que
+        puede pesar varios GB, y quedarse callado deja al usuario con la
+        unidad llena por algo que no puede ver ni encontrar. Quien llama
+        decide cómo avisarlo."""
+        huerfanos: list = []
+        for _original, respaldo in self._pairs:
+            try:
+                if respaldo.is_dir():
+                    shutil.rmtree(respaldo)
+                else:
+                    respaldo.unlink(missing_ok=True)
+            except OSError:
+                huerfanos.append(respaldo)
+        self._pairs = []
+        return huerfanos
+
+
+# --------------------------------------------------- Carpeta entera (staging) --
+class SwapRollbackFailed(Exception):
+    """El intercambio final falló Y ADEMÁS no se pudo devolver el respaldo
+    a su lugar: el destino puede haber quedado directamente inexistente.
+
+    Es la excepción de la PRIMITIVA, sin mensajes para el usuario: trae
+    los pares pendientes y el error que empezó todo para que quien llama
+    la traduzca a lo suyo (`library.RollbackFailedError`, en los dos
+    usuarios de hoy)."""
+
+    def __init__(self, pending: list, original_error: BaseException) -> None:
+        super().__init__(f"no se pudo restaurar: {pending}")
+        self.pending = pending
+        self.original_error = original_error
+
+
+@dataclass
+class StagedDirectory:
+    """Lo que `staged_directory` cede: la carpeta que hay que llenar y,
+    cuando el intercambio ya pasó, los respaldos que no se pudieron
+    borrar."""
+
+    path: Path
+    orphaned_backups: list = field(default_factory=list)
+
+
+@contextmanager
+def staged_directory(target_dir: Path, *, staging_marca: str = "staging",
+                     backup_marca: str = "respaldo"
+                     ) -> Iterator[StagedDirectory]:
+    """Arma una carpeta de staging hermana de `target_dir` para llenarla, y
+    al salir sin excepción la deja EN EL LUGAR de `target_dir`.
+
+    El orden importa y es lo que hace que valga la pena: la staging se
+    llena ENTERA primero y el destino no se toca hasta que eso salió bien.
+    Si el bloque falla -o se cancela- se borra la staging y `target_dir`
+    queda exactamente como estaba, sin haber sido tocado ni un instante.
+
+    El intercambio, ya con la staging completa:
+
+    1. Si `target_dir` no existía, la staging pasa a ocupar su lugar
+       directo.
+    2. Si existía, se lo aparta primero a un respaldo oculto
+       (`SetAside`), entra la staging, y el respaldo se borra recién si
+       todo salió bien. Los respaldos que no se puedan borrar quedan en
+       `.orphaned_backups` -la operación salió bien igual, pero hay
+       espacio ocupado que hay que avisar.
+    3. Si el intercambio falla DESPUÉS de apartar el respaldo, se intenta
+       devolverlo. Si eso también falla se levanta `SwapRollbackFailed` y
+       la staging se deja INTACTA a propósito, junto con el respaldo: dos
+       candidatos rescatables a mano es mejor que borrar alguno de los
+       dos por las dudas.
+    """
+    target_dir = Path(target_dir)
+    parent = target_dir.parent
+    parent.mkdir(parents=True, exist_ok=True)
+
+    staging = hidden_sibling(target_dir, staging_marca)
+    # Por si quedó una staging huérfana de un intento anterior con el
+    # mismo PID: no debería pasar, pero `rmtree` de algo que no existe no
+    # es un error (`ignore_errors=True`).
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir()
+
+    handle = StagedDirectory(path=staging)
+    try:
+        yield handle
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+    if not target_dir.exists():
+        try:
+            os.replace(staging, target_dir)
+        except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        return
+
+    aside = SetAside(backup_marca)
+    try:
+        aside.move_aside(target_dir)
+    except OSError:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+    try:
+        os.replace(staging, target_dir)
+    except OSError as e:
+        pendientes = aside.restore()
+        if pendientes:
+            raise SwapRollbackFailed(pendientes, e) from e
+        # Se pudo restaurar la versión anterior: lo nuevo fracasó pero el
+        # destino quedó funcional, así que no hace falta conservar la
+        # staging.
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+    handle.orphaned_backups = aside.discard()
+
+
+# ============================================================
 # FILE: wiibackup_manager/config.py
 # ============================================================
 """Configuración persistente de WiiBackup Manager.
@@ -1262,21 +1660,23 @@ def format_as_wii_usb(device: BlockDevice, *, run=subprocess.run,
 """Utilidades de filesystem compartidas por varios módulos.
 
 Acá vive lo que más de un módulo necesitaba y terminaba reescribiendo por
-su cuenta: la escritura atómica a un temporal hermano, la búsqueda de los
-datos instalados de la app, y la firma binaria de PNG. Nada de esto es
-lógica de negocio de ninguna parte en particular -por eso no vive en
-`library`, `gametdb` ni `oscwii_client`- y tener una sola copia de cada
-cosa significa que el manejo de errores se lee, se revisa y se arregla en
-un solo lugar en vez de en cuatro.
+su cuenta: medir lo que ocupa una ruta, la búsqueda de los datos
+instalados de la app, y la firma binaria de PNG. Nada de esto es lógica de
+negocio de ninguna parte en particular -por eso no vive en `library`,
+`gametdb` ni `oscwii_client`- y tener una sola copia de cada cosa
+significa que el manejo de errores se lee, se revisa y se arregla en un
+solo lugar en vez de en cuatro.
+
+La escritura atómica (`atomic_target`, que vivía acá) se mudó a
+`atomicfs`, junto con las demás primitivas de "dejar algo en su lugar sin
+pasar por un estado a medias": son una sola familia y se leen mejor
+juntas.
 """
 from __future__ import annotations
 
 import os
 import sys
-import tempfile
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
 
 # Los 8 primeros bytes de todo PNG. La usan `gametdb` (carátulas de
 # GameTDB) y `oscwii_client` (íconos de Open Shop Channel) para descartar
@@ -1285,128 +1685,6 @@ from typing import Iterator
 # mismo nombre, así que `gametdb.PNG_MAGIC` y `oscwii_client.PNG_MAGIC`
 # siguen existiendo y apuntan a este único valor.
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
-
-
-# ------------------------------------------------------- Escritura atómica --
-_permisos_temporal: "int | None" = None
-
-
-def _permisos_por_defecto() -> int:
-    """Permisos que habría tenido el temporal si lo hubiera creado un
-    `open(..., "wb")` normal: 0666 recortado por el umask del proceso.
-
-    Hace falta porque `mkstemp` crea siempre en 0600 -lo correcto para un
-    temporal que se queda temporal, pero acá el temporal PASA A SER el
-    archivo final-. Sin esto, la caché de carátulas e íconos, las configs
-    maestras y las apps instaladas habrían quedado en 0600 de un día para
-    el otro: un cambio silencioso de permisos que el esquema anterior no
-    hacía.
-
-    El umask se lee de /proc y no con `os.umask()`, porque la única forma
-    de consultarlo con `os.umask` es fijarlo y volverlo a poner, y eso es
-    exactamente la carrera entre threads que este arreglo viene a cerrar.
-    Si /proc no está (o no trae el campo), se asume el umask más común."""
-    global _permisos_temporal
-    if _permisos_temporal is None:
-        umask = 0o022
-        try:
-            with open("/proc/self/status", "r", encoding="ascii") as f:
-                for linea in f:
-                    if linea.startswith("Umask:"):
-                        umask = int(linea.split()[1], 8)
-                        break
-        except (OSError, ValueError, IndexError):
-            pass
-        _permisos_temporal = 0o666 & ~umask
-    return _permisos_temporal
-
-
-def ajustar_permisos_por_defecto(tmp: Path) -> None:
-    """Le pone a `tmp` los permisos que habría tenido si lo hubiera creado
-    un `open()` normal. La usan este módulo y `library._copy_with_progress`,
-    que también crea su temporal con `mkstemp` (o sea, en 0600).
-
-    Mejor esfuerzo: en FAT/exFAT -el destino habitual de esta app- los
-    permisos los fija el montaje y `chmod` puede fallar, y eso no tiene
-    por qué hacer fracasar la escritura."""
-    try:
-        os.chmod(tmp, _permisos_por_defecto())
-    except OSError:
-        pass
-
-
-@contextmanager
-def atomic_target(dest: Path, *, mkparents: bool = False) -> Iterator[Path]:
-    """Cede la ruta de un temporal hermano de `dest` y, si el bloque
-    termina sin excepción, lo mueve encima de `dest` con `os.replace`.
-
-    Así `dest` nunca existe a medio escribir: o está el contenido viejo
-    entero, o el nuevo entero, nunca una mezcla. Ante CUALQUIER excepción
-    -incluida una que levante el propio `os.replace`- se borra el
-    temporal y la excepción se propaga tal cual: es quien llama el que
-    decide si eso fue un error o un resultado esperado.
-
-    El temporal lo crea `tempfile.mkstemp` en la MISMA carpeta que
-    `dest` -no en /tmp: el `os.replace` final solo es atómico dentro de un
-    filesystem- con el nombre `.<nombre>.parcial-<sufijo aleatorio>`.
-
-    Ese nombre es único de verdad, garantizado por el sistema operativo
-    (`mkstemp` crea con O_CREAT|O_EXCL y reintenta hasta conseguir un
-    nombre libre), y no por convención del código. Antes llevaba el PID
-    adentro, que alcanza para que dos PROCESOS no se pisen pero no para
-    dos THREADS del mismo proceso: dos threads escribiendo al mismo
-    destino calculaban el mismo nombre de temporal y el segundo truncaba
-    lo que estaba escribiendo el primero, justo en el helper que se supone
-    que es la pieza central de atomicidad de la app. Hoy ningún camino
-    cotidiano llega a eso -las llamadas de arriba están dedupeadas o
-    serializadas por `OperationManager`- pero la garantía que este helper
-    promete tiene que valer por sí sola, sin depender de quién lo llame.
-
-    Sigue siendo oculto (empieza con punto) a propósito: un escaneo de la
-    biblioteca no levanta archivos que empiezan con punto, y
-    `tools/manual_queue_e2e.py` los busca así (`rglob(".*")`) para
-    verificar que no queden temporales huérfanos después de una
-    transferencia.
-
-    `mkparents=True` crea la carpeta de `dest` antes de empezar, para
-    quienes escriben a una ruta que puede no existir todavía (el extractor
-    de ZIP, la copia de configs maestras).
-
-    NO hace `fsync`: para lo que se guarda con esto -cachés que se pueden
-    volver a bajar y copias de archivos chicos- alcanza con la atomicidad
-    del rename. Quien además necesita durabilidad ante un corte de luz
-    tiene `config.write_text_atomic` y `library._copy_with_progress`, que
-    sí bajan a disco antes de intercambiar y por eso no usan este helper.
-    """
-    dest = Path(dest)
-    if mkparents:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-
-    fd, nombre = tempfile.mkstemp(dir=dest.parent,
-                                  prefix=f".{dest.name}.parcial-")
-    tmp = Path(nombre)
-    # `mkstemp` devuelve el archivo ya abierto, pero los cuatro usuarios de
-    # este helper abren la ruta ellos mismos (`write_bytes`, `copyfile`,
-    # `open("wb")`), así que el descriptor se cierra en el acto en vez de
-    # cambiar el contrato de la función. El archivo -y con él el nombre
-    # reservado- sigue existiendo: lo que se suelta es el descriptor, no
-    # la exclusividad.
-    os.close(fd)
-    ajustar_permisos_por_defecto(tmp)
-
-    try:
-        yield tmp
-        os.replace(tmp, dest)
-    except BaseException:
-        # Borrar el temporal es "mejor esfuerzo": si tampoco se puede
-        # (permisos, unidad desconectada a mitad de camino), lo que
-        # importa es que la excepción original llegue a quien llama sin
-        # que esta la tape.
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
 
 
 def path_size(path: Path) -> int:
@@ -1509,7 +1787,8 @@ from typing import Callable, Optional
 
 from . import config
 from .disc_header import is_valid_game_id, validate_game_id
-from .fsutil import PNG_MAGIC, atomic_target
+from .atomicfs import atomic_write_target
+from .fsutil import PNG_MAGIC
 from .i18n import _
 from .inflight import InflightRegistry
 
@@ -1615,9 +1894,9 @@ def _is_valid_cached_cover(path: Path) -> bool:
 class _CoverRejected(Exception):
     """Interna: la imagen que se bajó no se pudo decodificar.
 
-    Existe para poder salir del bloque de `fsutil.atomic_target` sin que
-    el temporal se mueva a la caché: ese helper reemplaza el destino
-    cuando el bloque termina bien y lo descarta cuando sale por una
+    Existe para poder salir del bloque de `atomicfs.atomic_write_target`
+    sin que el temporal se mueva a la caché: ese helper reemplaza el
+    destino cuando el bloque termina bien y lo descarta cuando sale por una
     excepción, así que "esta imagen no sirve" tiene que viajar como
     excepción y no como un `return`."""
 
@@ -1627,14 +1906,14 @@ def _store_cover(cache_path: Path, data: bytes) -> bool:
 
     Se escribe primero a un temporal, se comprueba que la imagen se pueda
     decodificar ENTERA y recién entonces se la mueve al nombre definitivo
-    (ver `fsutil.atomic_target`). Así la caché nunca tiene un archivo a
-    medias: o está la carátula completa o no está, y el próximo intento la
-    vuelve a pedir.
+    (ver `atomicfs.atomic_write_target`). Así la caché nunca tiene un
+    archivo a medias: o está la carátula completa o no está, y el
+    próximo intento la vuelve a pedir.
 
     Devuelve False si la imagen no sirve (descarga cortada, el servidor
     devolvió cualquier cosa), sin dejar nada en la caché."""
     try:
-        with atomic_target(cache_path) as tmp:
+        with atomic_write_target(cache_path) as tmp:
             tmp.write_bytes(data)
             if not _decodes_as_image(tmp):
                 raise _CoverRejected()
@@ -2408,7 +2687,8 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Optional
 
 from . import oplog
-from .fsutil import atomic_target, installed_data_dirs
+from .atomicfs import atomic_write_target
+from .fsutil import installed_data_dirs
 from .oscwii_client import HomebrewApp
 
 if TYPE_CHECKING:
@@ -2558,11 +2838,12 @@ def _asset_is_valid(spec: GoldenConfigSpec, asset_path: Path) -> tuple:
 
 # --------------------------------------------------------------- Copia --
 def _copy_atomic(src: Path, dest: Path) -> None:
-    """Copia `src` a `dest` de forma atómica (ver `fsutil.atomic_target`,
-    el mismo helper que usan `oscwii_installer._extract_member` y
-    `gametdb._store_cover`). Levanta OSError si algo falla; quien llama lo
-    convierte en un `GoldenConfigResult` de error."""
-    with atomic_target(dest, mkparents=True) as tmp:
+    """Copia `src` a `dest` de forma atómica (ver
+    `atomicfs.atomic_write_target`, el mismo helper que usan
+    `oscwii_installer._extract_member` y `gametdb._store_cover`). Levanta
+    OSError si algo falla; quien llama lo convierte en un
+    `GoldenConfigResult` de error."""
+    with atomic_write_target(dest, mkparents=True) as tmp:
         shutil.copyfile(src, tmp)
 
 
@@ -2932,14 +3213,13 @@ import io
 import os
 import re
 import shutil
-import tempfile
 import time
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import drives, fsutil, wit_wrapper
+from . import atomicfs, drives, fsutil, wit_wrapper
 from .disc_header import (
     UNKNOWN_GAME_ID,
     DiscInfo,
@@ -3330,38 +3610,25 @@ def _copy_with_progress(
     temporal, un fallo en cualquier punto deja el destino original
     exactamente como estaba.
 
-    El temporal lo crea `tempfile.mkstemp` en la MISMA carpeta que `dest`
-    -condición para que el `os.replace` final sea atómico- con nombre
-    único garantizado por el sistema operativo (`O_CREAT|O_EXCL`), igual
-    que `fsutil.atomic_target` y `config.write_text_atomic`. Antes el
-    nombre llevaba el PID adentro, que alcanza para que no se pisen dos
-    PROCESOS pero no dos THREADS del mismo proceso: dos copias
-    simultáneas hacia el mismo destino calculaban el mismo temporal y la
-    segunda truncaba los datos que la primera todavía estaba escribiendo
-    -acá, GB de un ISO del cliente-. Hoy la cola serializa las
-    transferencias, pero esta función es pública a través de
-    `copy_atomic`/`copy_no_replace` y su garantía tiene que valer sola.
+    El temporal, el intercambio y la limpieza ante cualquier fallo son
+    `atomicfs.atomic_write_stream`, la misma primitiva que usa el resto de
+    la app para no dejar nunca un destino a medio escribir. Se usa la
+    variante de "archivo abierto" y no la de "ruta" porque acá se escribe
+    de a bloques: el descriptor que devolvió `mkstemp` se usa tal cual, sin
+    reabrir la ruta.
 
-    Los permisos del resultado los sigue fijando `shutil.copystat`, que
-    copia el modo de `src` (es lo que la hace equivalente a `copy2`), así
-    que el 0600 con el que `mkstemp` crea el temporal no llega nunca al
-    archivo final. Se ajusta igual apenas se crea: en una copia de varios
-    GB el temporal es visible en la unidad durante minutos, y ahí tiene
-    que verse con los permisos de siempre y no con unos más cerrados."""
+    Lo que esta función agrega por encima de la primitiva es lo suyo: el
+    progreso, la cancelación entre bloques, el `fsync` antes del
+    intercambio (una copia de varios GB a un USB sí necesita durabilidad,
+    a diferencia de una carátula que se puede volver a bajar) y el
+    `copystat`, que es lo que la hace equivalente a `shutil.copy2` -y lo
+    que fija los permisos del resultado, copiados del origen."""
     written = 0
     last_report = time.monotonic()
-    # Oculto (no lo toma un escaneo de la biblioteca) y con nombre único
-    # de verdad: lo elige el sistema operativo, no una convención del
-    # código, así que ni dos procesos ni dos threads pueden coincidir.
-    fd, nombre = tempfile.mkstemp(dir=dest.parent,
-                                  prefix=f".{dest.name}.parcial-")
-    tmp = Path(nombre)
-    fsutil.ajustar_permisos_por_defecto(tmp)
-    try:
-        # `os.fdopen` primero, y no `open(src)` primero: si abrir el
-        # origen falla, el `with` igual cierra el descriptor que
-        # `mkstemp` ya entregó en vez de filtrarlo.
-        with os.fdopen(fd, "wb") as fdst, open(src, "rb") as fsrc:
+    with atomicfs.atomic_write_stream(
+            dest, fsync=True,
+            before_replace=lambda tmp: shutil.copystat(src, tmp)) as (fdst, _tmp):
+        with open(src, "rb") as fsrc:
             while True:
                 if cancel is not None and cancel.cancelled:
                     raise wit_wrapper.OperationCancelled(
@@ -3376,22 +3643,6 @@ def _copy_with_progress(
                 if now - last_report >= 1.0:
                     progress_cb(written)
                     last_report = now
-            # A disco ANTES del intercambio: si no, el rename puede quedar
-            # registrado mientras los datos siguen en cache, y un tirón del
-            # cable dejaría el destino nuevo incompleto y el viejo ya
-            # borrado.
-            fdst.flush()
-            os.fsync(fdst.fileno())
-        shutil.copystat(src, tmp)
-        os.replace(tmp, dest)
-    except BaseException:
-        # Solo se borra el temporal: el destino original -si había uno- no
-        # se tocó en ningún momento.
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
     progress_cb(written)
 
 
@@ -3794,6 +4045,13 @@ class RollbackFailedError(RuntimeError):
         ).format(motivo=str(self.original_error), detalle=str(self))
 
 
+# Marca del nombre oculto del respaldo: `.{nombre}.respaldo-{pid}`, en la
+# misma carpeta que el original (ver `atomicfs.hidden_sibling`). El nombre
+# tiene que ser reconocible: `_cleanup_partials` lo protege explícitamente
+# de la limpieza de temporales de `wit`, que barre `.{nombre}.{lo que sea}`.
+_MARCA_RESPALDO = "respaldo"
+
+
 class DestinationGuard:
     """Aparta lo que ya hay en el destino y lo devuelve si algo falla.
 
@@ -3825,13 +4083,24 @@ class DestinationGuard:
     def __init__(self, dest: Path, enabled: bool = True):
         self.dest = Path(dest)
         self.enabled = enabled
-        self._saved: list = []
+        # El mecanismo de apartar/devolver/descartar es compartido
+        # (`atomicfs.SetAside`); lo que esta clase pone encima es cuándo
+        # hacerlo y qué significa cada fallo.
+        self._aside = atomicfs.SetAside(_MARCA_RESPALDO)
         self._committed = False
         self._outputs_before: set = set()
         # Respaldos que la operación terminó bien pero no se pudieron
         # borrar (ver `_discard`). Quien usa el guard los lee DESPUÉS del
         # `with` para avisarle al usuario y anotarlo en el historial.
         self.orphaned_backups: list = []
+
+    @property
+    def _saved(self) -> list:
+        """Los pares `(original, respaldo)` todavía apartados. Vive en
+        `SetAside`; sigue expuesto con este nombre porque es lo que
+        `_cleanup_partials` protege de la limpieza y lo que viaja adentro
+        de `RollbackFailedError`."""
+        return self._aside.pairs
 
     def __enter__(self) -> "DestinationGuard":
         if not self.enabled:
@@ -3840,11 +4109,9 @@ class DestinationGuard:
             # ESTA operación de lo que ya estaba.
             self._outputs_before = wit_wrapper.output_files(self.dest)
             return self
-        marca = f".respaldo-{os.getpid()}"
         for original in wbfs_group(self.dest):
-            respaldo = original.with_name(f".{original.name}{marca}")
             try:
-                os.replace(original, respaldo)
+                self._aside.move_aside(original)
             except OSError as e:
                 # No se pudo apartar: se deshace lo ya apartado y se sale
                 # sin tocar nada, mejor que quedar a mitad de camino. Si
@@ -3859,7 +4126,6 @@ class DestinationGuard:
                     rollback_error.original_error = e
                     raise
                 raise
-            self._saved.append((original, respaldo))
         # La foto va DESPUÉS de apartar el respaldo, no antes: el respaldo
         # se llama `.{nombre}.respaldo-PID` y cae dentro del mismo glob con
         # el que `wit_wrapper` reconoce sus temporales
@@ -3934,17 +4200,15 @@ class DestinationGuard:
         algo falló, `self._saved` queda con exactamente lo pendiente (no
         vacío, no lo restaurado con éxito) y se levanta
         `RollbackFailedError`: silenciar esto acá dejaba un juego a medio
-        restaurar sin que nadie -ni la app, ni el usuario- se enterara."""
-        fallidos: list[tuple[Path, Path]] = []
-        for original, respaldo in reversed(self._saved):
-            try:
-                os.replace(respaldo, original)
-            except OSError:
-                fallidos.append((original, respaldo))
-        if fallidos:
-            self._saved = [par for par in self._saved if par in fallidos]
-            raise RollbackFailedError(self._saved)
-        self._saved = []
+        restaurar sin que nadie -ni la app, ni el usuario- se enterara.
+
+        `SetAside.restore` hace el trabajo -intenta con todos, en orden
+        inverso, y deja pendiente exactamente lo que no pudo-; lo que
+        decide esta clase es que eso vale una excepción propia, con un
+        mensaje para el usuario."""
+        pendientes = self._aside.restore()
+        if pendientes:
+            raise RollbackFailedError(pendientes)
 
     def _discard(self) -> None:
         """Borra los respaldos: la operación salió bien y ya no hacen
@@ -3959,13 +4223,7 @@ class DestinationGuard:
         no se levanta nada: se anota en `orphaned_backups` y quien usa el
         guard lo reporta (`format_orphaned_backups` +
         `oplog.record_orphaned_backup`)."""
-        self.orphaned_backups = []
-        for _original, respaldo in self._saved:
-            try:
-                respaldo.unlink(missing_ok=True)
-            except OSError:
-                self.orphaned_backups.append(respaldo)
-        self._saved = []
+        self.orphaned_backups = self._aside.discard()
 
 
 def wbfs_dest_paths(games, drive_root: Path) -> list:
@@ -5048,7 +5306,8 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import config
-from .fsutil import PNG_MAGIC, atomic_target
+from .atomicfs import atomic_write_target
+from .fsutil import PNG_MAGIC
 from .inflight import InflightRegistry
 
 OSC_API_BASE = "https://hbb1.oscwii.org"
@@ -5530,7 +5789,7 @@ def get_icon_path(app: HomebrewApp, force: bool = False) -> Optional[Path]:
         return None
 
     try:
-        with atomic_target(cache_path) as tmp:
+        with atomic_write_target(cache_path) as tmp:
             tmp.write_bytes(data)
     except OSError:
         return None
@@ -5654,7 +5913,6 @@ como ya hace `queue_manager.TransferQueue` para las transferencias.
 from __future__ import annotations
 
 import hashlib
-import os
 import shutil
 import stat
 import tempfile
@@ -5666,8 +5924,8 @@ from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
 
-from . import drives, library
-from .fsutil import atomic_target
+from . import atomicfs, drives, library
+from .atomicfs import atomic_write_target
 from .oscwii_client import (HomebrewApp, UnsafeDownloadURL,
                             open_allowlisted, url_rejection_reason)
 
@@ -6034,7 +6292,7 @@ def _validate_zip(zip_path: Path, dest_root: Path) -> tuple:
 def _extract_member(zf: zipfile.ZipFile, info: zipfile.ZipInfo,
                     dest_root: Path) -> Path:
     """Copia UNA entrada ya validada a su destino final, de forma atómica
-    (`fsutil.atomic_target`, el mismo helper que usa
+    (`atomicfs.atomic_write_target`, el mismo helper que usa
     `gametdb._store_cover`). Nunca usa `ZipFile.extract`: eso resolvería la
     ruta interna por su cuenta, y acá ya se decidió a mano exactamente
     dónde tiene que caer cada archivo. Copia bytes nomás -nunca cambia
@@ -6047,7 +6305,7 @@ def _extract_member(zf: zipfile.ZipFile, info: zipfile.ZipInfo,
     fallida dejaba un `.boot.dol.parcial-<pid>` tirado en la unidad del
     usuario para siempre."""
     target = dest_root / info.filename
-    with atomic_target(target, mkparents=True) as tmp:
+    with atomic_write_target(target, mkparents=True) as tmp:
         with zf.open(info) as src, tmp.open("wb") as dst:
             shutil.copyfileobj(src, dst)
     return target
@@ -6078,116 +6336,66 @@ def _group_members(members: list) -> tuple[dict, list]:
     return unidades, sueltos
 
 
+# Marcas de los nombres ocultos que arma `atomicfs.hidden_sibling`: la
+# staging donde se extrae la unidad y el respaldo de la versión anterior
+# quedan como `.<NombreDeLaApp>.wbm-staging-<pid>` y
+# `.<NombreDeLaApp>.wbm-respaldo-<pid>`. El prefijo "wbm-" los distingue
+# de cualquier cosa que deje otro programa en la misma SD/USB.
+_MARCA_STAGING = "wbm-staging"
+_MARCA_RESPALDO = "wbm-respaldo"
+
+
 def _stage_and_swap_unit(zf: zipfile.ZipFile, unit_members: list,
                          final_dir: Path,
                          cancel_event: Optional[threading.Event],
                          on_step: Callable[[], None]) -> tuple[list, list]:
     """Instala UNA unidad -una subcarpeta de primer nivel del ZIP, ej.
     "apps/WiiDonut"- como bloque atómico: todo o nada, nunca una mezcla
-    de archivos viejos y nuevos. Mismo patrón que
-    `library.DestinationGuard` (Sesión 2), llevado de archivos WBFS
-    individuales a una carpeta completa:
+    de archivos viejos y nuevos.
 
-    1. Se extrae TODO el contenido de la unidad a una carpeta de staging
-       oculta, hermana de `final_dir` (mismo filesystem: el intercambio
-       final es un `os.replace` simple, nunca una copia entre discos).
-       Si algo falla acá, se borra la staging entera y se propaga el
-       error SIN TOCAR `final_dir` -la app vieja, si había una, queda
-       exactamente como estaba.
-    2. Con la extracción completa y sin errores: si `final_dir` no
-       existía, la staging pasa a ocupar su lugar directo. Si ya existía
-       (actualización), se la aparta primero a un nombre oculto de
-       respaldo, entra la staging en su lugar, y el respaldo se borra
-       recién si el intercambio completo salió bien.
-    3. Si el intercambio falla DESPUÉS de haber apartado el respaldo, se
-       intenta devolverlo a su lugar antes de propagar el error -la app
-       vieja se recupera, la instalación nueva es la que fracasó. Si eso
-       TAMBIÉN falla (el caso que no se puede ignorar en silencio, mismo
-       espíritu que `DestinationGuard._restore`), se levanta
-       `library.RollbackFailedError`: la estructura es distinta -acá un
-       solo par carpeta-original/carpeta-respaldo, en `DestinationGuard`
-       varios pares de archivos WBFS- pero el problema es el mismo, y
-       vale la misma excepción.
+    El mecanismo (staging hermana, intercambio, respaldo de la versión
+    anterior y su restauración si el intercambio falla) es
+    `atomicfs.staged_directory`, el mismo que documenta paso por paso
+    cómo y en qué orden pasa cada cosa. Lo que queda acá es lo propio de
+    instalar una app: qué se escribe en la staging (los miembros del ZIP
+    de esta unidad, sin sus dos primeros componentes de ruta), dónde se
+    revisa la cancelación, y qué significa un fallo de restauración para
+    el usuario -`library.RollbackFailedError`, la misma excepción que usa
+    `DestinationGuard` para el caso equivalente con archivos WBFS.
 
     Devuelve (rutas finales escritas, respaldos que no se pudieron
-    borrar). Lo segundo casi siempre viene vacío: es el respaldo del paso
-    2, que se borra cuando el intercambio ya salió bien. Si ESE borrado
-    falla, la app quedó instalada correctamente pero su versión anterior
-    sigue ocupando lugar en una carpeta oculta que el usuario no va a
-    encontrar solo, así que se reporta en vez de ignorarse (mismo criterio
-    que `library.DestinationGuard._discard`)."""
-    parent = final_dir.parent
-    parent.mkdir(parents=True, exist_ok=True)
-    pid = os.getpid()
-    staging_dir = parent / f".{final_dir.name}.wbm-staging-{pid}"
-    backup_dir = parent / f".{final_dir.name}.wbm-respaldo-{pid}"
-
-    # Por si quedó un staging huérfano de un intento anterior con el
-    # mismo PID: no debería pasar, pero `rmtree` de algo que no existe
-    # no es un error (`ignore_errors=True`).
-    shutil.rmtree(staging_dir, ignore_errors=True)
-    staging_dir.mkdir()
-
+    borrar). Lo segundo casi siempre viene vacío: es el respaldo de la
+    versión anterior, que se borra cuando el intercambio ya salió bien.
+    Si ESE borrado falla, la app quedó instalada correctamente pero su
+    versión anterior sigue ocupando lugar en una carpeta oculta que el
+    usuario no va a encontrar solo, así que se reporta en vez de
+    ignorarse (mismo criterio que `library.DestinationGuard._discard`)."""
     relativos: list[PurePosixPath] = []
     try:
-        for info in unit_members:
-            _check_cancel(cancel_event)
-            relativo = PurePosixPath(*PurePosixPath(info.filename).parts[2:])
-            destino = staging_dir / Path(*relativo.parts)
-            destino.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(info) as src, destino.open("wb") as dst:
-                shutil.copyfileobj(src, dst)
-            relativos.append(relativo)
-            on_step()
-    except BaseException:
-        shutil.rmtree(staging_dir, ignore_errors=True)
-        raise
+        with atomicfs.staged_directory(final_dir,
+                                       staging_marca=_MARCA_STAGING,
+                                       backup_marca=_MARCA_RESPALDO) as staging:
+            for info in unit_members:
+                _check_cancel(cancel_event)
+                relativo = PurePosixPath(*PurePosixPath(info.filename).parts[2:])
+                destino = staging.path / Path(*relativo.parts)
+                destino.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(info) as src, destino.open("wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                relativos.append(relativo)
+                on_step()
+    except atomicfs.SwapRollbackFailed as e:
+        # La primitiva reporta QUE no se pudo restaurar; qué significa eso
+        # para el usuario lo decide este módulo, y acá significa lo mismo
+        # que en `library.DestinationGuard`: la estructura es distinta -un
+        # solo par carpeta-original/carpeta-respaldo contra varios pares
+        # de archivos WBFS- pero el problema es el mismo, y vale la misma
+        # excepción. `from e.original_error` conserva la cadena original.
+        raise library.RollbackFailedError(
+            e.pending, original_error=e.original_error) from e.original_error
 
-    if not final_dir.exists():
-        try:
-            os.replace(staging_dir, final_dir)
-        except BaseException:
-            shutil.rmtree(staging_dir, ignore_errors=True)
-            raise
-        # Instalación nueva: no había versión anterior, así que tampoco
-        # hay respaldo que borrar.
-        return [final_dir / Path(*r.parts) for r in relativos], []
-
-    try:
-        os.replace(final_dir, backup_dir)
-    except OSError:
-        shutil.rmtree(staging_dir, ignore_errors=True)
-        raise
-
-    try:
-        os.replace(staging_dir, final_dir)
-    except OSError as e:
-        try:
-            os.replace(backup_dir, final_dir)
-        except OSError:
-            # Catastrófico: ni el intercambio ni la restauración del
-            # respaldo funcionaron. La staging -que SÍ tiene la versión
-            # nueva completa- se deja intacta a propósito, junto con el
-            # respaldo: dos candidatos rescatables a mano es mejor que
-            # borrar alguno de los dos por las dudas.
-            raise library.RollbackFailedError(
-                [(final_dir, backup_dir)], original_error=e) from e
-        # Se pudo restaurar la versión anterior: la instalación nueva
-        # fracasó pero la app queda funcional, así que no hace falta
-        # conservar la staging.
-        shutil.rmtree(staging_dir, ignore_errors=True)
-        raise
-    else:
-        huerfanos: list = []
-        try:
-            shutil.rmtree(backup_dir)
-        except OSError:
-            # La app nueva YA está en su lugar: esto no cambia el
-            # resultado de la instalación, pero deja la versión anterior
-            # entera ocupando espacio en una carpeta oculta.
-            huerfanos.append(backup_dir)
-
-    return [final_dir / Path(*r.parts) for r in relativos], huerfanos
+    return ([final_dir / Path(*r.parts) for r in relativos],
+            list(staging.orphaned_backups))
 
 
 # -------------------------------------------------------------------- API --
@@ -14006,6 +14214,626 @@ def iso_bytes():
 
 
 # ============================================================
+# FILE: tests/test_atomicfs.py
+# ============================================================
+"""Primitivas de `atomicfs.py`: escritura atómica, apartar/devolver y
+carpeta de staging.
+
+Los tests de `atomic_write_target` vienen de `test_fsutil.py` -esa función
+se llamaba `fsutil.atomic_target` y se mudó acá cuando se extrajeron las
+primitivas compartidas-. Se movieron tal cual: mismas aserciones, mismo
+comportamiento verificado, solo cambió el nombre con el que se la llama.
+Eso es a propósito, porque son la prueba de que el refactor no cambió
+nada de lo que ya funcionaba.
+
+Lo que se agrega abajo son los tests de las primitivas que ANTES no
+existían como tales, porque estaban enterradas dentro de
+`DestinationGuard` y del instalador de Homebrew: `SetAside` y
+`staged_directory`. Cada una se prueba por lo que garantiza el MECANISMO
+-qué queda en disco después de cada tipo de fallo, y qué se reporta- sin
+meterse con lo que cada módulo decide hacer con eso, que sigue probado en
+`test_library.py` y `test_oscwii_installer_atomic_unit.py`.
+"""
+from __future__ import annotations
+
+import os
+import stat
+import threading
+from pathlib import Path
+
+import pytest
+
+from wiibackup_manager import atomicfs
+
+
+# ============================================== atomic_write_target --
+def test_escritura_exitosa_deja_el_contenido(tmp_path):
+    dest = tmp_path / "archivo.bin"
+    with atomicfs.atomic_write_target(dest) as tmp:
+        tmp.write_bytes(b"contenido nuevo")
+    assert dest.read_bytes() == b"contenido nuevo"
+
+
+def test_escritura_exitosa_no_deja_temporales(tmp_path):
+    dest = tmp_path / "archivo.bin"
+    with atomicfs.atomic_write_target(dest) as tmp:
+        tmp.write_bytes(b"x")
+    assert [p.name for p in tmp_path.iterdir()] == ["archivo.bin"]
+
+
+def test_sobreescribe_el_destino_existente(tmp_path):
+    dest = tmp_path / "archivo.bin"
+    dest.write_bytes(b"viejo")
+    with atomicfs.atomic_write_target(dest) as tmp:
+        tmp.write_bytes(b"nuevo")
+    assert dest.read_bytes() == b"nuevo"
+
+
+def test_el_destino_viejo_queda_intacto_si_el_bloque_falla(tmp_path):
+    """Lo que hace que valga la pena el temporal: un fallo a mitad de la
+    escritura no puede dejar al usuario sin el archivo que ya tenía."""
+    dest = tmp_path / "archivo.bin"
+    dest.write_bytes(b"el respaldo bueno")
+
+    with pytest.raises(OSError):
+        with atomicfs.atomic_write_target(dest) as tmp:
+            tmp.write_bytes(b"a medio escribir")
+            raise OSError("unidad desconectada")
+
+    assert dest.read_bytes() == b"el respaldo bueno"
+
+
+def test_el_temporal_se_borra_si_el_bloque_falla(tmp_path):
+    dest = tmp_path / "archivo.bin"
+    with pytest.raises(OSError):
+        with atomicfs.atomic_write_target(dest) as tmp:
+            tmp.write_bytes(b"a medio escribir")
+            raise OSError("unidad desconectada")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_el_destino_no_se_crea_si_el_bloque_falla(tmp_path):
+    dest = tmp_path / "archivo.bin"
+    with pytest.raises(RuntimeError):
+        with atomicfs.atomic_write_target(dest) as tmp:
+            tmp.write_bytes(b"x")
+            raise RuntimeError("cualquier cosa")
+    assert not dest.exists()
+
+
+def test_una_excepcion_que_no_es_oserror_tambien_limpia(tmp_path):
+    """El helper atrapa BaseException, no solo OSError: una cancelación o
+    un error de programación tampoco pueden dejar basura en la unidad."""
+    dest = tmp_path / "archivo.bin"
+    with pytest.raises(KeyboardInterrupt):
+        with atomicfs.atomic_write_target(dest) as tmp:
+            tmp.write_bytes(b"x")
+            raise KeyboardInterrupt()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_si_el_bloque_no_escribe_nada_el_destino_queda_vacio(tmp_path):
+    """Cambio de contrato al pasar a `mkstemp`, anotado a propósito.
+
+    Antes el temporal no existía hasta que el bloque lo creaba, así que un
+    bloque que no escribía nada hacía fallar el `os.replace` con OSError y
+    el destino no se creaba. Ahora `mkstemp` crea el archivo por
+    adelantado -que es justamente de dónde sale la unicidad garantizada
+    del nombre-, así que "no escribir nada" produce un destino vacío en
+    vez de un error.
+
+    Es el resultado correcto para el único caso real que llega acá: un
+    miembro de ZIP de 0 bytes tiene que instalarse como un archivo de 0
+    bytes, no hacer fracasar la instalación entera. Lo que sí sigue
+    valiendo es que no quede ningún temporal tirado."""
+    dest = tmp_path / "archivo.bin"
+    with atomicfs.atomic_write_target(dest):
+        pass
+    assert dest.read_bytes() == b""
+    assert [p.name for p in tmp_path.iterdir()] == ["archivo.bin"]
+
+
+def test_falla_de_replace_borra_el_temporal(tmp_path, monkeypatch):
+    dest = tmp_path / "archivo.bin"
+
+    def boom_replace(src, dst):
+        raise OSError("no se pudo renombrar")
+
+    monkeypatch.setattr(atomicfs.os, "replace", boom_replace)
+    with pytest.raises(OSError):
+        with atomicfs.atomic_write_target(dest) as tmp:
+            tmp.write_bytes(b"x")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_una_limpieza_que_falla_no_tapa_el_error_original(tmp_path, monkeypatch):
+    """Si tampoco se puede borrar el temporal, quien llama tiene que
+    seguir viendo el error de verdad y no un error del borrado."""
+    dest = tmp_path / "archivo.bin"
+
+    def boom_unlink(self, *a, **kw):
+        raise OSError("tampoco se puede borrar")
+
+    monkeypatch.setattr(Path, "unlink", boom_unlink)
+
+    with pytest.raises(RuntimeError, match="el error de verdad"):
+        with atomicfs.atomic_write_target(dest) as tmp:
+            tmp.write_bytes(b"x")
+            raise RuntimeError("el error de verdad")
+
+
+def test_el_temporal_es_oculto_y_hermano_del_destino(tmp_path):
+    """Contrato con `tools/manual_queue_e2e.py`, que busca los temporales
+    huérfanos por `rglob(".*")`, y con el escaneo de la biblioteca, que
+    ignora los archivos ocultos. Hermano del destino, además, porque el
+    `os.replace` final solo es atómico dentro del mismo filesystem."""
+    dest = tmp_path / "Juego.iso"
+    visto = {}
+    with atomicfs.atomic_write_target(dest) as tmp:
+        visto["nombre"] = tmp.name
+        visto["carpeta"] = tmp.parent
+        tmp.write_bytes(b"x")
+
+    assert visto["nombre"].startswith(".Juego.iso.parcial-")
+    assert visto["carpeta"] == tmp_path  # hermano del destino, mismo filesystem
+
+
+def test_dos_llamadas_al_mismo_destino_usan_temporales_distintos(tmp_path):
+    """El nombre lo da `mkstemp` (O_CREAT|O_EXCL), no una convención con
+    el PID adentro: dos llamadas al MISMO destino no pueden coincidir ni
+    aunque salgan del mismo proceso."""
+    dest = tmp_path / "archivo.bin"
+    with atomicfs.atomic_write_target(dest) as a, atomicfs.atomic_write_target(dest) as b:
+        assert a != b
+        a.write_bytes(b"a")
+        b.write_bytes(b"b")
+
+
+def test_dos_threads_al_mismo_destino_no_se_pisan_el_temporal(tmp_path):
+    """El caso concreto que el esquema por PID no cubría.
+
+    Dos threads del MISMO proceso escribiendo al mismo destino calculaban
+    el mismo nombre de temporal (`.<nombre>.parcial-<pid>`), así que el
+    segundo truncaba y sobrescribía lo que el primero todavía estaba
+    escribiendo, y el `os.replace` del segundo se encontraba sin archivo.
+
+    La barrera del medio es lo que hace que el test sirva: fuerza a que
+    los dos threads estén DENTRO del bloque, con lo suyo ya escrito, al
+    mismo tiempo. Recién ahí cada uno relee su temporal: si lo
+    compartieran, uno de los dos leería el contenido del otro."""
+    dest = tmp_path / "archivo.bin"
+    contenidos = {"A": b"A" * 4096, "B": b"B" * 4096}
+    barrera = threading.Barrier(2)
+    lock = threading.Lock()
+    temporales: list = []
+    errores: list = []
+
+    def escribir(clave: str) -> None:
+        try:
+            with atomicfs.atomic_write_target(dest) as tmp:
+                with lock:
+                    temporales.append(tmp)
+                tmp.write_bytes(contenidos[clave])
+                # Los dos ya escribieron: a partir de acá, cualquier
+                # mezcla entre ellos es visible.
+                barrera.wait(timeout=10)
+                assert tmp.read_bytes() == contenidos[clave], (
+                    f"el temporal de {clave} lo pisó el otro thread")
+        except BaseException as e:  # noqa: BLE001 - se revisa abajo
+            errores.append(e)
+            barrera.abort()
+
+    hilos = [threading.Thread(target=escribir, args=(c,)) for c in contenidos]
+    for h in hilos:
+        h.start()
+    for h in hilos:
+        h.join(timeout=20)
+        assert not h.is_alive(), "un thread quedó colgado"
+
+    assert not errores, errores
+    assert len(set(temporales)) == 2, f"compartieron el temporal: {temporales}"
+    # Gana uno de los dos -cuál, depende de quién haga el `os.replace`
+    # último-, pero el destino queda con UNO de los dos contenidos entero,
+    # nunca con una mezcla.
+    assert dest.read_bytes() in contenidos.values()
+    assert [p.name for p in tmp_path.iterdir()] == ["archivo.bin"]
+
+
+def test_el_destino_conserva_los_permisos_de_siempre(tmp_path):
+    """`mkstemp` crea en 0600, pero el temporal de este helper termina
+    SIENDO el archivo final: sin corregirlo, la caché, las configs
+    maestras y las apps instaladas habrían cambiado de permisos en
+    silencio. La referencia es un archivo creado con un `open()` normal,
+    o sea con el mismo umask que regía antes."""
+    referencia = tmp_path / "referencia.bin"
+    referencia.write_bytes(b"x")
+
+    dest = tmp_path / "archivo.bin"
+    with atomicfs.atomic_write_target(dest) as tmp:
+        tmp.write_bytes(b"x")
+
+    assert (stat.S_IMODE(dest.stat().st_mode)
+            == stat.S_IMODE(referencia.stat().st_mode))
+
+
+def test_mkparents_crea_la_carpeta_del_destino(tmp_path):
+    dest = tmp_path / "sub" / "carpeta" / "archivo.bin"
+    with atomicfs.atomic_write_target(dest, mkparents=True) as tmp:
+        tmp.write_bytes(b"x")
+    assert dest.read_bytes() == b"x"
+
+
+def test_sin_mkparents_una_carpeta_inexistente_falla(tmp_path):
+    dest = tmp_path / "no-existe" / "archivo.bin"
+    with pytest.raises(OSError):
+        with atomicfs.atomic_write_target(dest) as tmp:
+            tmp.write_bytes(b"x")
+    assert not dest.exists()
+
+
+def test_acepta_una_ruta_en_texto(tmp_path):
+    dest = tmp_path / "archivo.bin"
+    with atomicfs.atomic_write_target(str(dest)) as tmp:
+        tmp.write_bytes(b"x")
+    assert dest.read_bytes() == b"x"
+
+
+# ================================================ atomic_write_stream --
+# La variante de "archivo abierto", para quien escribe de a bloques.
+def test_stream_escribe_y_deja_el_contenido(tmp_path):
+    dest = tmp_path / "archivo.bin"
+    with atomicfs.atomic_write_stream(dest) as (f, tmp):
+        f.write(b"parte uno ")
+        f.write(b"parte dos")
+        assert not dest.exists(), "el destino no se toca hasta el intercambio"
+    assert dest.read_bytes() == b"parte uno parte dos"
+    assert [p.name for p in tmp_path.iterdir()] == ["archivo.bin"]
+
+
+def test_stream_no_toca_el_destino_viejo_si_falla(tmp_path):
+    dest = tmp_path / "archivo.bin"
+    dest.write_bytes(b"el respaldo bueno")
+
+    with pytest.raises(OSError):
+        with atomicfs.atomic_write_stream(dest) as (f, _tmp):
+            f.write(b"a medio escribir")
+            raise OSError("unidad desconectada")
+
+    assert dest.read_bytes() == b"el respaldo bueno"
+    assert [p.name for p in tmp_path.iterdir()] == ["archivo.bin"]
+
+
+def test_stream_cierra_el_descriptor_aunque_el_bloque_falle(tmp_path):
+    """El descriptor lo entrega `mkstemp` y queda a cargo del `with`: si
+    el bloque revienta -por ejemplo al no poder abrir el origen de una
+    copia- no puede quedar filtrado."""
+    dest = tmp_path / "archivo.bin"
+    antes = len(os.listdir("/proc/self/fd"))
+
+    for _ in range(50):
+        with pytest.raises(FileNotFoundError):
+            with atomicfs.atomic_write_stream(dest) as (_f, _tmp):
+                open(tmp_path / "no-existe.bin", "rb")
+
+    assert len(os.listdir("/proc/self/fd")) == antes
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_stream_con_fsync_baja_a_disco_antes_de_intercambiar(tmp_path, monkeypatch):
+    """Durabilidad: sin el fsync previo, el rename puede quedar registrado
+    mientras los datos siguen en cache, y un tirón del cable deja el
+    destino nuevo incompleto y el viejo ya borrado."""
+    dest = tmp_path / "archivo.bin"
+    orden = []
+    fsync_real, replace_real = atomicfs.os.fsync, atomicfs.os.replace
+    monkeypatch.setattr(atomicfs.os, "fsync",
+                        lambda fd: (orden.append("fsync"), fsync_real(fd))[1])
+    monkeypatch.setattr(atomicfs.os, "replace",
+                        lambda a, b: (orden.append("replace"), replace_real(a, b))[1])
+
+    with atomicfs.atomic_write_stream(dest, fsync=True) as (f, _tmp):
+        f.write(b"x")
+
+    assert orden == ["fsync", "replace"]
+
+
+def test_stream_sin_fsync_no_lo_llama(tmp_path, monkeypatch):
+    """El fsync cuesta tiempo real en un USB: solo lo paga quien lo pide."""
+    llamadas = []
+    monkeypatch.setattr(atomicfs.os, "fsync", lambda fd: llamadas.append(fd))
+
+    with atomicfs.atomic_write_stream(tmp_path / "archivo.bin") as (f, _tmp):
+        f.write(b"x")
+
+    assert llamadas == []
+
+
+def test_before_replace_corre_sobre_el_temporal_y_antes_del_intercambio(tmp_path):
+    """Es lo que necesita `library._copy_with_progress` para su
+    `copystat`: aplicar algo sobre el temporal -no sobre el destino- justo
+    antes de que ocupe el lugar."""
+    dest = tmp_path / "archivo.bin"
+    visto = {}
+
+    def _antes(tmp):
+        visto["ruta"] = tmp
+        visto["existia_el_destino"] = dest.exists()
+        os.chmod(tmp, 0o640)
+
+    with atomicfs.atomic_write_stream(dest, before_replace=_antes) as (f, tmp):
+        f.write(b"x")
+        esperada = tmp
+
+    assert visto["ruta"] == esperada
+    assert visto["existia_el_destino"] is False
+    assert stat.S_IMODE(dest.stat().st_mode) == 0o640
+
+
+def test_si_before_replace_falla_el_destino_no_se_toca(tmp_path):
+    dest = tmp_path / "archivo.bin"
+    dest.write_bytes(b"lo viejo")
+
+    def _revienta(_tmp):
+        raise OSError("no se pudo copiar la metadata")
+
+    with pytest.raises(OSError):
+        with atomicfs.atomic_write_stream(dest, before_replace=_revienta) as (f, _t):
+            f.write(b"lo nuevo")
+
+    assert dest.read_bytes() == b"lo viejo"
+    assert [p.name for p in tmp_path.iterdir()] == ["archivo.bin"]
+
+
+# ========================================================= hidden_sibling --
+def test_el_nombre_apartado_es_oculto_y_hermano(tmp_path):
+    """Hermano para que el `os.replace` sea atómico (mismo filesystem), y
+    oculto para que no lo tome el escaneo de la biblioteca."""
+    ruta = atomicfs.hidden_sibling(tmp_path / "sub" / "Juego.wbfs", "respaldo")
+    assert ruta.parent == tmp_path / "sub"
+    assert ruta.name.startswith(".Juego.wbfs.respaldo-")
+    assert str(os.getpid()) in ruta.name
+
+
+# ================================================================ SetAside --
+def test_setaside_aparta_y_devuelve(tmp_path):
+    a = tmp_path / "juego.wbfs"
+    a.write_bytes(b"original")
+
+    aside = atomicfs.SetAside("respaldo")
+    respaldo = aside.move_aside(a)
+
+    assert not a.exists(), "el nombre público quedó libre"
+    assert respaldo.read_bytes() == b"original"
+    assert aside.pairs == [(a, respaldo)]
+
+    assert aside.restore() == []
+    assert a.read_bytes() == b"original"
+    assert not respaldo.exists()
+    assert aside.pairs == []
+
+
+def test_setaside_descarta_y_no_deja_rastro(tmp_path):
+    a = tmp_path / "juego.wbfs"
+    a.write_bytes(b"original")
+    aside = atomicfs.SetAside("respaldo")
+    aside.move_aside(a)
+
+    assert aside.discard() == []
+    assert list(tmp_path.iterdir()) == []
+    assert aside.pairs == []
+
+
+def test_setaside_descarta_carpetas_tambien(tmp_path):
+    """El respaldo de una app de Homebrew es una carpeta entera, no un
+    archivo: descartarlo tiene que borrar el árbol."""
+    carpeta = tmp_path / "App"
+    (carpeta / "sub").mkdir(parents=True)
+    (carpeta / "sub" / "boot.dol").write_bytes(b"x")
+
+    aside = atomicfs.SetAside("wbm-respaldo")
+    respaldo = aside.move_aside(carpeta)
+    assert respaldo.is_dir()
+
+    assert aside.discard() == []
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_setaside_reporta_lo_que_no_pudo_devolver(tmp_path, monkeypatch):
+    """Se intenta con TODOS aunque alguno falle -en un WBFS dividido no
+    tiene sentido dejar dos partes sin restaurar porque la tercera se
+    atoró- y lo que queda pendiente es exactamente lo que falló."""
+    a = tmp_path / "juego.wbfs"
+    b = tmp_path / "juego.wbf1"
+    a.write_bytes(b"parte-a")
+    b.write_bytes(b"parte-b")
+
+    aside = atomicfs.SetAside("respaldo")
+    aside.move_aside(a)
+    respaldo_b = aside.move_aside(b)
+
+    real = atomicfs.os.replace
+    monkeypatch.setattr(
+        atomicfs.os, "replace",
+        lambda o, d: (_ for _ in ()).throw(OSError("no se pudo"))
+        if Path(d) == b else real(o, d))
+
+    pendientes = aside.restore()
+
+    assert pendientes == [(b, respaldo_b)]
+    assert aside.pairs == pendientes
+    assert a.read_bytes() == b"parte-a", "el que sí se pudo volvió a su lugar"
+    assert respaldo_b.read_bytes() == b"parte-b", "el que falló sigue rescatable"
+
+
+def test_setaside_reporta_lo_que_no_pudo_borrar(tmp_path, monkeypatch):
+    """Un respaldo que no se puede borrar no es un error de la operación,
+    pero tampoco se ignora: son varios GB ocupados en un archivo oculto."""
+    a = tmp_path / "juego.wbfs"
+    a.write_bytes(b"original")
+    aside = atomicfs.SetAside("respaldo")
+    respaldo = aside.move_aside(a)
+
+    monkeypatch.setattr(Path, "unlink",
+                        lambda self, *args, **kw: (_ for _ in ()).throw(
+                            OSError("unidad de solo lectura")))
+
+    assert aside.discard() == [respaldo]
+    assert respaldo.exists()
+
+
+def test_setaside_tolera_un_respaldo_que_ya_no_esta(tmp_path):
+    """Descartar algo que ya no existe no es un fallo que reportar."""
+    a = tmp_path / "juego.wbfs"
+    a.write_bytes(b"original")
+    aside = atomicfs.SetAside("respaldo")
+    respaldo = aside.move_aside(a)
+    respaldo.unlink()
+
+    assert aside.discard() == []
+
+
+# ======================================================= staged_directory --
+def test_staging_se_promueve_al_salir_bien(tmp_path):
+    destino = tmp_path / "apps" / "App"
+
+    with atomicfs.staged_directory(destino) as staging:
+        assert staging.path.is_dir()
+        assert staging.path.parent == destino.parent
+        assert not destino.exists(), "el destino no existe hasta el intercambio"
+        (staging.path / "boot.dol").write_bytes(b"nuevo")
+
+    assert (destino / "boot.dol").read_bytes() == b"nuevo"
+    assert staging.orphaned_backups == []
+    assert [p.name for p in destino.parent.iterdir()] == ["App"]
+
+
+def test_una_falla_al_llenar_no_toca_el_destino(tmp_path):
+    """La garantía central: la staging se llena ENTERA antes de tocar
+    nada, así que un fallo a mitad deja lo que había exactamente como
+    estaba."""
+    destino = tmp_path / "apps" / "App"
+    destino.mkdir(parents=True)
+    (destino / "boot.dol").write_bytes(b"la version vieja")
+
+    with pytest.raises(RuntimeError):
+        with atomicfs.staged_directory(destino) as staging:
+            (staging.path / "boot.dol").write_bytes(b"a medio extraer")
+            raise RuntimeError("el ZIP estaba cortado")
+
+    assert (destino / "boot.dol").read_bytes() == b"la version vieja"
+    assert [p.name for p in destino.parent.iterdir()] == ["App"]
+
+
+def test_al_actualizar_desaparece_lo_que_la_version_nueva_no_trae(tmp_path):
+    """Es lo que compra intercambiar la carpeta entera en vez de escribir
+    archivo por archivo: no queda una mezcla de las dos versiones."""
+    destino = tmp_path / "App"
+    destino.mkdir()
+    (destino / "boot.dol").write_bytes(b"vieja")
+    (destino / "solo-en-la-vieja.txt").write_bytes(b"obsoleto")
+
+    with atomicfs.staged_directory(destino) as staging:
+        (staging.path / "boot.dol").write_bytes(b"nueva")
+
+    assert (destino / "boot.dol").read_bytes() == b"nueva"
+    assert not (destino / "solo-en-la-vieja.txt").exists()
+
+
+def test_el_respaldo_que_no_se_pudo_borrar_se_reporta(tmp_path, monkeypatch):
+    destino = tmp_path / "App"
+    destino.mkdir()
+    (destino / "boot.dol").write_bytes(b"vieja")
+
+    real = atomicfs.shutil.rmtree
+
+    def _rmtree(path, ignore_errors=False, **kw):
+        if ".respaldo-" in str(path):
+            if ignore_errors:
+                return
+            raise OSError("unidad de solo lectura")
+        return real(path, ignore_errors=ignore_errors, **kw)
+
+    monkeypatch.setattr(atomicfs.shutil, "rmtree", _rmtree)
+
+    with atomicfs.staged_directory(destino) as staging:
+        (staging.path / "boot.dol").write_bytes(b"nueva")
+
+    assert (destino / "boot.dol").read_bytes() == b"nueva", "el intercambio salió bien"
+    assert len(staging.orphaned_backups) == 1
+    assert staging.orphaned_backups[0].is_dir()
+
+
+def test_si_falla_el_intercambio_vuelve_la_version_anterior(tmp_path, monkeypatch):
+    destino = tmp_path / "App"
+    destino.mkdir()
+    (destino / "boot.dol").write_bytes(b"vieja")
+
+    real = atomicfs.os.replace
+    monkeypatch.setattr(
+        atomicfs.os, "replace",
+        lambda o, d: (_ for _ in ()).throw(OSError("no se pudo promover"))
+        if ".staging-" in Path(o).name else real(o, d))
+
+    with pytest.raises(OSError):
+        with atomicfs.staged_directory(destino) as staging:
+            (staging.path / "boot.dol").write_bytes(b"nueva")
+
+    assert (destino / "boot.dol").read_bytes() == b"vieja"
+    assert [p.name for p in tmp_path.iterdir()] == ["App"]
+
+
+def test_si_tampoco_se_puede_restaurar_se_conservan_los_dos(tmp_path, monkeypatch):
+    """El caso catastrófico. Se levanta `SwapRollbackFailed` -sin mensajes
+    para el usuario: eso lo pone quien llama- y NO se borra nada: la
+    staging tiene la versión nueva completa y el respaldo la anterior, y
+    dos candidatos rescatables a mano son mejor que borrar alguno por las
+    dudas."""
+    destino = tmp_path / "App"
+    destino.mkdir()
+    (destino / "boot.dol").write_bytes(b"vieja")
+
+    real = atomicfs.os.replace
+
+    def _replace(origen, dest):
+        nombre = Path(origen).name
+        if ".staging-" in nombre or ".respaldo-" in nombre:
+            raise OSError("simulado: falla también al restaurar")
+        return real(origen, dest)
+
+    monkeypatch.setattr(atomicfs.os, "replace", _replace)
+
+    with pytest.raises(atomicfs.SwapRollbackFailed) as exc_info:
+        with atomicfs.staged_directory(destino) as staging:
+            (staging.path / "boot.dol").write_bytes(b"nueva")
+
+    error = exc_info.value
+    assert len(error.pending) == 1
+    original, respaldo = error.pending[0]
+    assert original == destino
+    assert isinstance(error.original_error, OSError)
+
+    assert not destino.exists(), "el destino quedó sin su nombre público"
+    assert (respaldo / "boot.dol").read_bytes() == b"vieja"
+    assert (staging.path / "boot.dol").read_bytes() == b"nueva"
+
+
+def test_una_staging_huerfana_del_mismo_pid_no_estorba(tmp_path):
+    """El nombre lleva el PID, así que un intento anterior abortado del
+    mismo proceso podría haber dejado una staging con ese nombre."""
+    destino = tmp_path / "App"
+    huerfana = atomicfs.hidden_sibling(destino, "staging")
+    huerfana.mkdir(parents=True)
+    (huerfana / "basura.txt").write_bytes(b"de un intento anterior")
+
+    with atomicfs.staged_directory(destino) as staging:
+        assert staging.path == huerfana
+        assert list(staging.path.iterdir()) == [], "arranca vacía"
+        (staging.path / "boot.dol").write_bytes(b"nueva")
+
+    assert [p.name for p in destino.iterdir()] == ["boot.dol"]
+
+
+# ============================================================
 # FILE: tests/test_config.py
 # ============================================================
 """Lectura tolerante de config.json y escritura atómica."""
@@ -15016,259 +15844,16 @@ def test_formatear_se_habilita_apenas_termina_la_transferencia(
 # ============================================================
 # FILE: tests/test_fsutil.py
 # ============================================================
-"""Pruebas de `fsutil.py`, el módulo compartido de escritura atómica y
-ubicación de datos instalados.
+"""Pruebas de `fsutil.py`: ubicación de los datos instalados de la app.
 
-Vale la pena testearlo aparte y no solo a través de sus cuatro usuarios
-(`gametdb._store_cover`, `oscwii_client.get_icon_path`,
-`golden_configs._copy_atomic`, `oscwii_installer._extract_member`):
-ahora el manejo de errores de los cuatro está definido en un solo lugar,
-así que una regresión acá se propaga a todos a la vez. Lo que más importa
-verificar es el contrato de fallo -el destino no se toca y el temporal no
-queda tirado- porque es justamente lo que cada copia hacía distinto (o,
-en el caso del extractor de ZIP, no hacía)."""
+La escritura atómica que vivía en este módulo (`atomic_target`) se mudó a
+`atomicfs` junto con las demás primitivas de la misma familia, y sus
+tests se mudaron con ella a `test_atomicfs.py`."""
 from __future__ import annotations
 
-import os
-import stat
-import threading
 from pathlib import Path
 
-import pytest
-
 from wiibackup_manager import fsutil
-
-
-# ======================================================== atomic_target --
-def test_escritura_exitosa_deja_el_contenido(tmp_path):
-    dest = tmp_path / "archivo.bin"
-    with fsutil.atomic_target(dest) as tmp:
-        tmp.write_bytes(b"contenido nuevo")
-    assert dest.read_bytes() == b"contenido nuevo"
-
-
-def test_escritura_exitosa_no_deja_temporales(tmp_path):
-    dest = tmp_path / "archivo.bin"
-    with fsutil.atomic_target(dest) as tmp:
-        tmp.write_bytes(b"x")
-    assert [p.name for p in tmp_path.iterdir()] == ["archivo.bin"]
-
-
-def test_sobreescribe_el_destino_existente(tmp_path):
-    dest = tmp_path / "archivo.bin"
-    dest.write_bytes(b"viejo")
-    with fsutil.atomic_target(dest) as tmp:
-        tmp.write_bytes(b"nuevo")
-    assert dest.read_bytes() == b"nuevo"
-
-
-def test_el_destino_viejo_queda_intacto_si_el_bloque_falla(tmp_path):
-    """Lo que hace que valga la pena el temporal: un fallo a mitad de la
-    escritura no puede dejar al usuario sin el archivo que ya tenía."""
-    dest = tmp_path / "archivo.bin"
-    dest.write_bytes(b"el respaldo bueno")
-
-    with pytest.raises(OSError):
-        with fsutil.atomic_target(dest) as tmp:
-            tmp.write_bytes(b"a medio escribir")
-            raise OSError("unidad desconectada")
-
-    assert dest.read_bytes() == b"el respaldo bueno"
-
-
-def test_el_temporal_se_borra_si_el_bloque_falla(tmp_path):
-    dest = tmp_path / "archivo.bin"
-    with pytest.raises(OSError):
-        with fsutil.atomic_target(dest) as tmp:
-            tmp.write_bytes(b"a medio escribir")
-            raise OSError("unidad desconectada")
-    assert list(tmp_path.iterdir()) == []
-
-
-def test_el_destino_no_se_crea_si_el_bloque_falla(tmp_path):
-    dest = tmp_path / "archivo.bin"
-    with pytest.raises(RuntimeError):
-        with fsutil.atomic_target(dest) as tmp:
-            tmp.write_bytes(b"x")
-            raise RuntimeError("cualquier cosa")
-    assert not dest.exists()
-
-
-def test_una_excepcion_que_no_es_oserror_tambien_limpia(tmp_path):
-    """El helper atrapa BaseException, no solo OSError: una cancelación o
-    un error de programación tampoco pueden dejar basura en la unidad."""
-    dest = tmp_path / "archivo.bin"
-    with pytest.raises(KeyboardInterrupt):
-        with fsutil.atomic_target(dest) as tmp:
-            tmp.write_bytes(b"x")
-            raise KeyboardInterrupt()
-    assert list(tmp_path.iterdir()) == []
-
-
-def test_si_el_bloque_no_escribe_nada_el_destino_queda_vacio(tmp_path):
-    """Cambio de contrato al pasar a `mkstemp`, anotado a propósito.
-
-    Antes el temporal no existía hasta que el bloque lo creaba, así que un
-    bloque que no escribía nada hacía fallar el `os.replace` con OSError y
-    el destino no se creaba. Ahora `mkstemp` crea el archivo por
-    adelantado -que es justamente de dónde sale la unicidad garantizada
-    del nombre-, así que "no escribir nada" produce un destino vacío en
-    vez de un error.
-
-    Es el resultado correcto para el único caso real que llega acá: un
-    miembro de ZIP de 0 bytes tiene que instalarse como un archivo de 0
-    bytes, no hacer fracasar la instalación entera. Lo que sí sigue
-    valiendo es que no quede ningún temporal tirado."""
-    dest = tmp_path / "archivo.bin"
-    with fsutil.atomic_target(dest):
-        pass
-    assert dest.read_bytes() == b""
-    assert [p.name for p in tmp_path.iterdir()] == ["archivo.bin"]
-
-
-def test_falla_de_replace_borra_el_temporal(tmp_path, monkeypatch):
-    dest = tmp_path / "archivo.bin"
-
-    def boom_replace(src, dst):
-        raise OSError("no se pudo renombrar")
-
-    monkeypatch.setattr(fsutil.os, "replace", boom_replace)
-    with pytest.raises(OSError):
-        with fsutil.atomic_target(dest) as tmp:
-            tmp.write_bytes(b"x")
-    assert list(tmp_path.iterdir()) == []
-
-
-def test_una_limpieza_que_falla_no_tapa_el_error_original(tmp_path, monkeypatch):
-    """Si tampoco se puede borrar el temporal, quien llama tiene que
-    seguir viendo el error de verdad y no un error del borrado."""
-    dest = tmp_path / "archivo.bin"
-
-    def boom_unlink(self, *a, **kw):
-        raise OSError("tampoco se puede borrar")
-
-    monkeypatch.setattr(Path, "unlink", boom_unlink)
-
-    with pytest.raises(RuntimeError, match="el error de verdad"):
-        with fsutil.atomic_target(dest) as tmp:
-            tmp.write_bytes(b"x")
-            raise RuntimeError("el error de verdad")
-
-
-def test_el_temporal_es_oculto_y_hermano_del_destino(tmp_path):
-    """Contrato con `tools/manual_queue_e2e.py`, que busca los temporales
-    huérfanos por `rglob(".*")`, y con el escaneo de la biblioteca, que
-    ignora los archivos ocultos. Hermano del destino, además, porque el
-    `os.replace` final solo es atómico dentro del mismo filesystem."""
-    dest = tmp_path / "Juego.iso"
-    visto = {}
-    with fsutil.atomic_target(dest) as tmp:
-        visto["nombre"] = tmp.name
-        visto["carpeta"] = tmp.parent
-        tmp.write_bytes(b"x")
-
-    assert visto["nombre"].startswith(".Juego.iso.parcial-")
-    assert visto["carpeta"] == tmp_path  # hermano del destino, mismo filesystem
-
-
-def test_dos_llamadas_al_mismo_destino_usan_temporales_distintos(tmp_path):
-    """El nombre lo da `mkstemp` (O_CREAT|O_EXCL), no una convención con
-    el PID adentro: dos llamadas al MISMO destino no pueden coincidir ni
-    aunque salgan del mismo proceso."""
-    dest = tmp_path / "archivo.bin"
-    with fsutil.atomic_target(dest) as a, fsutil.atomic_target(dest) as b:
-        assert a != b
-        a.write_bytes(b"a")
-        b.write_bytes(b"b")
-
-
-def test_dos_threads_al_mismo_destino_no_se_pisan_el_temporal(tmp_path):
-    """El caso concreto que el esquema por PID no cubría.
-
-    Dos threads del MISMO proceso escribiendo al mismo destino calculaban
-    el mismo nombre de temporal (`.<nombre>.parcial-<pid>`), así que el
-    segundo truncaba y sobrescribía lo que el primero todavía estaba
-    escribiendo, y el `os.replace` del segundo se encontraba sin archivo.
-
-    La barrera del medio es lo que hace que el test sirva: fuerza a que
-    los dos threads estén DENTRO del bloque, con lo suyo ya escrito, al
-    mismo tiempo. Recién ahí cada uno relee su temporal: si lo
-    compartieran, uno de los dos leería el contenido del otro."""
-    dest = tmp_path / "archivo.bin"
-    contenidos = {"A": b"A" * 4096, "B": b"B" * 4096}
-    barrera = threading.Barrier(2)
-    lock = threading.Lock()
-    temporales: list = []
-    errores: list = []
-
-    def escribir(clave: str) -> None:
-        try:
-            with fsutil.atomic_target(dest) as tmp:
-                with lock:
-                    temporales.append(tmp)
-                tmp.write_bytes(contenidos[clave])
-                # Los dos ya escribieron: a partir de acá, cualquier
-                # mezcla entre ellos es visible.
-                barrera.wait(timeout=10)
-                assert tmp.read_bytes() == contenidos[clave], (
-                    f"el temporal de {clave} lo pisó el otro thread")
-        except BaseException as e:  # noqa: BLE001 - se revisa abajo
-            errores.append(e)
-            barrera.abort()
-
-    hilos = [threading.Thread(target=escribir, args=(c,)) for c in contenidos]
-    for h in hilos:
-        h.start()
-    for h in hilos:
-        h.join(timeout=20)
-        assert not h.is_alive(), "un thread quedó colgado"
-
-    assert not errores, errores
-    assert len(set(temporales)) == 2, f"compartieron el temporal: {temporales}"
-    # Gana uno de los dos -cuál, depende de quién haga el `os.replace`
-    # último-, pero el destino queda con UNO de los dos contenidos entero,
-    # nunca con una mezcla.
-    assert dest.read_bytes() in contenidos.values()
-    assert [p.name for p in tmp_path.iterdir()] == ["archivo.bin"]
-
-
-def test_el_destino_conserva_los_permisos_de_siempre(tmp_path):
-    """`mkstemp` crea en 0600, pero el temporal de este helper termina
-    SIENDO el archivo final: sin corregirlo, la caché, las configs
-    maestras y las apps instaladas habrían cambiado de permisos en
-    silencio. La referencia es un archivo creado con un `open()` normal,
-    o sea con el mismo umask que regía antes."""
-    referencia = tmp_path / "referencia.bin"
-    referencia.write_bytes(b"x")
-
-    dest = tmp_path / "archivo.bin"
-    with fsutil.atomic_target(dest) as tmp:
-        tmp.write_bytes(b"x")
-
-    assert (stat.S_IMODE(dest.stat().st_mode)
-            == stat.S_IMODE(referencia.stat().st_mode))
-
-
-def test_mkparents_crea_la_carpeta_del_destino(tmp_path):
-    dest = tmp_path / "sub" / "carpeta" / "archivo.bin"
-    with fsutil.atomic_target(dest, mkparents=True) as tmp:
-        tmp.write_bytes(b"x")
-    assert dest.read_bytes() == b"x"
-
-
-def test_sin_mkparents_una_carpeta_inexistente_falla(tmp_path):
-    dest = tmp_path / "no-existe" / "archivo.bin"
-    with pytest.raises(OSError):
-        with fsutil.atomic_target(dest) as tmp:
-            tmp.write_bytes(b"x")
-    assert not dest.exists()
-
-
-def test_acepta_una_ruta_en_texto(tmp_path):
-    dest = tmp_path / "archivo.bin"
-    with fsutil.atomic_target(str(dest)) as tmp:
-        tmp.write_bytes(b"x")
-    assert dest.read_bytes() == b"x"
 
 
 # =================================================== installed_data_dirs --
@@ -17841,9 +18426,9 @@ def test_el_temporal_es_oculto_y_hermano_del_destino(tmp_path):
 
 
 def test_un_origen_vacio_produce_un_destino_vacio(tmp_path):
-    """A diferencia de `fsutil.atomic_target` -donde pasar a `mkstemp`
-    cambió el caso "no se escribió nada" de OSError a destino vacío- acá
-    no cambia nada: el temporal siempre se creó por adelantado (antes con
+    """A diferencia de `atomicfs.atomic_write_target` -donde pasar a
+    `mkstemp` cambió el caso "no se escribió nada" de OSError a destino
+    vacío- acá no cambia nada: el temporal siempre se creó por adelantado (antes con
     `open(tmp, "wb")`, ahora con `mkstemp`), así que un origen vacío
     siempre produjo un destino vacío, que es lo correcto."""
     src = tmp_path / "vacio.iso"
@@ -19264,8 +19849,9 @@ def test_extraccion_cortada_no_deja_temporales_en_la_unidad(tmp_path, monkeypatc
 
     Mientras `_extract_member` armaba el temporal a mano era el único de
     los cuatro lugares con este patrón que no limpiaba ante un error; al
-    pasar a `fsutil.atomic_target` la limpieza quedó garantizada para
-    todos. Esta prueba es la guarda de que no se vuelva a perder."""
+    pasar a `atomicfs.atomic_write_target` la limpieza quedó
+    garantizada para todos. Esta prueba es la guarda de que no se
+    vuelva a perder."""
     zip_path = tmp_path / "app.zip"
     _make_zip(zip_path, {"apps/TestApp/boot.dol": b"A" * 100})
     dest_root = tmp_path / "usb"
@@ -19435,9 +20021,9 @@ def test_install_app_no_extrae_nada_de_un_zip_con_colision(tmp_path, monkeypatch
 """Instalación de Homebrew como transacción atómica por carpeta.
 
 ChatGPT encontró que `install_app` era atómico ARCHIVO por archivo
-(`_extract_member`, vía `fsutil.atomic_target`) pero no para la app
-entera: si la extracción se cortaba a mitad de una actualización, cada
-archivo individual quedaba válido, pero la carpeta `apps/<App>/` podía
+(`_extract_member`, vía `atomicfs.atomic_write_target`) pero no para la
+app entera: si la extracción se cortaba a mitad de una actualización,
+cada archivo individual quedaba válido, pero la carpeta `apps/<App>/` podía
 terminar con una mezcla de archivos de la versión vieja y la nueva -la
 app rota aunque ningún archivo suelto lo estuviera.
 
@@ -19458,7 +20044,7 @@ from pathlib import Path
 
 import pytest
 
-from wiibackup_manager import library, oscwii_installer
+from wiibackup_manager import atomicfs, library, oscwii_installer
 from wiibackup_manager.oscwii_client import HomebrewApp
 from wiibackup_manager.oscwii_installer import InstallStatus
 
@@ -19617,7 +20203,7 @@ def test_falla_en_el_intercambio_final_recupera_la_version_anterior(
             raise OSError("simulado: no se pudo promover la staging")
         return real_replace(origen, destino)
 
-    monkeypatch.setattr(oscwii_installer.os, "replace",
+    monkeypatch.setattr(atomicfs.os, "replace",
                         _falla_solo_al_promover_staging)
 
     result = oscwii_installer.install_app(_fake_app(), dest_root)
@@ -19658,7 +20244,7 @@ def test_falla_en_el_intercambio_y_tambien_falla_la_recuperacion(
             raise OSError("simulado: falla también al restaurar")
         return real_replace(origen, destino)
 
-    monkeypatch.setattr(oscwii_installer.os, "replace",
+    monkeypatch.setattr(atomicfs.os, "replace",
                         _falla_al_promover_y_al_recuperar)
 
     result = oscwii_installer.install_app(_fake_app(), dest_root)

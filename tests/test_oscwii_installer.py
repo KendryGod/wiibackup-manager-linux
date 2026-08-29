@@ -158,8 +158,9 @@ def test_extraccion_cortada_no_deja_temporales_en_la_unidad(tmp_path, monkeypatc
 
     Mientras `_extract_member` armaba el temporal a mano era el único de
     los cuatro lugares con este patrón que no limpiaba ante un error; al
-    pasar a `fsutil.atomic_target` la limpieza quedó garantizada para
-    todos. Esta prueba es la guarda de que no se vuelva a perder."""
+    pasar a `atomicfs.atomic_write_target` la limpieza quedó
+    garantizada para todos. Esta prueba es la guarda de que no se
+    vuelva a perder."""
     zip_path = tmp_path / "app.zip"
     _make_zip(zip_path, {"apps/TestApp/boot.dol": b"A" * 100})
     dest_root = tmp_path / "usb"

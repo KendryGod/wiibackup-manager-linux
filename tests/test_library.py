@@ -708,9 +708,9 @@ def test_el_temporal_es_oculto_y_hermano_del_destino(tmp_path):
 
 
 def test_un_origen_vacio_produce_un_destino_vacio(tmp_path):
-    """A diferencia de `fsutil.atomic_target` -donde pasar a `mkstemp`
-    cambió el caso "no se escribió nada" de OSError a destino vacío- acá
-    no cambia nada: el temporal siempre se creó por adelantado (antes con
+    """A diferencia de `atomicfs.atomic_write_target` -donde pasar a
+    `mkstemp` cambió el caso "no se escribió nada" de OSError a destino
+    vacío- acá no cambia nada: el temporal siempre se creó por adelantado (antes con
     `open(tmp, "wb")`, ahora con `mkstemp`), así que un origen vacío
     siempre produjo un destino vacío, que es lo correcto."""
     src = tmp_path / "vacio.iso"
