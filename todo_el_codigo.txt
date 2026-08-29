@@ -733,6 +733,15 @@ class CriticalMountError(FactoryModeError):
     ruta crítica del sistema operativo."""
 
 
+class StillMountedError(FactoryModeError):
+    """BLINDAJE 5: después de intentar desmontar todo, `device_path` (o
+    alguna de sus particiones) sigue apareciendo en /proc/mounts. Pasa,
+    por ejemplo, si `umount` falla en silencio por permisos insuficientes:
+    sin este chequeo, `mkfs.vfat` correría igual sobre un dispositivo con
+    una partición todavía montada, con riesgo de corromper los datos que
+    tenga esa partición."""
+
+
 def _device_name(device_path) -> str:
     """'/dev/sdb' -> 'sdb'. Nombre tal como aparece bajo /sys/block."""
     return Path(device_path).name
@@ -883,6 +892,28 @@ def mounted_critical_paths(device_path) -> list[str]:
             if patron.match(origen) and punto in CRITICAL_MOUNTPOINTS]
 
 
+def is_critical_system_path(path) -> bool:
+    """¿`path`, resuelto a ruta absoluta real, es uno de los puntos de
+    montaje críticos del sistema operativo (`CRITICAL_MOUNTPOINTS`)?
+
+    Mismo criterio que usa el BLINDAJE 4 para decidir si una partición
+    montada es peligrosa, pero aplicado directo a una ruta de destino en
+    vez de a lo que reporte /proc/mounts: así, cualquier función que
+    reciba una carpeta de destino de quien la llame (no solo Modo
+    Fábrica, ver `oscwii_installer.install_app`) puede protegerse a sí
+    misma reusando la misma lista de rutas críticas, en vez de mantener
+    una copia propia que se puede desactualizar.
+
+    Si `path` no se puede resolver (no existe, symlink roto), se compara
+    la ruta tal cual la pasaron: no poder confirmar dónde apunta de
+    verdad no es motivo para asumir que es segura."""
+    try:
+        resolved = Path(path).resolve()
+    except OSError:
+        resolved = Path(path)
+    return str(resolved) in CRITICAL_MOUNTPOINTS
+
+
 def _mount_points_of(device_path) -> list[tuple[str, str]]:
     """[(origen, punto_de_montaje), ...] de TODO lo que esté montado de
     `device_path` o sus particiones (no solo lo crítico): es lo que hay
@@ -937,10 +968,11 @@ def check_no_critical_mounts(device: BlockDevice) -> None:
 
 def _unmount_all(device_path, *, run=subprocess.run) -> None:
     """Desmonta todo lo que esté montado de `device_path` o sus
-    particiones. Best-effort a propósito: si algo ya estaba desmontado no
-    es un error, y si `umount` falla de verdad (dispositivo ocupado) el
-    `mkfs.vfat` de después va a fallar igual, ruidosamente -no hay forma
-    de que un fallo acá termine en un formateo silencioso a medias."""
+    particiones. Best-effort: si algo ya estaba desmontado no es un
+    error, y si `umount` falla (dispositivo ocupado, permisos) esta
+    función no lo nota -quien llama es responsable de volver a consultar
+    /proc/mounts después (BLINDAJE 5, `StillMountedError` más abajo) en
+    vez de asumir que acá adentro quedó todo desmontado."""
     for origen, _punto in _mount_points_of(device_path):
         run(["umount", origen], capture_output=True, text=True, timeout=30)
 
@@ -978,7 +1010,8 @@ def format_as_wii_usb(device: BlockDevice, *, run=subprocess.run,
     """Ejecuta el Modo Fábrica de verdad sobre `device`: re-corre los
     blindajes 3 y 4 (nunca se confía en un chequeo hecho en otro momento,
     ni siquiera uno hecho un segundo antes por quien llama), desmonta lo
-    que haya montado, formatea FAT32 vía `mkfs.vfat` y arma la estructura
+    que haya montado, confirma con el Blindaje 5 que ese desmontaje surtió
+    efecto de verdad, formatea FAT32 vía `mkfs.vfat` y arma la estructura
     de carpetas que esperan USB Loader GX / Nintendont.
 
     Pensada para correr en un hilo de fondo: no toca GTK ni nada de la
@@ -1001,6 +1034,15 @@ def format_as_wii_usb(device: BlockDevice, *, run=subprocess.run,
 
     _unmount_all(device.path, run=run)
 
+    puntos_restantes = _mount_points_of(device.path)
+    if puntos_restantes:
+        raise StillMountedError(
+            f"{device.path} sigue teniendo algo montado en "
+            f"{', '.join(sorted(punto for _origen, punto in puntos_restantes))} "
+            "después de intentar desmontarlo (umount pudo haber fallado "
+            "por permisos u otro motivo). Se aborta el formateo por "
+            "seguridad.")
+
     prefijo = [] if os.geteuid() == 0 else ["pkexec"]
     resultado = run(
         prefijo + ["mkfs.vfat", "-F", "32", "-s", str(cluster_size_kb),
@@ -1016,6 +1058,130 @@ def format_as_wii_usb(device: BlockDevice, *, run=subprocess.run,
         (punto_montaje / carpeta).mkdir(parents=True, exist_ok=True)
 
     return punto_montaje
+
+
+# ============================================================
+# FILE: wiibackup_manager/fsutil.py
+# ============================================================
+"""Utilidades de filesystem compartidas por varios módulos.
+
+Acá vive lo que más de un módulo necesitaba y terminaba reescribiendo por
+su cuenta: la escritura atómica a un temporal hermano, la búsqueda de los
+datos instalados de la app, y la firma binaria de PNG. Nada de esto es
+lógica de negocio de ninguna parte en particular -por eso no vive en
+`library`, `gametdb` ni `oscwii_client`- y tener una sola copia de cada
+cosa significa que el manejo de errores se lee, se revisa y se arregla en
+un solo lugar en vez de en cuatro.
+"""
+from __future__ import annotations
+
+import os
+import sys
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Iterator
+
+# Los 8 primeros bytes de todo PNG. La usan `gametdb` (carátulas de
+# GameTDB) y `oscwii_client` (íconos de Open Shop Channel) para descartar
+# una respuesta que no es una imagen -el HTML de una página de error, por
+# ejemplo- antes de guardarla en la caché. Las dos la re-exportan con este
+# mismo nombre, así que `gametdb.PNG_MAGIC` y `oscwii_client.PNG_MAGIC`
+# siguen existiendo y apuntan a este único valor.
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
+# ------------------------------------------------------- Escritura atómica --
+@contextmanager
+def atomic_target(dest: Path, *, mkparents: bool = False) -> Iterator[Path]:
+    """Cede la ruta de un temporal hermano de `dest` y, si el bloque
+    termina sin excepción, lo mueve encima de `dest` con `os.replace`.
+
+    Así `dest` nunca existe a medio escribir: o está el contenido viejo
+    entero, o el nuevo entero, nunca una mezcla. Ante CUALQUIER excepción
+    -incluida una que levante el propio `os.replace`- se borra el
+    temporal y la excepción se propaga tal cual: es quien llama el que
+    decide si eso fue un error o un resultado esperado.
+
+    El temporal es oculto y lleva el PID adentro
+    (`.<nombre>.parcial-<pid>`), y eso no es cosmético: un escaneo de la
+    biblioteca no levanta archivos que empiezan con punto, y dos procesos
+    escribiendo al mismo destino no se pisan el temporal entre sí.
+    `tools/manual_queue_e2e.py` busca exactamente ese patrón de nombre
+    para verificar que no queden temporales huérfanos después de una
+    transferencia, así que no se cambia sin actualizar eso también.
+
+    `mkparents=True` crea la carpeta de `dest` antes de empezar, para
+    quienes escriben a una ruta que puede no existir todavía (el extractor
+    de ZIP, la copia de configs maestras).
+
+    NO hace `fsync`: para lo que se guarda con esto -cachés que se pueden
+    volver a bajar y copias de archivos chicos- alcanza con la atomicidad
+    del rename. Quien además necesita durabilidad ante un corte de luz
+    tiene `config.write_text_atomic` y `library._copy_with_progress`, que
+    sí bajan a disco antes de intercambiar y por eso no usan este helper.
+    """
+    dest = Path(dest)
+    if mkparents:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(f".{dest.name}.parcial-{os.getpid()}")
+    try:
+        yield tmp
+        os.replace(tmp, dest)
+    except BaseException:
+        # Borrar el temporal es "mejor esfuerzo": si tampoco se puede
+        # (permisos, unidad desconectada a mitad de camino), lo que
+        # importa es que la excepción original llegue a quien llama sin
+        # que esta la tape.
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+# -------------------------------------------- Datos instalados de la app --
+def installed_data_dirs(repo_relative: str, share_relative: str) -> list:
+    """Directorios donde puede estar un dato instalado de la app, del más
+    específico al más general y sin repetidos.
+
+    La app puede correr desde el repo clonado sin instalar, desde
+    `pip install --user`, desde un venv, o desde una instalación de
+    sistema, y en cada caso los datos terminan en un lugar distinto. En
+    vez de asumir uno, se devuelven todos los candidatos en orden y quien
+    llama se queda con el primero que exista de verdad. Ver `pyproject.toml`
+    (`[tool.setuptools.data-files]`) para dónde queda cada uno al instalar.
+
+    `repo_relative` es la ruta dentro del repo clonado (p. ej.
+    "data/locale"); `share_relative` es la ruta bajo el `share/` de
+    cualquier prefijo de instalación (p. ej. "locale").
+
+    El prefijo deducido de dónde quedó instalado el paquete va PRIMERO
+    entre los instalados, y es el único que distingue los tres casos:
+    site-packages de ~/.local (pip --user), de un venv, o del sistema.
+    `sys.prefix` no alcanza solo para esto: con `pip install --user` sigue
+    siendo /usr, así que un dato viejo del sistema le ganaría al recién
+    instalado."""
+    paquete = Path(__file__).resolve().parent
+    candidatos = [
+        # Repo clonado sin instalar.
+        paquete.parent / repo_relative,
+    ]
+    for padre in paquete.parents:
+        if padre.name in ("site-packages", "dist-packages"):
+            # …/<prefix>/lib/pythonX.Y/site-packages → <prefix>
+            candidatos.append(padre.parent.parent.parent / "share" / share_relative)
+            break
+    candidatos += [
+        Path(sys.prefix) / "share" / share_relative,
+        Path.home() / ".local" / "share" / share_relative,
+        Path("/usr/local/share") / share_relative,
+        Path("/usr/share") / share_relative,
+    ]
+    vistos = []
+    for c in candidatos:
+        if c not in vistos:
+            vistos.append(c)
+    return vistos
 
 
 # ============================================================
@@ -1043,14 +1209,15 @@ import urllib.request
 import urllib.error
 import xml.etree.ElementTree as ET
 import zipfile
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
 from . import config
 from .disc_header import is_valid_game_id, validate_game_id
+from .fsutil import PNG_MAGIC, atomic_target
 from .i18n import _
+from .inflight import InflightRegistry
 
 # Una plantilla por consola, aunque hoy las dos apunten al mismo lugar:
 # se probó en serio contra el servidor (pedidos reales, no documentación)
@@ -1075,7 +1242,6 @@ DEFAULT_CONSOLE = "wii"
 COVER_FALLBACK_REGIONS = ["US", "EN", "DE", "FR", "JA", "KO"]
 DEFAULT_COVER_REGION = "EN"
 REQUEST_TIMEOUT = 5
-PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
 
 def cover_cache_path(game_id: str, region: str = "EN", console: str = DEFAULT_CONSOLE) -> Path:
@@ -1152,30 +1318,35 @@ def _is_valid_cached_cover(path: Path) -> bool:
         return False
 
 
+class _CoverRejected(Exception):
+    """Interna: la imagen que se bajó no se pudo decodificar.
+
+    Existe para poder salir del bloque de `fsutil.atomic_target` sin que
+    el temporal se mueva a la caché: ese helper reemplaza el destino
+    cuando el bloque termina bien y lo descarta cuando sale por una
+    excepción, así que "esta imagen no sirve" tiene que viajar como
+    excepción y no como un `return`."""
+
+
 def _store_cover(cache_path: Path, data: bytes) -> bool:
     """Guarda la carátula en la caché, de forma atómica y validada.
 
     Se escribe primero a un temporal, se comprueba que la imagen se pueda
-    decodificar ENTERA y recién entonces se la mueve al nombre definitivo.
-    Así la caché nunca tiene un archivo a medias: o está la carátula
-    completa o no está, y el próximo intento la vuelve a pedir.
+    decodificar ENTERA y recién entonces se la mueve al nombre definitivo
+    (ver `fsutil.atomic_target`). Así la caché nunca tiene un archivo a
+    medias: o está la carátula completa o no está, y el próximo intento la
+    vuelve a pedir.
 
     Devuelve False si la imagen no sirve (descarga cortada, el servidor
     devolvió cualquier cosa), sin dejar nada en la caché."""
-    tmp = cache_path.with_name(f".{cache_path.name}.parcial-{os.getpid()}")
     try:
-        tmp.write_bytes(data)
-        if not _decodes_as_image(tmp):
-            tmp.unlink(missing_ok=True)
-            return False
-        os.replace(tmp, cache_path)
-        return True
-    except OSError:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
+        with atomic_target(cache_path) as tmp:
+            tmp.write_bytes(data)
+            if not _decodes_as_image(tmp):
+                raise _CoverRejected()
+    except (_CoverRejected, OSError):
         return False
+    return True
 
 
 def _log_cover_fetch_failed(game_id: str, console: str,
@@ -1274,18 +1445,14 @@ def get_cover_path(game_id: str, region: str = "EN", force: bool = False,
 # cuántas vistas pidan carátulas al mismo tiempo, nunca hay más de
 # `_COVER_DOWNLOAD_WORKERS` descargas en vuelo. Y una carátula lenta o
 # colgada ocupa como mucho un worker; el resto sigue.
+#
+# La clave del registry es (game_id, región, consola): un rescan
+# reconstruye todas las filas y vuelve a pedir las mismas carátulas, y sin
+# esto cada rescan encolaría de nuevo descargas que ya están corriendo.
+# Ver `inflight.InflightRegistry`, compartido con la metadata de acá abajo
+# y con la lista/íconos de `oscwii_client`.
 _COVER_DOWNLOAD_WORKERS = 6
-_cover_executor = ThreadPoolExecutor(
-    max_workers=_COVER_DOWNLOAD_WORKERS, thread_name_prefix="cover-dl"
-)
-
-# Descargas en vuelo, por (game_id, región). Un rescan reconstruye todas
-# las filas y vuelve a pedir las mismas carátulas: sin esto, cada rescan
-# encolaría de nuevo descargas que ya están corriendo. En vez de eso, el
-# pedido nuevo se cuelga del que ya está en curso y recibe el mismo
-# resultado cuando termina.
-_inflight: dict = {}
-_inflight_lock = threading.Lock()
+_cover_jobs = InflightRegistry(_COVER_DOWNLOAD_WORKERS, "cover-dl")
 
 CoverCallback = Callable[[Optional[Path]], None]
 
@@ -1320,40 +1487,15 @@ def fetch_cover_async(game_id: str, region: str = "EN",
         on_done(cached)
         return
 
-    key = (game_id, region, console)
-    with _inflight_lock:
-        waiting = _inflight.get(key)
-        if waiting is not None:
-            # Ya hay una descarga en curso para esta carátula: colgarse de
-            # ella en vez de encolar otra igual.
-            waiting.append(on_done)
-            return
-        _inflight[key] = [on_done]
-
-    _cover_executor.submit(_run_cover_job, key)
-
-
-def _run_cover_job(key: tuple) -> None:
-    game_id, region, console = key
-    try:
-        path = get_cover_path(game_id, region, console=console)
-    except Exception:
-        path = None
-    with _inflight_lock:
-        callbacks = _inflight.pop(key, [])
-    for cb in callbacks:
-        try:
-            cb(path)
-        except Exception:
-            # Un callback que falla (p. ej. una fila que ya no existe) no
-            # puede llevarse puestos a los demás ni al worker del pool.
-            pass
+    _cover_jobs.submit(
+        (game_id, region, console),
+        lambda: get_cover_path(game_id, region, console=console),
+        on_done)
 
 
 def covers_in_flight() -> int:
     """Cuántas carátulas distintas se están descargando ahora mismo."""
-    with _inflight_lock:
-        return len(_inflight)
+    return _cover_jobs.in_flight()
 
 
 # --- Metadata extendida (género, jugadores, fecha, publisher, developer) ---
@@ -1808,25 +1950,22 @@ def get_game_extra_info(game_id: str,
 # es una búsqueda en un dict y no necesita paralelismo. Lo importante es
 # que nada de esto ocurra en el hilo de GTK: una biblioteca de 300 juegos
 # pide metadata para las 300 filas y no puede congelar la ventana.
-_metadata_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wiitdb")
-
 ExtraInfoCallback = Callable[[Optional[GameExtraInfo]], None]
 
 # Consultas de metadata en vuelo y resultados ya resueltos, por
-# (game_id, idioma). Mismo patrón que el `_inflight` de las carátulas, y
-# por el mismo motivo: la Biblioteca, Transferir y el panel de detalle
-# piden lo mismo, y cada rescan vuelve a pedir la biblioteca entera. Sin
-# esto, 300 juegos generaban 300 tareas encoladas contra UN solo worker,
-# cada una reteniendo su callback (y con él la fila que lo creó) hasta que
-# le tocara el turno.
+# (game_id, idioma). El mismo registry que usan las carátulas de acá
+# arriba, y por el mismo motivo: la Biblioteca, Transferir y el panel de
+# detalle piden lo mismo, y cada rescan vuelve a pedir la biblioteca
+# entera. Sin esto, 300 juegos generaban 300 tareas encoladas contra UN
+# solo worker, cada una reteniendo su callback (y con él la fila que lo
+# creó) hasta que le tocara el turno.
 #
-# La caché de resultados es barata y vale la pena: lo que se guarda es una
-# referencia al GameExtraInfo que ya está en memoria dentro del índice de
-# wiitdb.xml, no una copia, y evita rehacer la búsqueda y el parseo de
+# `remember_results=True`: acá, a diferencia de las carátulas, el
+# resultado se guarda en memoria. Es barato -lo que se guarda es una
+# referencia al GameExtraInfo que ya está adentro del índice de
+# wiitdb.xml, no una copia- y evita rehacer la búsqueda y el parseo de
 # controles/sinopsis en cada rescan.
-_extra_inflight: dict = {}
-_extra_cache: dict = {}
-_extra_lock = threading.Lock()
+_extra_jobs = InflightRegistry(1, "wiitdb", remember_results=True)
 
 
 def fetch_extra_info_async(game_id: str, language: str = DEFAULT_LANGUAGE,
@@ -1850,56 +1989,27 @@ def fetch_extra_info_async(game_id: str, language: str = DEFAULT_LANGUAGE,
         return
 
     game_id = validate_game_id(game_id)
-    key = (game_id, language)
-
-    with _extra_lock:
-        if key in _extra_cache:
-            cached = _extra_cache[key]
-            resolver = True
-        else:
-            resolver = False
-            waiting = _extra_inflight.get(key)
-            if waiting is not None:
-                # Ya hay una consulta igual en curso: colgarse de ella.
-                waiting.append(on_done)
-                return
-            _extra_inflight[key] = [on_done]
-    if resolver:
-        on_done(cached)
-        return
-
-    _metadata_executor.submit(_run_extra_info_job, key)
+    _extra_jobs.submit(
+        (game_id, language),
+        lambda: get_game_extra_info(game_id, language),
+        on_done,
+        remember_when=_extra_result_is_final)
 
 
-def _run_extra_info_job(key: tuple) -> None:
-    game_id, language = key
-    try:
-        info = get_game_extra_info(game_id, language)
-    except Exception:
-        info = None
-    # Un None puede significar dos cosas muy distintas: "GameTDB no tiene
-    # este juego" (definitivo, vale cachearlo) o "no se pudo bajar el
-    # volcado" (temporal: sin internet, servidor caído). Cachear el
-    # segundo como definitivo dejaba la biblioteca sin metadata para
-    # siempre aunque volviera la conexión.
-    definitivo = info is not None or wiitdb_index_available()
-    with _extra_lock:
-        callbacks = _extra_inflight.pop(key, [])
-        if definitivo:
-            _extra_cache[key] = info
-    for cb in callbacks:
-        try:
-            cb(info)
-        except Exception:
-            # Un callback que falla (p. ej. una fila que ya no existe) no
-            # puede llevarse puestos a los demás ni al worker.
-            pass
+def _extra_result_is_final(info: Optional[GameExtraInfo]) -> bool:
+    """Si vale la pena recordar `info` como respuesta definitiva.
+
+    Un None puede significar dos cosas muy distintas: "GameTDB no tiene
+    este juego" (definitivo, vale recordarlo) o "no se pudo bajar el
+    volcado" (temporal: sin internet, servidor caído). Recordar el segundo
+    como definitivo dejaba la biblioteca sin metadata para siempre aunque
+    volviera la conexión."""
+    return info is not None or wiitdb_index_available()
 
 
 def extra_info_in_flight() -> int:
     """Cuántas consultas de metadata distintas están en curso."""
-    with _extra_lock:
-        return len(_extra_inflight)
+    return _extra_jobs.in_flight()
 
 
 # ============================================================
@@ -1997,15 +2107,14 @@ llegaba a dispararse con una instalación real.
 """
 from __future__ import annotations
 
-import os
 import shutil
-import sys
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Optional
 
 from . import oplog
+from .fsutil import atomic_target, installed_data_dirs
 from .oscwii_client import HomebrewApp
 
 if TYPE_CHECKING:
@@ -2098,34 +2207,15 @@ class GoldenConfigResult:
 
 # ------------------------------------------------- Ubicar assets/configs --
 #
-# Mismo problema -y misma solución- que `i18n._candidate_dirs`: la app
-# puede correr desde el repo clonado sin instalar, desde
-# `pip install --user`, desde un venv, o desde una instalación de
-# sistema, y en cada caso la carpeta de assets termina en un lugar
-# distinto. Ver `pyproject.toml` (`[tool.setuptools.data-files]`) para
-# dónde queda cada uno de esos casos al instalar.
+# Mismo problema -y ahora, literalmente, la misma solución- que el
+# catálogo de traducciones de `i18n`: la app puede correr desde el repo
+# clonado sin instalar, desde `pip install --user`, desde un venv, o desde
+# una instalación de sistema, y en cada caso la carpeta de assets termina
+# en un lugar distinto. La búsqueda vive en `fsutil.installed_data_dirs`;
+# acá solo se dice qué rutas buscar. Ver `pyproject.toml`
+# (`[tool.setuptools.data-files]`) para dónde queda cada caso al instalar.
 def _candidate_asset_dirs() -> list:
-    paquete = Path(__file__).resolve().parent
-    candidatos = [
-        # Repo clonado sin instalar.
-        paquete.parent / "assets" / "configs",
-    ]
-    for padre in paquete.parents:
-        if padre.name in ("site-packages", "dist-packages"):
-            candidatos.append(padre.parent.parent.parent / "share"
-                              / "wiibackup-manager" / "configs")
-            break
-    candidatos += [
-        Path(sys.prefix) / "share" / "wiibackup-manager" / "configs",
-        Path.home() / ".local" / "share" / "wiibackup-manager" / "configs",
-        Path("/usr/local/share/wiibackup-manager/configs"),
-        Path("/usr/share/wiibackup-manager/configs"),
-    ]
-    vistos = []
-    for c in candidatos:
-        if c not in vistos:
-            vistos.append(c)
-    return vistos
+    return installed_data_dirs("assets/configs", "wiibackup-manager/configs")
 
 
 def find_asset(relative: str) -> Optional[Path]:
@@ -2174,21 +2264,12 @@ def _asset_is_valid(spec: GoldenConfigSpec, asset_path: Path) -> tuple:
 
 # --------------------------------------------------------------- Copia --
 def _copy_atomic(src: Path, dest: Path) -> None:
-    """Copia `src` a `dest` de forma atómica: temporal + `os.replace`,
-    mismo patrón que `oscwii_installer._extract_member` y
-    `gametdb._store_cover`. Levanta OSError si algo falla; quien llama lo
+    """Copia `src` a `dest` de forma atómica (ver `fsutil.atomic_target`,
+    el mismo helper que usan `oscwii_installer._extract_member` y
+    `gametdb._store_cover`). Levanta OSError si algo falla; quien llama lo
     convierte en un `GoldenConfigResult` de error."""
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_name(f".{dest.name}.parcial-{os.getpid()}")
-    try:
+    with atomic_target(dest, mkparents=True) as tmp:
         shutil.copyfile(src, tmp)
-        os.replace(tmp, dest)
-    except OSError:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
 
 
 # -------------------------------------------------------------------- API --
@@ -2321,41 +2402,20 @@ from __future__ import annotations
 
 import gettext
 import locale
-import sys
-from pathlib import Path
+
+from .fsutil import installed_data_dirs
 
 DOMAIN = "wiibackup-manager"
 
 
 def _candidate_dirs() -> list:
     """Directorios donde puede estar el catálogo, del más específico al
-    más general."""
-    paquete = Path(__file__).resolve().parent
-    candidatos = [
-        # Repo clonado sin instalar: <repo>/data/locale
-        paquete.parent / "data" / "locale",
-    ]
-    # El prefijo deducido de dónde quedó instalado el paquete, que es el
-    # único que distingue los tres casos: site-packages de ~/.local (pip
-    # --user), de un venv, o del sistema. `sys.prefix` no sirve solo para
-    # esto: con `pip install --user` sigue siendo /usr, así que un
-    # catálogo viejo del sistema le ganaría al recién instalado.
-    for padre in paquete.parents:
-        if padre.name in ("site-packages", "dist-packages"):
-            # …/<prefix>/lib/pythonX.Y/site-packages → <prefix>
-            candidatos.append(padre.parent.parent.parent / "share" / "locale")
-            break
-    candidatos += [
-        Path(sys.prefix) / "share" / "locale",
-        Path.home() / ".local" / "share" / "locale",
-        Path("/usr/local/share/locale"),
-        Path("/usr/share/locale"),
-    ]
-    vistos = []
-    for c in candidatos:
-        if c not in vistos:
-            vistos.append(c)
-    return vistos
+    más general.
+
+    La búsqueda en sí (repo clonado / venv / pip --user / sistema) vive en
+    `fsutil.installed_data_dirs`, compartida con la carpeta de configs
+    maestras de `golden_configs`: acá solo se dice qué rutas buscar."""
+    return installed_data_dirs("data/locale", "locale")
 
 
 def _load() -> gettext.NullTranslations:
@@ -2388,6 +2448,182 @@ def current_language() -> str:
     diálogo Acerca de y para poder verificarlo en las pruebas."""
     info = getattr(_translation, "info", lambda: {})()
     return (info.get("language") or "es").split("_")[0]
+
+
+# ============================================================
+# FILE: wiibackup_manager/inflight.py
+# ============================================================
+"""Coalescing de pedidos idénticos en vuelo.
+
+El problema, que aparece en todas las vistas que cargan datos de red: la
+interfaz pide LO MISMO muchas veces al mismo tiempo. Un rescan reconstruye
+las 300 filas de la biblioteca y cada una vuelve a pedir su carátula;
+abrir la Homebrew Store dispara el ícono de cada tarjeta; la Biblioteca,
+Transferir y el panel de detalle piden la metadata del mismo juego. Sin
+coordinación, eso son cientos de descargas iguales en paralelo contra el
+mismo servidor.
+
+La solución -que gametdb.py y oscwii_client.py habían escrito cuatro veces
+entre los dos- es esta: el primer pedido de una clave dispara el trabajo
+real, y todos los que llegan mientras ese sigue en curso se cuelgan de él
+y reciben el mismo resultado cuando termina. Opcionalmente el resultado
+queda recordado, así los pedidos POSTERIORES tampoco rehacen el trabajo.
+
+Este módulo no sabe nada de carátulas, íconos ni catálogos: recibe una
+clave y una función que produce un valor. Las reglas de negocio de cada
+usuario (qué es una clave, cuándo vale la pena recordar un resultado)
+quedan en su módulo, que es donde se pueden leer y probar.
+"""
+from __future__ import annotations
+
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from enum import Enum
+from typing import Any, Callable, Optional
+
+
+class Claim(Enum):
+    """Qué le tocó a quien acaba de anotarse con `InflightRegistry.join`."""
+
+    CLAIMED = "claimed"        # es el primero: le toca correr el trabajo
+    WAITING = "waiting"        # ya hay un pedido igual en curso: nada que hacer
+    REMEMBERED = "remembered"  # ya había resultado: hay que entregarlo en el acto
+
+
+def _no_result(_exc: BaseException) -> None:
+    """Fallback por defecto: un trabajo que falla se resuelve como None."""
+    return None
+
+
+class InflightRegistry:
+    """Pedidos en curso por clave, con su propio pool de hilos.
+
+    Uso normal, todo en una llamada:
+
+        _cover_jobs = InflightRegistry(6, "cover-dl")
+        _cover_jobs.submit(key, lambda: bajar(key), on_done)
+
+    `on_done` corre en un hilo del pool (o en el hilo que llama, si el
+    resultado ya estaba recordado), así que quien toque widgets de GTK
+    adentro tiene que reenviarlo con `GLib.idle_add`.
+
+    Dos garantías que importan y que son la razón de que esto viva en un
+    solo lugar:
+
+    - **Los callbacks se llaman SIEMPRE fuera del lock.** Un callback
+      puede volver a llamar a `submit` (una fila que se redibuja y vuelve
+      a pedir), y hacerlo con el lock tomado sería un deadlock.
+    - **Un callback que falla no se lleva puestos a los demás** ni al
+      worker del pool: se ignora y se sigue con el resto. Es el caso
+      normal de una fila que ya no existe cuando llega su resultado.
+    """
+
+    def __init__(self, workers: int, thread_name_prefix: str,
+                 *, remember_results: bool = False):
+        self._executor = ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix=thread_name_prefix)
+        self._waiting: dict = {}
+        # None (y no un dict vacío) cuando no se recuerdan resultados: así
+        # "este registry no cachea" y "cachea pero todavía no tiene nada"
+        # son estados distintos y no hay que preguntarle a un flag aparte.
+        self._results: Optional[dict] = {} if remember_results else None
+        self._lock = threading.Lock()
+
+    # ---------------------------------------------------------------- API --
+    def submit(self, key, work: Callable[[], Any],
+               on_done: Callable[[Any], None], *,
+               on_error: Callable[[BaseException], Any] = _no_result,
+               remember_when: Optional[Callable[[Any], bool]] = None) -> None:
+        """Pide `work()` para `key` y llama a `on_done(resultado)`.
+
+        Si ya hay un resultado recordado para `key`, `on_done` se llama en
+        el acto y en el hilo que llama, sin ocupar un worker. Si ya hay un
+        pedido igual en curso, `on_done` se cuelga de ese. Si no, `work`
+        se encola en el pool.
+
+        `work` corre en un hilo del pool; si levanta cualquier excepción,
+        el resultado pasa a ser `on_error(excepcion)` -por defecto None- y
+        los callbacks se llaman igual: un fallo no puede dejar a nadie
+        esperando para siempre.
+
+        `remember_when(valor)` decide si el resultado se recuerda, y solo
+        se consulta en un registry creado con `remember_results=True`."""
+        action, remembered = self.join(key, on_done)
+        if action is Claim.REMEMBERED:
+            on_done(remembered)
+            return
+        if action is Claim.WAITING:
+            return
+        self._executor.submit(self.run_now, key, work,
+                              on_error=on_error, remember_when=remember_when)
+
+    def join(self, key, on_done: Callable[[Any], None]) -> tuple:
+        """Anota `on_done` bajo `key` y dice qué le toca hacer a quien
+        llama. Devuelve `(Claim, valor_recordado)`.
+
+        Es la mitad "decidir" de `submit`, separada para que quien tenga
+        que hacer algo distinto con cada caso -o para poder probar el
+        registro sin lanzar hilos- pueda hacerlo. El valor recordado solo
+        viene con `Claim.REMEMBERED`; en los otros dos casos es None.
+
+        Ojo: si devuelve `Claim.CLAIMED`, la clave YA quedó reservada y
+        quien llama se compromete a resolverla (`run_now`), pase lo que
+        pase. Abandonarla deja a sus callbacks esperando para siempre."""
+        with self._lock:
+            if self._results is not None and key in self._results:
+                return Claim.REMEMBERED, self._results[key]
+            waiting = self._waiting.get(key)
+            if waiting is not None:
+                waiting.append(on_done)
+                return Claim.WAITING, None
+            self._waiting[key] = [on_done]
+            return Claim.CLAIMED, None
+
+    def run_now(self, key, work: Callable[[], Any], *,
+                on_error: Callable[[BaseException], Any] = _no_result,
+                remember_when: Optional[Callable[[Any], bool]] = None) -> None:
+        """Corre `work()`, libera `key` y entrega el resultado a todos los
+        que estaban esperándolo. Sincrónico: es lo que `submit` manda al
+        pool, expuesto aparte para poder probarlo sin hilos."""
+        try:
+            value = work()
+        except Exception as e:  # noqa: BLE001 - el fallo va como resultado
+            value = on_error(e)
+
+        # `remember_when` se evalúa ANTES de tomar el lock, a propósito:
+        # puede consultar otro estado protegido por su propio lock (el
+        # índice de wiitdb, sin ir más lejos), y llamarlo acá adentro
+        # impondría un orden entre los dos locks sin ninguna necesidad.
+        remember = self._results is not None and (
+            remember_when is None or remember_when(value))
+
+        with self._lock:
+            callbacks = self._waiting.pop(key, [])
+            if remember:
+                self._results[key] = value
+
+        for cb in callbacks:
+            try:
+                cb(value)
+            except Exception:
+                # Una fila que ya no existe cuando llega su resultado no
+                # puede llevarse puestos a los demás que esperan lo mismo.
+                pass
+
+    def in_flight(self) -> int:
+        """Cuántas claves distintas se están resolviendo ahora mismo."""
+        with self._lock:
+            return len(self._waiting)
+
+    def forget(self) -> None:
+        """Vacía los pedidos en curso y los resultados recordados.
+
+        Para las pruebas: estos registries son globales al proceso, así
+        que sin esto el estado de un test se filtraría al siguiente."""
+        with self._lock:
+            self._waiting.clear()
+            if self._results is not None:
+                self._results.clear()
 
 
 # ============================================================
@@ -2878,6 +3114,24 @@ class DestinationExistsError(FileExistsError):
         self.dest = dest
 
 
+class MultiGameContainerError(RuntimeError):
+    """`game.path` es un .wbfs que contiene más de un juego (detectado con
+    `wit_wrapper.list_wbfs_container`). `identify_file` solo identifica el
+    primero de la lista, así que una copia directa terminaría poniendo el
+    contenedor entero -con todos los juegos que tenga adentro- en el
+    destino de un solo juego (wbfs/<ID6>/<ID6>.wbfs), algo que los USB
+    Loaders no van a reconocer como válido. Se aborta en vez de adivinar
+    cuál de los juegos del contenedor es el que se quiso transferir."""
+
+    def __init__(self, path: Path, contenido: list["wit_wrapper.DiscInfo"]):
+        ids = ", ".join(juego.game_id for juego in contenido)
+        super().__init__(
+            f"{path} es un WBFS multi-juego ({ids}); no se puede copiar "
+            "directo a un destino de un solo juego.")
+        self.path = path
+        self.contenido = contenido
+
+
 def wbfs_dest_path(game: Game, drive_root: Path) -> Path:
     """Ruta final que va a ocupar `game` dentro de `drive_root`, en la
     estructura 'wbfs/<ID6>/<ID6>.wbfs' que reconocen los USB Loaders.
@@ -3309,6 +3563,11 @@ def send_to_wbfs_drive(
     puede necesitar dividir el archivo, se delega en `wit`, que es quien
     sabe empaquetar (y, si hace falta, partir) el WBFS correctamente.
 
+    Antes de la copia directa de un WBFS se chequea, vía
+    `wit_wrapper.list_wbfs_container`, que el contenedor tenga un solo
+    juego: si tiene más, levanta `MultiGameContainerError` en vez de
+    copiar el contenedor entero al destino de un solo juego.
+
     Si `game.console == "gc"` el destino es el que arma `gc_dest_path`
     (estructura de Nintendont) y SIEMPRE se copia directo con
     `_copy_with_progress`: Nintendont lee ISO y CISO de GameCube tal cual,
@@ -3362,6 +3621,19 @@ def send_to_wbfs_drive(
     # dividir (si hiciera falta dividir, una copia plana no puede hacerlo:
     # hay que pasar por `wit COPY --split`).
     if game.fmt.upper() == "WBFS" and not (split and game.size_bytes >= _FAT32_SIZE_LIMIT_BYTES):
+        # `identify_file` solo mira el primer juego de un .wbfs (ver
+        # `wit_wrapper._find_id6_line`); si el contenedor tiene más de
+        # uno, copiarlo tal cual al destino de un solo juego produce un
+        # WBFS que ningún USB Loader va a reconocer como válido. Se
+        # verifica acá, justo antes del atajo de copia directa, en vez de
+        # confiar en que nadie mande un contenedor así -si `wit` no está
+        # disponible no hay forma de chequear esto, igual que `identify_file`
+        # tampoco podría haber identificado bien ese archivo.
+        if wit_wrapper.is_available(wit_binary):
+            contenido = wit_wrapper.list_wbfs_container(game.path, wit_binary)
+            if len(contenido) > 1:
+                raise MultiGameContainerError(game.path, contenido)
+
         # SIEMPRE por `_copy_with_progress`, aunque no haya progreso ni
         # cancelación que reportar: es el único camino que escribe en un
         # temporal y recién al final lo mueve encima del destino. La rama
@@ -4281,17 +4553,16 @@ tarjeta/USB (SD:/apps/<carpeta>/boot.dol + meta.xml + icon.png).
 from __future__ import annotations
 
 import json
-import os
-import threading
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Optional
 
 from . import config
+from .fsutil import PNG_MAGIC, atomic_target
+from .inflight import InflightRegistry
 
 OSC_API_BASE = "https://hbb1.oscwii.org"
 OSC_CONTENTS_URL = f"{OSC_API_BASE}/api/v3/contents"
@@ -4550,9 +4821,12 @@ def list_apps() -> AppListResult:
 # disparar otro. `on_done` corre en el hilo del pool: quien toque widgets
 # de GTK adentro tiene que reenviarlo con `GLib.idle_add` (eso lo hace la
 # UI del Paso 3, no este módulo).
-_list_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="oscwii-list")
-_list_inflight: list = []
-_list_lock = threading.Lock()
+# El catálogo es uno solo, así que este registry tiene una única clave
+# (`_LIST_KEY`): o hay un pedido en curso o no lo hay. Es el caso
+# degenerado del mismo patrón que usan los íconos de acá abajo y las
+# carátulas/metadata de `gametdb`.
+_list_jobs = InflightRegistry(1, "oscwii-list")
+_LIST_KEY = "contents"
 
 AppListCallback = Callable[[AppListResult], None]
 
@@ -4561,28 +4835,15 @@ def fetch_apps_async(on_done: Optional[AppListCallback] = None) -> None:
     """Pide la lista de apps y llama a `on_done(resultado)` al terminar."""
     if on_done is None:
         return
-    with _list_lock:
-        _list_inflight.append(on_done)
-        if len(_list_inflight) > 1:
-            return
-    _list_executor.submit(_run_list_job)
+    _list_jobs.submit(_LIST_KEY, list_apps, on_done,
+                      on_error=_list_error_result)
 
 
-def _run_list_job() -> None:
-    try:
-        result = list_apps()
-    except Exception as e:  # noqa: BLE001
-        result = AppListResult(status=FetchStatus.ERROR, apps=(), error=str(e))
-    with _list_lock:
-        callbacks = list(_list_inflight)
-        _list_inflight.clear()
-    for cb in callbacks:
-        try:
-            cb(result)
-        except Exception:
-            # Un callback que falla (p. ej. una vista que ya se cerró) no
-            # puede llevarse puestos a los demás.
-            pass
+def _list_error_result(exc: BaseException) -> AppListResult:
+    """Un fallo inesperado de `list_apps` (que ya captura todo lo previsto
+    por su cuenta) igual tiene que llegar a la interfaz como un resultado
+    y no como una excepción perdida en un hilo del pool."""
+    return AppListResult(status=FetchStatus.ERROR, apps=(), error=str(exc))
 
 
 # --- Íconos de cada app (Paso 3: la tienda los muestra en cada tarjeta) --
@@ -4593,7 +4854,6 @@ def _run_list_job() -> None:
 # termina de cargar cada uno, igual que hace `game_row.build_cover_widget`
 # con las carátulas de GameTDB.
 ICONS_CACHE_DIRNAME = "oscwii_icons"
-PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
 
 def icons_cache_dir() -> Path:
@@ -4650,15 +4910,10 @@ def get_icon_path(app: HomebrewApp, force: bool = False) -> Optional[Path]:
     if not _looks_like_png(data):
         return None
 
-    tmp = cache_path.with_name(f".{cache_path.name}.parcial-{os.getpid()}")
     try:
-        tmp.write_bytes(data)
-        os.replace(tmp, cache_path)
+        with atomic_target(cache_path) as tmp:
+            tmp.write_bytes(data)
     except OSError:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
         return None
     return cache_path
 
@@ -4669,10 +4924,7 @@ def get_icon_path(app: HomebrewApp, force: bool = False) -> Optional[Path]:
 # cientos de tarjetas pidiendo su ícono a la vez- se cuelgan del que ya
 # está en vuelo en vez de disparar una descarga por tarjeta.
 _ICON_DOWNLOAD_WORKERS = 6
-_icon_executor = ThreadPoolExecutor(
-    max_workers=_ICON_DOWNLOAD_WORKERS, thread_name_prefix="oscwii-icon")
-_icon_inflight: dict = {}
-_icon_lock = threading.Lock()
+_icon_jobs = InflightRegistry(_ICON_DOWNLOAD_WORKERS, "oscwii-icon")
 
 IconCallback = Callable[[Optional[Path]], None]
 
@@ -4695,28 +4947,7 @@ def fetch_icon_async(app: HomebrewApp, on_done: Optional[IconCallback] = None) -
         on_done(cached)
         return
 
-    with _icon_lock:
-        waiting = _icon_inflight.get(app.slug)
-        if waiting is not None:
-            waiting.append(on_done)
-            return
-        _icon_inflight[app.slug] = [on_done]
-
-    _icon_executor.submit(_run_icon_job, app)
-
-
-def _run_icon_job(app: HomebrewApp) -> None:
-    try:
-        path = get_icon_path(app)
-    except Exception:
-        path = None
-    with _icon_lock:
-        callbacks = _icon_inflight.pop(app.slug, [])
-    for cb in callbacks:
-        try:
-            cb(path)
-        except Exception:
-            pass
+    _icon_jobs.submit(app.slug, lambda: get_icon_path(app), on_done)
 
 
 # ============================================================
@@ -4763,7 +4994,6 @@ como ya hace `queue_manager.TransferQueue` para las transferencias.
 from __future__ import annotations
 
 import hashlib
-import os
 import shutil
 import stat
 import tempfile
@@ -4776,7 +5006,8 @@ from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
 
-from . import library
+from . import drives, library
+from .fsutil import atomic_target
 from .oscwii_client import HomebrewApp
 
 REQUEST_TIMEOUT = 20
@@ -4811,6 +5042,7 @@ class InstallStatus(Enum):
     HASH_MISMATCH = "hash_mismatch"
     BAD_ZIP = "bad_zip"
     UNSAFE_ZIP = "unsafe_zip"
+    UNSAFE_DEST_ROOT = "unsafe_dest_root"
     NO_SPACE = "no_space"
     IO_ERROR = "io_error"
     CANCELLED = "cancelled"
@@ -5031,18 +5263,22 @@ def _validate_zip(zip_path: Path, dest_root: Path) -> tuple:
 def _extract_member(zf: zipfile.ZipFile, info: zipfile.ZipInfo,
                     dest_root: Path) -> Path:
     """Copia UNA entrada ya validada a su destino final, de forma atómica
-    (temporal + `os.replace`, igual que `gametdb._store_cover`). Nunca usa
-    `ZipFile.extract`: eso resolvería la ruta interna por su cuenta, y acá
-    ya se decidió a mano exactamente dónde tiene que caer cada archivo.
-    Copia bytes nomás -nunca cambia permisos de ejecución, nunca corre
-    nada- así que el resultado es siempre un archivo de datos, jamás un
-    programa en marcha."""
+    (`fsutil.atomic_target`, el mismo helper que usa
+    `gametdb._store_cover`). Nunca usa `ZipFile.extract`: eso resolvería la
+    ruta interna por su cuenta, y acá ya se decidió a mano exactamente
+    dónde tiene que caer cada archivo. Copia bytes nomás -nunca cambia
+    permisos de ejecución, nunca corre nada- así que el resultado es
+    siempre un archivo de datos, jamás un programa en marcha.
+
+    Si la copia se corta a mitad (unidad desconectada, disco lleno), el
+    temporal se borra antes de propagar el error: mientras esta función
+    armaba el temporal a mano se olvidaba de eso, y una instalación
+    fallida dejaba un `.boot.dol.parcial-<pid>` tirado en la unidad del
+    usuario para siempre."""
     target = dest_root / info.filename
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(f".{target.name}.parcial-{os.getpid()}")
-    with zf.open(info) as src, tmp.open("wb") as dst:
-        shutil.copyfileobj(src, dst)
-    os.replace(tmp, target)
+    with atomic_target(target, mkparents=True) as tmp:
+        with zf.open(info) as src, tmp.open("wb") as dst:
+            shutil.copyfileobj(src, dst)
     return target
 
 
@@ -5056,10 +5292,12 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
 
     `dest_root` es la raíz de la unidad de destino (la USB/SD ya
     preparada, o cualquier carpeta que el usuario haya confirmado): esta
-    función crea `dest_root/apps` si no existe -para fallar rápido si el
-    destino no es escribible, antes de gastar tiempo en la descarga-,
-    pero nunca escribe fuera de las carpetas permitidas (ver el
-    comentario del módulo).
+    función rechaza `dest_root` de entrada si es una ruta crítica del
+    sistema operativo (`drives.is_critical_system_path`, mismo criterio
+    que el BLINDAJE 4 de Modo Fábrica), crea `dest_root/apps` si no
+    existe -para fallar rápido si el destino no es escribible, antes de
+    gastar tiempo en la descarga-, y nunca escribe fuera de las carpetas
+    permitidas (ver el comentario del módulo).
 
     Nunca lanza: cualquier fallo -de red, de integridad, de espacio, de
     E/S- vuelve como un `InstallResult` con el `status` que corresponda,
@@ -5067,6 +5305,19 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
     revisa entre cada bloque descargado y entre cada archivo extraído."""
     try:
         dest_root = Path(dest_root)
+
+        # Defensa en profundidad: hoy la UI (Homebrew Store) solo deja
+        # elegir unidades removibles o una carpeta confirmada a mano, así
+        # que este caso no debería poder darse en la práctica. Pero esta
+        # función no tiene por qué confiar en eso -mismo espíritu que
+        # `drives.check_no_critical_mounts` para Modo Fábrica- por si el
+        # día de mañana se llama desde otro lugar sin ese filtro.
+        if drives.is_critical_system_path(dest_root):
+            return InstallResult(
+                InstallStatus.UNSAFE_DEST_ROOT, app.slug,
+                f"{dest_root} es una ruta crítica del sistema operativo, "
+                "se rechaza como destino de instalación")
+
         try:
             (dest_root / "apps").mkdir(parents=True, exist_ok=True)
         except OSError as e:
@@ -6746,6 +6997,7 @@ _INSTALL_STATUS_LABELS = {
     InstallStatus.HASH_MISMATCH: _("El archivo no coincide con lo esperado"),
     InstallStatus.BAD_ZIP: _("El archivo descargado está dañado"),
     InstallStatus.UNSAFE_ZIP: _("El paquete no es seguro para instalar"),
+    InstallStatus.UNSAFE_DEST_ROOT: _("El destino elegido no es válido"),
     InstallStatus.NO_SPACE: _("No hay espacio suficiente en el destino"),
     InstallStatus.IO_ERROR: _("Error al escribir en el destino"),
 }
@@ -11952,6 +12204,93 @@ def list_wbfs_container(path: Path, binary: str = "wit") -> list[DiscInfo]:
 
 
 # ============================================================
+# FILE: tools/gen_todo.py
+# ============================================================
+#!/usr/bin/env python3
+"""Regenera `todo_el_codigo.txt`: todo el código Python del proyecto
+concatenado en un solo archivo.
+
+Por qué existe
+--------------
+Ese archivo se usa para revisiones cruzadas: pegarle a otra herramienta el
+proyecto entero de una, sin que haya que ir archivo por archivo. Hasta
+ahora se armaba a mano, y eso tuvo dos consecuencias que este script
+elimina: quedaba desactualizado sin que se notara (le llegaron a faltar
+archivos enteros que ya existían en el repo), y se generaba ANTES de los
+últimos retoques del commit al que acompañaba, así que el txt commiteado
+no coincidía con el código de ese mismo commit.
+
+Uso
+---
+    python3 tools/gen_todo.py
+
+Conviene correrlo como último paso antes de commitear, justo por lo de
+arriba.
+
+Formato
+-------
+Es el que ya tenía el archivo, reproducido tal cual para que el diff entre
+una generación y la siguiente muestre solo los cambios de código de
+verdad:
+
+    # ============================================================
+    # FILE: <ruta relativa a la raíz del repo>
+    # ============================================================
+    <contenido del archivo, tal cual>
+
+Los bloques van separados por dos líneas en blanco, y el archivo termina
+con un único salto de línea.
+
+Qué incluye
+-----------
+Todos los `.py` de `wiibackup_manager/`, `tools/` y `tests/` -en ese
+orden, que no es alfabético: primero la app, después las herramientas y al
+final las pruebas-. Dentro de cada sección el orden es alfabético por ruta
+relativa como texto, que es lo que deja `widgets/...` entre `trash.py` y
+`window.py`. Se saltea `__pycache__`; los archivos que no son `.py` (como
+`update-translations.sh`) no entran.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+RAIZ = Path(__file__).resolve().parent.parent
+SECCIONES = ("wiibackup_manager", "tools", "tests")
+REGLA = "# " + "=" * 60
+SALIDA = "todo_el_codigo.txt"
+
+
+def archivos() -> list:
+    """Los .py a incluir, en el orden en que van al archivo."""
+    encontrados = []
+    for seccion in SECCIONES:
+        rutas = [p for p in (RAIZ / seccion).rglob("*.py")
+                 if "__pycache__" not in p.parts]
+        encontrados += sorted(rutas, key=lambda p: str(p.relative_to(RAIZ)))
+    return encontrados
+
+
+def main() -> None:
+    bloques = []
+    for ruta in archivos():
+        contenido = ruta.read_text(encoding="utf-8").rstrip("\n")
+        cabecera = f"{REGLA}\n# FILE: {ruta.relative_to(RAIZ)}\n{REGLA}"
+        # Un archivo vacío (hoy, `widgets/__init__.py`) no aporta ninguna
+        # línea de contenido: sin este caso quedarían tres líneas en
+        # blanco antes del bloque siguiente en vez de dos.
+        bloques.append(f"{cabecera}\n{contenido}" if contenido else cabecera)
+
+    destino = RAIZ / SALIDA
+    destino.write_text("\n\n\n".join(bloques) + "\n", encoding="utf-8")
+    print(f"{SALIDA}: {len(bloques)} archivos, "
+          f"{destino.stat().st_size // 1024} KB")
+
+
+if __name__ == "__main__":
+    main()
+
+
+# ============================================================
 # FILE: tools/manual_factory_mode_e2e.py
 # ============================================================
 #!/usr/bin/env python3
@@ -13081,6 +13420,1333 @@ def test_format_as_wii_usb_propaga_error_de_mkfs(sys_block, proc_mounts):
 
 
 # ============================================================
+# FILE: tests/test_fsutil.py
+# ============================================================
+"""Pruebas de `fsutil.py`, el módulo compartido de escritura atómica y
+ubicación de datos instalados.
+
+Vale la pena testearlo aparte y no solo a través de sus cuatro usuarios
+(`gametdb._store_cover`, `oscwii_client.get_icon_path`,
+`golden_configs._copy_atomic`, `oscwii_installer._extract_member`):
+ahora el manejo de errores de los cuatro está definido en un solo lugar,
+así que una regresión acá se propaga a todos a la vez. Lo que más importa
+verificar es el contrato de fallo -el destino no se toca y el temporal no
+queda tirado- porque es justamente lo que cada copia hacía distinto (o,
+en el caso del extractor de ZIP, no hacía)."""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import pytest
+
+from wiibackup_manager import fsutil
+
+
+# ======================================================== atomic_target --
+def test_escritura_exitosa_deja_el_contenido(tmp_path):
+    dest = tmp_path / "archivo.bin"
+    with fsutil.atomic_target(dest) as tmp:
+        tmp.write_bytes(b"contenido nuevo")
+    assert dest.read_bytes() == b"contenido nuevo"
+
+
+def test_escritura_exitosa_no_deja_temporales(tmp_path):
+    dest = tmp_path / "archivo.bin"
+    with fsutil.atomic_target(dest) as tmp:
+        tmp.write_bytes(b"x")
+    assert [p.name for p in tmp_path.iterdir()] == ["archivo.bin"]
+
+
+def test_sobreescribe_el_destino_existente(tmp_path):
+    dest = tmp_path / "archivo.bin"
+    dest.write_bytes(b"viejo")
+    with fsutil.atomic_target(dest) as tmp:
+        tmp.write_bytes(b"nuevo")
+    assert dest.read_bytes() == b"nuevo"
+
+
+def test_el_destino_viejo_queda_intacto_si_el_bloque_falla(tmp_path):
+    """Lo que hace que valga la pena el temporal: un fallo a mitad de la
+    escritura no puede dejar al usuario sin el archivo que ya tenía."""
+    dest = tmp_path / "archivo.bin"
+    dest.write_bytes(b"el respaldo bueno")
+
+    with pytest.raises(OSError):
+        with fsutil.atomic_target(dest) as tmp:
+            tmp.write_bytes(b"a medio escribir")
+            raise OSError("unidad desconectada")
+
+    assert dest.read_bytes() == b"el respaldo bueno"
+
+
+def test_el_temporal_se_borra_si_el_bloque_falla(tmp_path):
+    dest = tmp_path / "archivo.bin"
+    with pytest.raises(OSError):
+        with fsutil.atomic_target(dest) as tmp:
+            tmp.write_bytes(b"a medio escribir")
+            raise OSError("unidad desconectada")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_el_destino_no_se_crea_si_el_bloque_falla(tmp_path):
+    dest = tmp_path / "archivo.bin"
+    with pytest.raises(RuntimeError):
+        with fsutil.atomic_target(dest) as tmp:
+            tmp.write_bytes(b"x")
+            raise RuntimeError("cualquier cosa")
+    assert not dest.exists()
+
+
+def test_una_excepcion_que_no_es_oserror_tambien_limpia(tmp_path):
+    """El helper atrapa BaseException, no solo OSError: una cancelación o
+    un error de programación tampoco pueden dejar basura en la unidad."""
+    dest = tmp_path / "archivo.bin"
+    with pytest.raises(KeyboardInterrupt):
+        with fsutil.atomic_target(dest) as tmp:
+            tmp.write_bytes(b"x")
+            raise KeyboardInterrupt()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_si_el_bloque_no_escribe_nada_falla_y_no_deja_rastro(tmp_path):
+    """`os.replace` de un temporal que nunca se creó levanta OSError; lo
+    importante es que no quede a medias ni se cree el destino."""
+    dest = tmp_path / "archivo.bin"
+    with pytest.raises(OSError):
+        with fsutil.atomic_target(dest):
+            pass
+    assert not dest.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_falla_de_replace_borra_el_temporal(tmp_path, monkeypatch):
+    dest = tmp_path / "archivo.bin"
+
+    def boom_replace(src, dst):
+        raise OSError("no se pudo renombrar")
+
+    monkeypatch.setattr(fsutil.os, "replace", boom_replace)
+    with pytest.raises(OSError):
+        with fsutil.atomic_target(dest) as tmp:
+            tmp.write_bytes(b"x")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_una_limpieza_que_falla_no_tapa_el_error_original(tmp_path, monkeypatch):
+    """Si tampoco se puede borrar el temporal, quien llama tiene que
+    seguir viendo el error de verdad y no un error del borrado."""
+    dest = tmp_path / "archivo.bin"
+
+    def boom_unlink(self, *a, **kw):
+        raise OSError("tampoco se puede borrar")
+
+    monkeypatch.setattr(Path, "unlink", boom_unlink)
+
+    with pytest.raises(RuntimeError, match="el error de verdad"):
+        with fsutil.atomic_target(dest) as tmp:
+            tmp.write_bytes(b"x")
+            raise RuntimeError("el error de verdad")
+
+
+def test_el_temporal_es_oculto_y_lleva_el_pid(tmp_path):
+    """Contrato con `tools/manual_queue_e2e.py`, que busca exactamente
+    este patrón de nombre para detectar temporales huérfanos, y con el
+    escaneo de la biblioteca, que ignora los archivos ocultos."""
+    dest = tmp_path / "Juego.iso"
+    visto = {}
+    with fsutil.atomic_target(dest) as tmp:
+        visto["nombre"] = tmp.name
+        visto["carpeta"] = tmp.parent
+        tmp.write_bytes(b"x")
+
+    assert visto["nombre"] == f".Juego.iso.parcial-{os.getpid()}"
+    assert visto["carpeta"] == tmp_path  # hermano del destino, mismo filesystem
+
+
+def test_mkparents_crea_la_carpeta_del_destino(tmp_path):
+    dest = tmp_path / "sub" / "carpeta" / "archivo.bin"
+    with fsutil.atomic_target(dest, mkparents=True) as tmp:
+        tmp.write_bytes(b"x")
+    assert dest.read_bytes() == b"x"
+
+
+def test_sin_mkparents_una_carpeta_inexistente_falla(tmp_path):
+    dest = tmp_path / "no-existe" / "archivo.bin"
+    with pytest.raises(OSError):
+        with fsutil.atomic_target(dest) as tmp:
+            tmp.write_bytes(b"x")
+    assert not dest.exists()
+
+
+def test_acepta_una_ruta_en_texto(tmp_path):
+    dest = tmp_path / "archivo.bin"
+    with fsutil.atomic_target(str(dest)) as tmp:
+        tmp.write_bytes(b"x")
+    assert dest.read_bytes() == b"x"
+
+
+# =================================================== installed_data_dirs --
+def test_el_primer_candidato_es_el_repo_clonado():
+    dirs = fsutil.installed_data_dirs("data/locale", "locale")
+    paquete = Path(fsutil.__file__).resolve().parent
+    assert dirs[0] == paquete.parent / "data" / "locale"
+
+
+def test_no_devuelve_candidatos_repetidos():
+    dirs = fsutil.installed_data_dirs("data/locale", "locale")
+    assert len(dirs) == len(set(dirs))
+
+
+def test_incluye_las_rutas_de_sistema():
+    dirs = fsutil.installed_data_dirs("assets/configs", "wiibackup-manager/configs")
+    assert Path("/usr/share/wiibackup-manager/configs") in dirs
+    assert Path("/usr/local/share/wiibackup-manager/configs") in dirs
+    assert Path.home() / ".local/share/wiibackup-manager/configs" in dirs
+
+
+def test_la_cola_share_se_aplica_a_todos_los_prefijos():
+    dirs = fsutil.installed_data_dirs("data/locale", "locale")
+    # Todos menos el primero (el repo) cuelgan de algún .../share/locale
+    for d in dirs[1:]:
+        assert d.parent.name == "share"
+        assert d.name == "locale"
+
+
+def test_todas_las_rutas_son_absolutas_salvo_lo_que_dependa_del_repo():
+    dirs = fsutil.installed_data_dirs("data/locale", "locale")
+    assert all(d.is_absolute() for d in dirs)
+
+
+def test_instalado_en_site_packages_deduce_el_prefijo(monkeypatch):
+    """La parte sutil de esta función: con `pip install --user`,
+    `sys.prefix` sigue siendo /usr, así que sin deducir el prefijo del
+    propio paquete un catálogo viejo del sistema le ganaría al recién
+    instalado. Corriendo desde el repo clonado esta rama no se ejecuta
+    nunca, así que se simula moviendo el `__file__` del módulo."""
+    monkeypatch.setattr(
+        fsutil, "__file__",
+        "/fake/prefijo/lib/python3.14/site-packages/wiibackup_manager/fsutil.py")
+
+    dirs = fsutil.installed_data_dirs("data/locale", "locale")
+
+    # Va inmediatamente después del repo y ANTES de sys.prefix y del resto.
+    assert dirs[1] == Path("/fake/prefijo/share/locale")
+
+
+def test_instalado_en_dist_packages_tambien_deduce_el_prefijo(monkeypatch):
+    """Debian/Ubuntu usan "dist-packages" donde Fedora usa
+    "site-packages"; las dos tienen que funcionar igual."""
+    monkeypatch.setattr(
+        fsutil, "__file__",
+        "/fake/prefijo/lib/python3/dist-packages/wiibackup_manager/fsutil.py")
+
+    dirs = fsutil.installed_data_dirs("assets/configs", "wiibackup-manager/configs")
+
+    assert dirs[1] == Path("/fake/prefijo/share/wiibackup-manager/configs")
+
+
+# ============================================================
+# FILE: tests/test_gametdb.py
+# ============================================================
+"""Pruebas de `gametdb.py`.
+
+No existía ningún test de este módulo (el 23% de cobertura previo salía
+solo de código a nivel de import). Se prioriza el manejo de errores -
+timeouts, respuestas mal formadas, región no encontrada, caché corrupta,
+XML/ZIP rotos- por sobre el camino feliz, siguiendo el mismo criterio que
+ya usa el resto de la red (`oscwii_client`, `wit_wrapper`): la mayoría de
+los bugs reales de esta app aparecieron en esas rutas, no en el caso
+normal.
+
+Nada de esto toca la red de verdad: se fakea `urllib.request.urlopen`
+directo (mismo patrón "objeto falso" que `make_game`/`iso_bytes` en
+conftest, sin `unittest.mock`), y `config.CACHE_DIR`/`config.COVERS_DIR`
+se aíslan a `tmp_path` en cada test."""
+from __future__ import annotations
+
+import io
+import threading
+import time
+import urllib.error
+import urllib.request
+import xml.etree.ElementTree as ET
+import zipfile
+import zlib
+import struct
+from pathlib import Path
+
+import pytest
+
+from wiibackup_manager import config, gametdb
+
+
+# --------------------------------------------------------------- fixtures --
+@pytest.fixture(autouse=True)
+def _sandbox_gametdb(tmp_path, monkeypatch):
+    """Aísla la caché en disco y el estado en memoria del módulo.
+
+    Sin esto, dos tests que corran en el mismo proceso compartirían
+    `config.CACHE_DIR`/`COVERS_DIR` (fijados una sola vez por `conftest.py`
+    al importar), los registries de pedidos en vuelo y el índice de wiitdb
+    en memoria, que persisten entre tests porque son módulo-nivel."""
+    monkeypatch.setattr(config, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(config, "COVERS_DIR", tmp_path / "cache" / "covers")
+    monkeypatch.setattr(gametdb, "_wiitdb_index", None)
+    monkeypatch.setattr(gametdb, "_wiitdb_failed_at", 0.0)
+    gametdb._cover_jobs.forget()
+    gametdb._extra_jobs.forget()
+    yield
+    gametdb._cover_jobs.forget()
+    gametdb._extra_jobs.forget()
+
+
+# ------------------------------------------------------------- utilidades --
+def _make_png(color=(255, 0, 0)) -> bytes:
+    """PNG de 1x1 válido de verdad (se decodifica con GdkPixbuf), armado a
+    mano para no depender de ningún archivo de fixtures binario."""
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + tag + data
+                + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+
+    sig = b"\x89PNG\r\n\x1a\n"
+    ihdr = chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+    idat = chunk(b"IDAT", zlib.compress(b"\x00" + bytes(color)))
+    iend = chunk(b"IEND", b"")
+    return sig + ihdr + idat + iend
+
+
+class FakeResponse:
+    """Imita el objeto que devuelve `urlopen` dentro de un `with`."""
+
+    def __init__(self, status: int = 200, data: bytes = b""):
+        self.status = status
+        self._data = data
+
+    def read(self) -> bytes:
+        return self._data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _fake_urlopen_sequence(items):
+    """Fake de `urlopen` que devuelve/levanta un ítem por llamada, en orden.
+
+    Un ítem que sea una excepción se levanta; cualquier otra cosa se
+    devuelve tal cual (se espera un `FakeResponse`)."""
+    it = iter(items)
+
+    def _fake(req, timeout=None):
+        item = next(it)
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    return _fake
+
+
+def _esperar(condicion, timeout: float = 5.0) -> bool:
+    """Espera a que `condicion()` sea verdadera.
+
+    Los pedidos asincrónicos se resuelven en un hilo del pool, así que el
+    resultado no llega en el mismo hilo que los pidió."""
+    limite = time.monotonic() + timeout
+    while time.monotonic() < limite:
+        if condicion():
+            return True
+        time.sleep(0.01)
+    return bool(condicion())
+
+
+def _zip_with_member(name: str, data: bytes) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(name, data)
+    return buf.getvalue()
+
+
+def _wiitdb_xml_bytes(games_xml: str) -> bytes:
+    return f"<?xml version='1.0'?><datafile>{games_xml}</datafile>".encode("utf-8")
+
+
+GAME_XML_COMPLETO = """
+<game>
+  <id>RMCP01</id>
+  <locale lang="EN">
+    <title>Mario Kart Wii</title>
+    <synopsis>Race your friends online.</synopsis>
+  </locale>
+  <locale lang="ES">
+    <title>Mario Kart Wii (ES)</title>
+    <synopsis>Corré con tus amigos.
+ \n \nNuevos circuitos.</synopsis>
+  </locale>
+  <locale lang="KO">
+    <synopsis></synopsis>
+  </locale>
+  <genre>Racing</genre>
+  <input players="4">
+    <control type="wheel" required="false"/>
+    <control type="wiimote"/>
+    <control type="WIIMOTE"/>
+  </input>
+  <date year="2008" month="04" day="24"/>
+  <publisher>Nintendo</publisher>
+  <developer>Nintendo EAD</developer>
+</game>
+"""
+
+GAME_XML_VACIO = "<game><id>AAAA01</id></game>"
+
+GAME_XML_SOLO_EN = """
+<game>
+  <id>BBBB01</id>
+  <locale lang="EN">
+    <title>Only English Title</title>
+    <synopsis>English synopsis.</synopsis>
+  </locale>
+</game>
+"""
+
+
+# ============================================================================
+# Bloque A: carátulas
+# ============================================================================
+
+# --------------------------------------------------------- cover_cache_path
+def test_cover_cache_path_sin_sufijo_para_wii():
+    p = gametdb.cover_cache_path("rmcp01", "en", "wii")
+    assert p.name == "RMCP01.EN.png"
+
+
+def test_cover_cache_path_con_sufijo_para_gc():
+    p = gametdb.cover_cache_path("gmse01", "US", "gc")
+    assert p.name == "GMSE01.US.gc.png"
+
+
+def test_cover_cache_path_normaliza_region_con_simbolos():
+    p = gametdb.cover_cache_path("RMCP01", "en-us!", "wii")
+    assert p.name == "RMCP01.ENUS.png"
+
+
+def test_cover_cache_path_region_vacia_usa_el_default():
+    p = gametdb.cover_cache_path("RMCP01", "", "wii")
+    assert p.name == f"RMCP01.{gametdb.DEFAULT_COVER_REGION}.png"
+
+
+def test_cover_cache_path_id_invalido_levanta_value_error():
+    with pytest.raises(ValueError):
+        gametdb.cover_cache_path("???", "EN")
+
+
+# --------------------------------------------------- _decodes_as_image
+def test_decodes_as_image_true_para_png_valido(tmp_path):
+    p = tmp_path / "ok.png"
+    p.write_bytes(_make_png())
+    assert gametdb._decodes_as_image(p)
+
+
+def test_decodes_as_image_false_para_basura(tmp_path):
+    p = tmp_path / "mal.png"
+    p.write_bytes(b"esto no es una imagen")
+    assert not gametdb._decodes_as_image(p)
+
+
+# --------------------------------------------------- _is_valid_cached_cover
+def test_is_valid_cached_cover_true_para_png_completo(tmp_path):
+    p = tmp_path / "completo.png"
+    p.write_bytes(_make_png())
+    assert gametdb._is_valid_cached_cover(p)
+
+
+def test_is_valid_cached_cover_falso_para_archivo_vacio(tmp_path):
+    p = tmp_path / "vacio.png"
+    p.write_bytes(b"")
+    assert not gametdb._is_valid_cached_cover(p)
+
+
+def test_is_valid_cached_cover_falso_para_png_truncado(tmp_path):
+    """Cabecera PNG válida, pero cortado antes del bloque IEND: la
+    descarga interrumpida que este chequeo existe para detectar."""
+    p = tmp_path / "cortado.png"
+    p.write_bytes(gametdb.PNG_MAGIC + b"datos a medio bajar, sin IEND")
+    assert not gametdb._is_valid_cached_cover(p)
+
+
+def test_is_valid_cached_cover_falso_si_no_existe(tmp_path):
+    assert not gametdb._is_valid_cached_cover(tmp_path / "no-existe.png")
+
+
+def test_is_valid_cached_cover_falso_magic_incorrecto_con_tamano_suficiente(tmp_path):
+    """Tamaño de sobra (no es el caso "0 bytes" ni "truncado"), pero los
+    primeros bytes no son la cabecera PNG."""
+    p = tmp_path / "mal-magic.png"
+    p.write_bytes(b"NOPE" + b"x" * 40)
+    assert not gametdb._is_valid_cached_cover(p)
+
+
+# --------------------------------------------------------------- _store_cover
+def test_store_cover_falla_decodificacion_no_deja_nada(tmp_path):
+    cache_path = tmp_path / "RMCP01.EN.png"
+    ok = gametdb._store_cover(cache_path, gametdb.PNG_MAGIC + b"corrupto")
+    assert ok is False
+    assert not cache_path.exists()
+    # tampoco debe quedar el temporal
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_store_cover_falla_escritura_no_deja_nada(tmp_path):
+    """Carpeta padre inexistente: falla `write_bytes` con OSError."""
+    cache_path = tmp_path / "no-existe" / "RMCP01.EN.png"
+    ok = gametdb._store_cover(cache_path, b"cualquier cosa")
+    assert ok is False
+    assert not cache_path.exists()
+
+
+def test_store_cover_exitoso_guarda_el_png(tmp_path):
+    cache_path = tmp_path / "RMCP01.EN.png"
+    png = _make_png()
+    ok = gametdb._store_cover(cache_path, png)
+    assert ok is True
+    assert cache_path.read_bytes() == png
+
+
+def test_store_cover_falla_escritura_y_tambien_falla_la_limpieza(tmp_path, monkeypatch):
+    """Doble falla: ni se puede escribir el temporal ni borrarlo después.
+    No debe propagar la segunda excepción, solo devolver False."""
+    cache_path = tmp_path / "RMCP01.EN.png"
+
+    def boom_write_bytes(self, *a, **kw):
+        raise OSError("disco lleno")
+
+    def boom_unlink(self, *a, **kw):
+        raise OSError("también falla el borrado")
+
+    monkeypatch.setattr(Path, "write_bytes", boom_write_bytes)
+    monkeypatch.setattr(Path, "unlink", boom_unlink)
+
+    assert gametdb._store_cover(cache_path, b"datos") is False
+
+
+# --------------------------------------------------------- _log_cover_fetch_failed
+def test_log_cover_fetch_failed_escribe_a_stderr(capsys):
+    gametdb._log_cover_fetch_failed("RMCP01", "wii", [("EN", "HTTP 500")])
+    captured = capsys.readouterr()
+    assert "RMCP01" in captured.err
+    assert "HTTP 500" in captured.err
+
+
+# --------------------------------------------------------------- get_cover_path
+def test_get_cover_path_id_invalido_no_toca_red(monkeypatch):
+    monkeypatch.setattr(urllib.request, "urlopen",
+                         lambda *a, **kw: (_ for _ in ()).throw(
+                             AssertionError("no debería llamar a la red")))
+    assert gametdb.get_cover_path("??????") is None
+
+
+def test_get_cover_path_todas_las_regiones_404_no_loggea(monkeypatch, capsys):
+    errores = [urllib.error.HTTPError("http://x", 404, "Not Found", None, None)
+               for _ in range(6)]
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen_sequence(errores))
+    assert gametdb.get_cover_path("RMCP01", region="EN") is None
+    assert capsys.readouterr().err == ""
+
+
+def test_get_cover_path_error_no_404_se_loggea(monkeypatch, capsys):
+    secuencia = [urllib.error.HTTPError("http://x", 500, "boom", None, None)]
+    secuencia += [urllib.error.HTTPError("http://x", 404, "Not Found", None, None)
+                  for _ in range(5)]
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen_sequence(secuencia))
+    assert gametdb.get_cover_path("RMCP01", region="EN") is None
+    err = capsys.readouterr().err
+    assert "RMCP01" in err
+    assert "HTTP 500" in err
+
+
+def test_get_cover_path_status_no_200_sin_excepcion(monkeypatch, capsys):
+    """El servidor responde (no hay excepción de red) pero con un status
+    HTTP que no es 200 ni un error levantado por urllib."""
+    secuencia = [FakeResponse(503, b"")]
+    secuencia += [urllib.error.HTTPError("http://x", 404, "Not Found", None, None)
+                  for _ in range(5)]
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen_sequence(secuencia))
+    assert gametdb.get_cover_path("RMCP01", region="EN") is None
+    assert "status HTTP 503" in capsys.readouterr().err
+
+
+def test_get_cover_path_timeout_en_una_region_sigue_con_la_siguiente(monkeypatch):
+    png = _make_png()
+    secuencia = [TimeoutError("se colgó"), FakeResponse(200, png)]
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen_sequence(secuencia))
+    result = gametdb.get_cover_path("RMCP01", region="EN")
+    assert result is not None
+    assert result.read_bytes() == png
+
+
+def test_get_cover_path_sin_red_en_todas_las_regiones(monkeypatch, capsys):
+    errores = [urllib.error.URLError("sin red") for _ in range(6)]
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen_sequence(errores))
+    assert gametdb.get_cover_path("RMCP01", region="EN") is None
+    assert "RMCP01" in capsys.readouterr().err
+
+
+def test_get_cover_path_respuesta_no_es_png(monkeypatch, capsys):
+    secuencia = [FakeResponse(200, b"<html>404 not found</html>")]
+    secuencia += [urllib.error.HTTPError("http://x", 404, "Not Found", None, None)
+                  for _ in range(5)]
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen_sequence(secuencia))
+    assert gametdb.get_cover_path("RMCP01", region="EN") is None
+    assert "no es un PNG" in capsys.readouterr().err
+
+
+def test_get_cover_path_png_descargado_no_se_puede_decodificar(monkeypatch, capsys):
+    secuencia = [FakeResponse(200, gametdb.PNG_MAGIC + b"corrupto")]
+    secuencia += [urllib.error.HTTPError("http://x", 404, "Not Found", None, None)
+                  for _ in range(5)]
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen_sequence(secuencia))
+    assert gametdb.get_cover_path("RMCP01", region="EN") is None
+    assert "decodificar" in capsys.readouterr().err
+
+
+def test_get_cover_path_cache_corrupta_se_borra_y_reintenta(monkeypatch):
+    cache_path = gametdb.cover_cache_path("RMCP01", "EN", "wii")
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_bytes(b"")  # 0 bytes: caché corrupta
+
+    png = _make_png()
+    monkeypatch.setattr(urllib.request, "urlopen",
+                         _fake_urlopen_sequence([FakeResponse(200, png)]))
+    result = gametdb.get_cover_path("RMCP01", region="EN")
+    assert result == cache_path
+    assert cache_path.read_bytes() == png
+
+
+def test_get_cover_path_force_ignora_cache_valida(monkeypatch):
+    cache_path = gametdb.cover_cache_path("RMCP01", "EN", "wii")
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    original = _make_png(color=(255, 0, 0))
+    cache_path.write_bytes(original)
+
+    nueva = _make_png(color=(0, 255, 0))
+    llamadas = []
+
+    def fake_urlopen(req, timeout=None):
+        llamadas.append(req)
+        return FakeResponse(200, nueva)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    result = gametdb.get_cover_path("RMCP01", region="EN", force=True)
+    assert len(llamadas) == 1
+    assert result.read_bytes() == nueva
+
+
+def test_get_cover_path_unlink_de_cache_corrupta_falla_pero_sigue(monkeypatch):
+    """Si borrar la caché corrupta falla (permisos), la descarga sigue su
+    curso igual: no debe propagar la excepción ni frenar el intento."""
+    cache_path = gametdb.cover_cache_path("RMCP01", "EN", "wii")
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_bytes(b"")  # corrupta
+
+    original_unlink = Path.unlink
+
+    def flaky_unlink(self, *a, **kw):
+        if self == cache_path:
+            raise OSError("permiso denegado")
+        return original_unlink(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "unlink", flaky_unlink)
+
+    png = _make_png()
+    monkeypatch.setattr(urllib.request, "urlopen",
+                         _fake_urlopen_sequence([FakeResponse(200, png)]))
+    result = gametdb.get_cover_path("RMCP01", region="EN")
+    assert result == cache_path
+    assert cache_path.read_bytes() == png
+
+
+def test_get_cover_path_usa_cache_valida_sin_pedir_red(monkeypatch):
+    monkeypatch.setattr(urllib.request, "urlopen",
+                         lambda *a, **kw: (_ for _ in ()).throw(
+                             AssertionError("no debería llamar a la red")))
+    cache_path = gametdb.cover_cache_path("RMCP01", "EN", "wii")
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_bytes(_make_png())
+
+    result = gametdb.get_cover_path("RMCP01", region="EN")
+    assert result == cache_path
+
+
+def test_get_cover_path_descarga_exitosa_primera_region(monkeypatch):
+    png = _make_png()
+    monkeypatch.setattr(urllib.request, "urlopen",
+                         _fake_urlopen_sequence([FakeResponse(200, png)]))
+    result = gametdb.get_cover_path("RMCP01", region="EN", console="wii")
+    assert result is not None
+    assert result.read_bytes() == png
+
+
+# --------------------------------------------------------- fetch_cover_async
+def test_fetch_cover_async_id_invalido_no_toca_red(monkeypatch):
+    monkeypatch.setattr(gametdb, "get_cover_path",
+                         lambda *a, **kw: (_ for _ in ()).throw(
+                             AssertionError("no debería llamar a get_cover_path")))
+    resultados = []
+    gametdb.fetch_cover_async("??????", on_done=resultados.append)
+    assert resultados == [None]
+    assert gametdb.covers_in_flight() == 0
+
+
+def test_fetch_cover_async_sin_on_done_no_hace_nada(monkeypatch):
+    monkeypatch.setattr(gametdb, "get_cover_path",
+                         lambda *a, **kw: (_ for _ in ()).throw(
+                             AssertionError("no debería llegar a descargar")))
+    gametdb.fetch_cover_async("RMCP01", region="EN", on_done=None)
+    assert gametdb.covers_in_flight() == 0
+
+
+def test_fetch_cover_async_usa_cache_sin_pasar_por_el_executor(monkeypatch):
+    monkeypatch.setattr(gametdb, "get_cover_path",
+                         lambda *a, **kw: (_ for _ in ()).throw(
+                             AssertionError("no debería descargar de nuevo")))
+    cache_path = gametdb.cover_cache_path("RMCP01", "EN", "wii")
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_bytes(_make_png())
+
+    resultados = []
+    gametdb.fetch_cover_async("RMCP01", region="EN", on_done=resultados.append,
+                               console="wii")
+    assert resultados == [cache_path]
+    assert gametdb.covers_in_flight() == 0
+
+
+def test_covers_in_flight_cero_sin_descargas():
+    assert gametdb.covers_in_flight() == 0
+
+
+def test_fetch_cover_async_dedupe_pedidos_concurrentes(monkeypatch, tmp_path):
+    """Dos pedidos de la misma carátula mientras la primera descarga sigue
+    en curso: el segundo se cuelga del primero, y `get_cover_path` se llama
+    una sola vez de verdad."""
+    llamadas = []
+    iniciado = threading.Event()
+    liberar = threading.Event()
+    resultado_path = tmp_path / "resultado.png"
+
+    def fake_get_cover_path(game_id, region, force=False, console="wii"):
+        llamadas.append((game_id, region, console))
+        iniciado.set()
+        assert liberar.wait(timeout=5), "el test no liberó a tiempo"
+        return resultado_path
+
+    monkeypatch.setattr(gametdb, "get_cover_path", fake_get_cover_path)
+
+    resultados = []
+    lock = threading.Lock()
+
+    def hacer_callback(nombre):
+        def _cb(path):
+            with lock:
+                resultados.append((nombre, path))
+        return _cb
+
+    gametdb.fetch_cover_async("RMCP01", region="EN", on_done=hacer_callback("uno"),
+                               console="wii")
+    assert iniciado.wait(timeout=5)
+    assert gametdb.covers_in_flight() == 1
+
+    gametdb.fetch_cover_async("RMCP01", region="EN", on_done=hacer_callback("dos"),
+                               console="wii")
+    liberar.set()
+
+    deadline = time.monotonic() + 5
+    while gametdb.covers_in_flight() > 0 and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert len(llamadas) == 1
+    assert len(resultados) == 2
+    assert resultados[0][1] == resultado_path
+    assert resultados[1][1] == resultado_path
+
+
+def test_fetch_cover_async_excepcion_inesperada_da_none(monkeypatch):
+    """Un error de programación en `get_cover_path` (no una excepción de
+    red ya contemplada) no puede dejar el worker colgado ni el callback
+    sin llamar: se resuelve como "no hay carátula".
+
+    Va por la API pública y no por las internas del registry: lo que se
+    verifica acá es el cableado de gametdb (que no pasa ningún `on_error`,
+    o sea que le corresponde el None por defecto). El comportamiento
+    genérico del registry se prueba en `test_inflight.py`."""
+    def fake_get_cover_path(*a, **kw):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(gametdb, "get_cover_path", fake_get_cover_path)
+    resultados = []
+
+    gametdb.fetch_cover_async("RMCP01", region="EN", on_done=resultados.append)
+
+    assert _esperar(lambda: len(resultados) == 1)
+    assert resultados == [None]
+    assert gametdb.covers_in_flight() == 0
+
+
+# ============================================================================
+# Bloque B: metadata extendida (wiitdb.xml)
+# ============================================================================
+
+# ------------------------------------------------------------ language_for_region
+def test_language_for_region_us_mapea_a_en():
+    assert gametdb.language_for_region("us") == "EN"
+
+
+def test_language_for_region_otros_se_mantienen():
+    assert gametdb.language_for_region("es") == "ES"
+
+
+def test_language_for_region_vacia_usa_default():
+    assert gametdb.language_for_region("") == gametdb.DEFAULT_LANGUAGE
+
+
+# ------------------------------------------------------------------ GameControl
+def test_game_control_label_conocido():
+    c = gametdb.GameControl(type="wheel", required=True)
+    assert c.label == gametdb.CONTROL_LABELS["wheel"]
+    assert c.describe() == c.label  # obligatorio: sin aclaración
+
+
+def test_game_control_label_desconocido_se_muestra_crudo():
+    c = gametdb.GameControl(type="futuristic_gizmo", required=False)
+    assert c.label == "futuristic_gizmo"
+    assert c.describe() == "futuristic_gizmo (opcional)"
+
+
+# --------------------------------------------------------------- GameExtraInfo
+def test_game_extra_info_is_empty_true_sin_datos():
+    assert gametdb.GameExtraInfo().is_empty()
+
+
+def test_game_extra_info_is_empty_false_con_un_dato():
+    assert not gametdb.GameExtraInfo(genre="Racing").is_empty()
+
+
+def test_title_to_show_next_to_prioriza_original():
+    info = gametdb.GameExtraInfo(original_title="Mario Kart Wii",
+                                  localized_title="Mario Kart Wii (ES)")
+    assert info.title_to_show_next_to("Otro título") == (
+        gametdb._("Título original"), "Mario Kart Wii")
+
+
+def test_title_to_show_next_to_cae_a_localizado_si_original_coincide():
+    info = gametdb.GameExtraInfo(original_title="Mario Kart Wii",
+                                  localized_title="Mario Kart Wii (ES)")
+    resultado = info.title_to_show_next_to("MARIO KART WII!!")
+    assert resultado == (gametdb._("Título traducido"), "Mario Kart Wii (ES)")
+
+
+def test_title_to_show_next_to_none_si_ambos_coinciden():
+    info = gametdb.GameExtraInfo(original_title="Mario Kart Wii",
+                                  localized_title="Mario Kart Wii")
+    assert info.title_to_show_next_to("mario, kart. wii") is None
+
+
+@pytest.mark.parametrize("texto,esperado", [
+    ("Super Smash Bros. Brawl!", "supersmashbrosbrawl"),
+    (None, ""),
+    ("", ""),
+])
+def test_normalize_title(texto, esperado):
+    assert gametdb._normalize_title(texto) == esperado
+
+
+# ------------------------------------------------------------------------ misc
+def test_wiitdb_cache_path():
+    assert gametdb.wiitdb_cache_path() == config.CACHE_DIR / "wiitdb.xml"
+
+
+def test_wiitdb_index_available_refleja_estado(monkeypatch):
+    monkeypatch.setattr(gametdb, "_wiitdb_index", None)
+    assert gametdb.wiitdb_index_available() is False
+    monkeypatch.setattr(gametdb, "_wiitdb_index", {})
+    assert gametdb.wiitdb_index_available() is False
+    monkeypatch.setattr(gametdb, "_wiitdb_index", {"RMCP01": object()})
+    assert gametdb.wiitdb_index_available() is True
+
+
+def test_extra_info_in_flight_cero_sin_consultas():
+    assert gametdb.extra_info_in_flight() == 0
+
+
+# ------------------------------------------------------------ _xml_is_well_formed
+def test_xml_is_well_formed_true_para_xml_valido():
+    assert gametdb._xml_is_well_formed(b"<a><b/></a>")
+
+
+def test_xml_is_well_formed_false_para_xml_cortado():
+    assert not gametdb._xml_is_well_formed(b"<a><b>")
+
+
+# ------------------------------------------------------------------ _download_wiitdb
+def test_download_wiitdb_status_no_200(monkeypatch):
+    monkeypatch.setattr(urllib.request, "urlopen",
+                         lambda *a, **kw: FakeResponse(503, b""))
+    assert gametdb._download_wiitdb() is None
+
+
+@pytest.mark.parametrize("excepcion", [
+    urllib.error.URLError("sin red"),
+    urllib.error.HTTPError("http://x", 500, "boom", None, None),
+    TimeoutError(),
+    OSError("disco desconectado"),
+])
+def test_download_wiitdb_error_de_red(monkeypatch, excepcion):
+    monkeypatch.setattr(urllib.request, "urlopen",
+                         lambda *a, **kw: (_ for _ in ()).throw(excepcion))
+    assert gametdb._download_wiitdb() is None
+
+
+def test_download_wiitdb_zip_corrupto(monkeypatch):
+    monkeypatch.setattr(urllib.request, "urlopen",
+                         lambda *a, **kw: FakeResponse(200, b"no soy un zip"))
+    assert gametdb._download_wiitdb() is None
+
+
+def test_download_wiitdb_sin_el_miembro_esperado(monkeypatch):
+    data = _zip_with_member("otro.xml", b"<datafile/>")
+    monkeypatch.setattr(urllib.request, "urlopen",
+                         lambda *a, **kw: FakeResponse(200, data))
+    assert gametdb._download_wiitdb() is None
+
+
+def test_download_wiitdb_excede_tamano_maximo(monkeypatch):
+    data = _zip_with_member(gametdb.WIITDB_MEMBER, b"<datafile/>")
+    monkeypatch.setattr(urllib.request, "urlopen",
+                         lambda *a, **kw: FakeResponse(200, data))
+
+    class FakeInfo:
+        file_size = gametdb.WIITDB_MAX_UNCOMPRESSED + 1
+
+    monkeypatch.setattr(zipfile.ZipFile, "getinfo", lambda self, name: FakeInfo())
+    assert gametdb._download_wiitdb() is None
+
+
+def test_download_wiitdb_xml_mal_formado(monkeypatch):
+    data = _zip_with_member(gametdb.WIITDB_MEMBER, b"<datafile><game>")
+    monkeypatch.setattr(urllib.request, "urlopen",
+                         lambda *a, **kw: FakeResponse(200, data))
+    assert gametdb._download_wiitdb() is None
+    assert not gametdb.wiitdb_cache_path().exists()
+
+
+def test_download_wiitdb_falla_escritura_temporal(monkeypatch):
+    xml = _wiitdb_xml_bytes(GAME_XML_VACIO)
+    data = _zip_with_member(gametdb.WIITDB_MEMBER, xml)
+    monkeypatch.setattr(urllib.request, "urlopen",
+                         lambda *a, **kw: FakeResponse(200, data))
+
+    def boom_write_bytes(self, *a, **kw):
+        raise OSError("disco lleno")
+
+    monkeypatch.setattr(Path, "write_bytes", boom_write_bytes)
+    assert gametdb._download_wiitdb() is None
+
+
+def test_download_wiitdb_falla_escritura_y_tambien_falla_la_limpieza(monkeypatch):
+    xml = _wiitdb_xml_bytes(GAME_XML_VACIO)
+    data = _zip_with_member(gametdb.WIITDB_MEMBER, xml)
+    monkeypatch.setattr(urllib.request, "urlopen",
+                         lambda *a, **kw: FakeResponse(200, data))
+
+    def boom_write_bytes(self, *a, **kw):
+        raise OSError("disco lleno")
+
+    def boom_unlink(self, *a, **kw):
+        raise OSError("también falla el borrado")
+
+    monkeypatch.setattr(Path, "write_bytes", boom_write_bytes)
+    monkeypatch.setattr(Path, "unlink", boom_unlink)
+    assert gametdb._download_wiitdb() is None
+
+
+def test_download_wiitdb_force_con_unlink_que_falla(monkeypatch):
+    path = gametdb.wiitdb_cache_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"<datafile/>")
+
+    def boom_unlink(self, *a, **kw):
+        raise OSError("permiso denegado")
+
+    monkeypatch.setattr(Path, "unlink", boom_unlink)
+    assert gametdb._download_wiitdb(force=True) is None
+
+
+def test_download_wiitdb_usa_la_cache_sin_forzar(monkeypatch):
+    path = gametdb.wiitdb_cache_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"<datafile/>")
+    monkeypatch.setattr(urllib.request, "urlopen",
+                         lambda *a, **kw: (_ for _ in ()).throw(
+                             AssertionError("no debería llamar a la red")))
+    assert gametdb._download_wiitdb() == path
+
+
+def test_download_wiitdb_exitoso_deja_el_xml_en_cache(monkeypatch):
+    xml = _wiitdb_xml_bytes(GAME_XML_VACIO)
+    data = _zip_with_member(gametdb.WIITDB_MEMBER, xml)
+    monkeypatch.setattr(urllib.request, "urlopen",
+                         lambda *a, **kw: FakeResponse(200, data))
+    result = gametdb._download_wiitdb()
+    assert result == gametdb.wiitdb_cache_path()
+    assert result.read_bytes() == xml
+
+
+# ----------------------------------------------------------------- _build_index
+def test_build_index_xml_malformado(tmp_path):
+    p = tmp_path / "roto.xml"
+    p.write_bytes(b"<datafile><game>")
+    assert gametdb._build_index(p) is None
+
+
+def test_build_index_archivo_inexistente(tmp_path):
+    assert gametdb._build_index(tmp_path / "no-existe.xml") is None
+
+
+def test_build_index_sin_juegos_da_diccionario_vacio(tmp_path):
+    p = tmp_path / "vacio.xml"
+    p.write_bytes(_wiitdb_xml_bytes(""))
+    assert gametdb._build_index(p) == {}
+
+
+def test_build_index_ignora_game_sin_id(tmp_path):
+    p = tmp_path / "sinid.xml"
+    p.write_bytes(_wiitdb_xml_bytes("<game><genre>Racing</genre></game>"))
+    assert gametdb._build_index(p) == {}
+
+
+def test_build_index_ignora_id_vacio(tmp_path):
+    p = tmp_path / "idvacio.xml"
+    p.write_bytes(_wiitdb_xml_bytes("<game><id></id></game>"))
+    assert gametdb._build_index(p) == {}
+
+
+def test_build_index_arma_el_indice_por_id(tmp_path):
+    p = tmp_path / "dos.xml"
+    p.write_bytes(_wiitdb_xml_bytes(GAME_XML_VACIO + GAME_XML_SOLO_EN))
+    index = gametdb._build_index(p)
+    assert set(index.keys()) == {"AAAA01", "BBBB01"}
+
+
+# ------------------------------------------------------------- _load_wiitdb_index
+def test_load_wiitdb_index_reintenta_una_vez_si_la_cache_no_parsea(monkeypatch):
+    llamadas_download = []
+    resultados_build = iter([None, {"RMCP01": object()}])
+
+    monkeypatch.setattr(gametdb, "_download_wiitdb",
+                         lambda force=False: llamadas_download.append(force)
+                         or Path("fake-path"))
+    monkeypatch.setattr(gametdb, "_build_index",
+                         lambda path: next(resultados_build))
+
+    index = gametdb._load_wiitdb_index()
+    assert list(index.keys()) == ["RMCP01"]
+    assert llamadas_download == [False, True]
+
+
+def test_load_wiitdb_index_dos_intentos_corruptos_da_vacio(monkeypatch):
+    monkeypatch.setattr(gametdb, "_download_wiitdb", lambda force=False: Path("fake"))
+    monkeypatch.setattr(gametdb, "_build_index", lambda path: None)
+    assert gametdb._load_wiitdb_index() == {}
+
+
+def test_load_wiitdb_index_descarga_fallida_no_reintenta_el_parseo(monkeypatch):
+    llamadas_build = []
+    monkeypatch.setattr(gametdb, "_download_wiitdb", lambda force=False: None)
+    monkeypatch.setattr(gametdb, "_build_index",
+                         lambda path: llamadas_build.append(path) or {})
+    assert gametdb._load_wiitdb_index() == {}
+    assert llamadas_build == []
+
+
+# ----------------------------------------------------------- _ensure_wiitdb_index
+def test_ensure_wiitdb_index_no_reintenta_antes_de_tiempo(monkeypatch):
+    llamadas = []
+    monkeypatch.setattr(gametdb, "_load_wiitdb_index",
+                         lambda: llamadas.append(1) or {})
+
+    reloj = [100.0]
+    monkeypatch.setattr(gametdb.time, "monotonic", lambda: reloj[0])
+
+    assert gametdb._ensure_wiitdb_index() == {}
+    assert len(llamadas) == 1
+
+    reloj[0] += 1  # bastante antes de _WIITDB_RETRY_SECONDS
+    assert gametdb._ensure_wiitdb_index() == {}
+    assert len(llamadas) == 1  # no reintentó
+
+    reloj[0] += gametdb._WIITDB_RETRY_SECONDS + 1
+    assert gametdb._ensure_wiitdb_index() == {}
+    assert len(llamadas) == 2  # ahora sí
+
+
+def test_ensure_wiitdb_index_reusa_el_indice_ya_armado(monkeypatch):
+    llamadas = []
+    monkeypatch.setattr(gametdb, "_load_wiitdb_index",
+                         lambda: llamadas.append(1) or {"RMCP01": object()})
+    assert gametdb._ensure_wiitdb_index()
+    assert gametdb._ensure_wiitdb_index()
+    assert len(llamadas) == 1
+
+
+# -------------------------------------------------------------- _locale_texts
+def test_locale_texts_ignora_etiqueta_vacia():
+    xml = (b"<game>"
+           b"<locale lang='KO'><synopsis></synopsis></locale>"
+           b"<locale lang='EN'><synopsis>hi</synopsis></locale>"
+           b"</game>")
+    game_el = ET.fromstring(xml)
+    assert gametdb._locale_texts(game_el, "synopsis") == {"EN": "hi"}
+
+
+# -------------------------------------------------------------- _clean_synopsis
+@pytest.mark.parametrize("texto,esperado", [
+    (None, None),
+    ("", None),
+    ("   ", None),
+    ("Uno\n\n\nDos", "Uno\n\nDos"),
+    ("Line1 \n \nLine2", "Line1\n\nLine2"),
+])
+def test_clean_synopsis(texto, esperado):
+    assert gametdb._clean_synopsis(texto) == esperado
+
+
+# -------------------------------------------------------------- _parse_controls
+def test_parse_controls_ignora_sin_type_dedup_y_required():
+    xml = (b"<game><input players='2'>"
+           b"<control/>"
+           b"<control type='wheel' required='false'/>"
+           b"<control type='WHEEL'/>"
+           b"<control type='wiimote'/>"
+           b"</input></game>")
+    game_el = ET.fromstring(xml)
+    controls = gametdb._parse_controls(game_el)
+    assert [c.type for c in controls] == ["wheel", "wiimote"]
+    assert controls[0].required is False
+    assert controls[1].required is True
+
+
+def test_parse_controls_sin_input_da_vacio():
+    game_el = ET.fromstring(b"<game><id>X</id></game>")
+    assert gametdb._parse_controls(game_el) == ()
+
+
+# --------------------------------------------------------- get_game_extra_info
+def test_get_game_extra_info_id_no_encontrado(monkeypatch):
+    monkeypatch.setattr(gametdb, "_ensure_wiitdb_index", lambda: {})
+    assert gametdb.get_game_extra_info("RMCP01") is None
+
+
+def test_get_game_extra_info_todo_vacio_da_none(monkeypatch):
+    root = ET.fromstring(_wiitdb_xml_bytes(GAME_XML_VACIO))
+    game_el = root.find("game")
+    monkeypatch.setattr(gametdb, "_ensure_wiitdb_index", lambda: {"AAAA01": game_el})
+    assert gametdb.get_game_extra_info("AAAA01") is None
+
+
+def test_get_game_extra_info_cae_a_ingles_solo_en_sinopsis(monkeypatch):
+    """La sinopsis cae al inglés si el idioma pedido no la tiene; el título
+    NO (mostrar el inglés como si fuera "el título en tu idioma" sería
+    engañoso, ver comentario de la función)."""
+    root = ET.fromstring(_wiitdb_xml_bytes(GAME_XML_SOLO_EN))
+    game_el = root.find("game")
+    monkeypatch.setattr(gametdb, "_ensure_wiitdb_index", lambda: {"BBBB01": game_el})
+
+    info = gametdb.get_game_extra_info("BBBB01", language="ES")
+    assert info.synopsis == "English synopsis."
+    assert info.localized_title is None
+    assert info.original_title == "Only English Title"
+
+
+def test_get_game_extra_info_completo(monkeypatch):
+    root = ET.fromstring(_wiitdb_xml_bytes(GAME_XML_COMPLETO))
+    game_el = root.find("game")
+    monkeypatch.setattr(gametdb, "_ensure_wiitdb_index", lambda: {"RMCP01": game_el})
+
+    info = gametdb.get_game_extra_info("RMCP01", language="ES")
+    assert info.genre == "Racing"
+    assert info.players == "4"
+    assert info.release_date == "2008-04-24"
+    assert info.publisher == "Nintendo"
+    assert info.developer == "Nintendo EAD"
+    assert info.original_title == "Mario Kart Wii"
+    assert info.localized_title == "Mario Kart Wii (ES)"
+    assert "Corré con tus amigos" in info.synopsis
+    assert [c.type for c in info.controls] == ["wheel", "wiimote"]
+
+
+# ------------------------------------------------------- fetch_extra_info_async
+def test_fetch_extra_info_async_id_invalido_no_consulta_indice(monkeypatch):
+    monkeypatch.setattr(gametdb, "_ensure_wiitdb_index",
+                         lambda: (_ for _ in ()).throw(
+                             AssertionError("no debería consultar el índice")))
+    resultados = []
+    gametdb.fetch_extra_info_async("??????", on_done=resultados.append)
+    assert resultados == [None]
+
+
+def test_fetch_extra_info_async_sin_on_done_no_hace_nada(monkeypatch):
+    monkeypatch.setattr(gametdb, "_ensure_wiitdb_index",
+                         lambda: (_ for _ in ()).throw(
+                             AssertionError("no debería consultar el índice")))
+    gametdb.fetch_extra_info_async("RMCP01", on_done=None)
+    assert gametdb.extra_info_in_flight() == 0
+
+
+def test_fetch_extra_info_async_usa_resultado_cacheado_sin_recalcular(monkeypatch):
+    """El segundo pedido igual se contesta en el acto y en el hilo que
+    llama, sin volver a consultar el índice ni ocupar el worker."""
+    cached_info = gametdb.GameExtraInfo(genre="Racing")
+    llamadas = []
+    monkeypatch.setattr(gametdb, "get_game_extra_info",
+                         lambda gid, lang: llamadas.append(1) or cached_info)
+    monkeypatch.setattr(gametdb, "wiitdb_index_available", lambda: True)
+
+    primeros = []
+    gametdb.fetch_extra_info_async("RMCP01", language="EN", on_done=primeros.append)
+    assert _esperar(lambda: len(primeros) == 1)
+
+    # Ahora consultar de nuevo sería un error: el resultado ya se recordó.
+    monkeypatch.setattr(gametdb, "get_game_extra_info",
+                         lambda *a, **kw: (_ for _ in ()).throw(
+                             AssertionError("no debería recalcular")))
+    resultados = []
+    gametdb.fetch_extra_info_async("RMCP01", language="EN", on_done=resultados.append)
+
+    assert resultados == [cached_info]
+    assert len(llamadas) == 1
+
+
+def test_fetch_extra_info_async_dedupe_pedidos_concurrentes(monkeypatch):
+    llamadas = []
+    iniciado = threading.Event()
+    liberar = threading.Event()
+
+    def fake_get_extra(game_id, language):
+        llamadas.append((game_id, language))
+        iniciado.set()
+        assert liberar.wait(timeout=5), "el test no liberó a tiempo"
+        return gametdb.GameExtraInfo(genre="Racing")
+
+    monkeypatch.setattr(gametdb, "get_game_extra_info", fake_get_extra)
+    monkeypatch.setattr(gametdb, "wiitdb_index_available", lambda: True)
+
+    resultados = []
+    lock = threading.Lock()
+
+    def hacer_callback(nombre):
+        def _cb(info):
+            with lock:
+                resultados.append((nombre, info))
+        return _cb
+
+    gametdb.fetch_extra_info_async("RMCP01", language="EN",
+                                     on_done=hacer_callback("uno"))
+    assert iniciado.wait(timeout=5)
+    gametdb.fetch_extra_info_async("RMCP01", language="EN",
+                                     on_done=hacer_callback("dos"))
+    liberar.set()
+
+    deadline = time.monotonic() + 5
+    while gametdb.extra_info_in_flight() > 0 and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert len(llamadas) == 1
+    assert len(resultados) == 2
+    assert resultados[0][1] is resultados[1][1]
+
+
+# La regla de "qué resultado vale la pena recordar" es la única lógica de
+# negocio que gametdb le pasa al registry compartido, así que se prueba
+# como lo que es: una función suya, y después su cableado de punta a punta.
+def test_result_is_final_con_info_encontrada(monkeypatch):
+    monkeypatch.setattr(gametdb, "wiitdb_index_available", lambda: False)
+    assert gametdb._extra_result_is_final(gametdb.GameExtraInfo(genre="Racing"))
+
+
+def test_result_is_final_none_con_el_indice_disponible(monkeypatch):
+    """None puede significar "GameTDB no tiene este juego" (definitivo) o
+    "no se pudo bajar el volcado" (temporal). Con el índice disponible, es
+    lo primero: se recuerda."""
+    monkeypatch.setattr(gametdb, "wiitdb_index_available", lambda: True)
+    assert gametdb._extra_result_is_final(None)
+
+
+def test_result_is_final_none_sin_el_indice_disponible(monkeypatch):
+    """Sin índice disponible (sin internet / servidor caído), el None es
+    temporal: NO se recuerda, para poder reintentar cuando vuelva la
+    conexión."""
+    monkeypatch.setattr(gametdb, "wiitdb_index_available", lambda: False)
+    assert not gametdb._extra_result_is_final(None)
+
+
+def test_un_none_definitivo_se_recuerda_y_no_se_vuelve_a_consultar(monkeypatch):
+    """Cableado de punta a punta de la regla anterior: con el índice
+    disponible, el segundo pedido igual se contesta con lo recordado sin
+    volver a consultar."""
+    llamadas = []
+    monkeypatch.setattr(gametdb, "get_game_extra_info",
+                         lambda gid, lang: llamadas.append(1) or None)
+    monkeypatch.setattr(gametdb, "wiitdb_index_available", lambda: True)
+
+    primeros = []
+    gametdb.fetch_extra_info_async("ZZZZ99", language="EN", on_done=primeros.append)
+    assert _esperar(lambda: len(primeros) == 1)
+
+    segundos = []
+    gametdb.fetch_extra_info_async("ZZZZ99", language="EN", on_done=segundos.append)
+
+    assert segundos == [None]      # contestado en el acto, sin pasar por el pool
+    assert len(llamadas) == 1      # no se volvió a consultar
+
+
+def test_un_none_temporal_no_se_recuerda_y_se_reintenta(monkeypatch):
+    """La otra mitad: sin índice disponible el None no se recuerda, así
+    que un pedido posterior vuelve a intentar de verdad."""
+    llamadas = []
+    monkeypatch.setattr(gametdb, "get_game_extra_info",
+                         lambda gid, lang: llamadas.append(1) or None)
+    monkeypatch.setattr(gametdb, "wiitdb_index_available", lambda: False)
+
+    primeros = []
+    gametdb.fetch_extra_info_async("ZZZZ99", language="EN", on_done=primeros.append)
+    assert _esperar(lambda: len(primeros) == 1)
+
+    segundos = []
+    gametdb.fetch_extra_info_async("ZZZZ99", language="EN", on_done=segundos.append)
+    assert _esperar(lambda: len(segundos) == 1)
+
+    assert segundos == [None]
+    assert len(llamadas) == 2      # se reintentó
+
+
+def test_fetch_extra_info_async_excepcion_inesperada_da_none(monkeypatch):
+    def fake_get_extra(gid, lang):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(gametdb, "get_game_extra_info", fake_get_extra)
+    monkeypatch.setattr(gametdb, "wiitdb_index_available", lambda: True)
+    resultados = []
+
+    gametdb.fetch_extra_info_async("RMCP01", language="EN", on_done=resultados.append)
+
+    assert _esperar(lambda: len(resultados) == 1)
+    assert resultados == [None]
+    assert gametdb.extra_info_in_flight() == 0
+
+
+# ============================================================
 # FILE: tests/test_golden_configs.py
 # ============================================================
 """Pruebas de `golden_configs.py`: inyección de configuraciones maestras
@@ -13432,6 +15098,352 @@ def test_no_quedan_cadenas_sin_traducir(po):
 
 
 # ============================================================
+# FILE: tests/test_inflight.py
+# ============================================================
+"""Pruebas de `inflight.py`, el registry compartido de pedidos en vuelo.
+
+Estas pruebas absorben lo que antes se verificaba cuatro veces por vías
+indirectas (hurgando los diccionarios internos de `gametdb` y
+`oscwii_client`): aislamiento de callbacks, excepción del trabajo →
+resultado de respaldo, deduplicación por clave y conteo de pedidos en
+curso. Ahora que esa mecánica vive en un solo lugar, se prueba en un solo
+lugar y más a fondo; lo que queda en cada módulo es su cableado propio
+(qué es una clave suya, qué resultado vale la pena recordar).
+
+Los tests que involucran concurrencia real usan `threading.Event` y no
+`sleep`: bloquean el trabajo hasta que el test decide soltarlo, así el
+orden de los eventos es determinista y no depende de la velocidad de la
+máquina que corre la suite."""
+from __future__ import annotations
+
+import threading
+import time
+
+import pytest
+
+from wiibackup_manager.inflight import Claim, InflightRegistry
+
+
+# ------------------------------------------------------------- utilidades --
+@pytest.fixture
+def registry():
+    reg = InflightRegistry(2, "test-inflight")
+    yield reg
+    reg.forget()
+
+
+@pytest.fixture
+def registry_con_memoria():
+    reg = InflightRegistry(2, "test-inflight-mem", remember_results=True)
+    yield reg
+    reg.forget()
+
+
+def _esperar(condicion, timeout: float = 5.0) -> bool:
+    limite = time.monotonic() + timeout
+    while time.monotonic() < limite:
+        if condicion():
+            return True
+        time.sleep(0.01)
+    return bool(condicion())
+
+
+class TrabajoBloqueado:
+    """Un trabajo que avisa cuando arrancó y se queda esperando permiso
+    para terminar. Es lo que permite tener DOS pedidos anotados sobre el
+    mismo job sin depender de que los hilos corran a cierta velocidad."""
+
+    def __init__(self, resultado="resultado"):
+        self.resultado = resultado
+        self.arranco = threading.Event()
+        self.seguir = threading.Event()
+        self.llamadas = 0
+        self._lock = threading.Lock()
+
+    def __call__(self):
+        with self._lock:
+            self.llamadas += 1
+        self.arranco.set()
+        assert self.seguir.wait(timeout=5), "el test no liberó el trabajo a tiempo"
+        return self.resultado
+
+
+# ==================================================================== join --
+def test_join_el_primero_reclama_la_clave(registry):
+    accion, valor = registry.join("k", lambda v: None)
+    assert accion is Claim.CLAIMED
+    assert valor is None
+    assert registry.in_flight() == 1
+
+
+def test_join_el_segundo_espera(registry):
+    registry.join("k", lambda v: None)
+    accion, valor = registry.join("k", lambda v: None)
+    assert accion is Claim.WAITING
+    assert valor is None
+    # Sigue siendo UNA sola clave en curso, con dos anotados.
+    assert registry.in_flight() == 1
+
+
+def test_join_claves_distintas_no_se_mezclan(registry):
+    assert registry.join("a", lambda v: None)[0] is Claim.CLAIMED
+    assert registry.join("b", lambda v: None)[0] is Claim.CLAIMED
+    assert registry.in_flight() == 2
+
+
+def test_join_devuelve_el_resultado_recordado(registry_con_memoria):
+    registry_con_memoria.join("k", lambda v: None)
+    registry_con_memoria.run_now("k", lambda: "listo")
+
+    accion, valor = registry_con_memoria.join("k", lambda v: None)
+    assert accion is Claim.REMEMBERED
+    assert valor == "listo"
+    # Un resultado recordado no deja nada en curso ni anota el callback.
+    assert registry_con_memoria.in_flight() == 0
+
+
+def test_sin_memoria_nunca_recuerda(registry):
+    registry.join("k", lambda v: None)
+    registry.run_now("k", lambda: "listo")
+    accion, _valor = registry.join("k", lambda v: None)
+    assert accion is Claim.CLAIMED  # hay que rehacer el trabajo
+
+
+# ================================================================= run_now --
+def test_run_now_entrega_el_resultado_a_todos_los_anotados(registry):
+    recibidos = []
+    registry.join("k", recibidos.append)
+    registry.join("k", recibidos.append)
+    registry.join("k", recibidos.append)
+
+    registry.run_now("k", lambda: "valor")
+
+    assert recibidos == ["valor", "valor", "valor"]
+
+
+def test_run_now_libera_la_clave(registry):
+    registry.join("k", lambda v: None)
+    registry.run_now("k", lambda: "valor")
+    assert registry.in_flight() == 0
+
+
+def test_un_callback_que_falla_no_bloquea_a_los_demas(registry):
+    """El caso real: una fila de la biblioteca que ya no existe cuando
+    llega su resultado. No puede llevarse puestos a los otros que esperan
+    lo mismo ni al worker del pool."""
+    recibidos = []
+
+    def cb_malo(_v):
+        raise RuntimeError("boom")
+
+    registry.join("k", cb_malo)
+    registry.join("k", recibidos.append)
+    registry.join("k", cb_malo)
+    registry.join("k", recibidos.append)
+
+    registry.run_now("k", lambda: "valor")
+
+    assert recibidos == ["valor", "valor"]
+    assert registry.in_flight() == 0
+
+
+def test_un_trabajo_que_falla_resuelve_con_none_por_defecto(registry):
+    recibidos = []
+    registry.join("k", recibidos.append)
+
+    def boom():
+        raise RuntimeError("se rompió")
+
+    registry.run_now("k", boom)
+
+    assert recibidos == [None]
+    assert registry.in_flight() == 0
+
+
+def test_on_error_puede_mapear_la_excepcion_a_un_resultado(registry):
+    """Lo que necesita `oscwii_client`: un fallo tiene que llegar como un
+    resultado con el motivo adentro, no como None."""
+    recibidos = []
+    registry.join("k", recibidos.append)
+
+    registry.run_now("k", lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+                     on_error=lambda e: f"error: {e}")
+
+    assert recibidos == ["error: boom"]
+
+
+def test_un_trabajo_que_falla_igual_libera_la_clave(registry):
+    """Si un fallo dejara la clave reservada, ningún pedido posterior de
+    esa clave volvería a intentarse nunca."""
+    registry.join("k", lambda v: None)
+    registry.run_now("k", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    assert registry.in_flight() == 0
+    assert registry.join("k", lambda v: None)[0] is Claim.CLAIMED
+
+
+def test_run_now_sobre_una_clave_sin_anotados_no_falla(registry):
+    """Puede pasar si alguien llamó a `forget()` en el medio: no hay a
+    quién avisarle, pero no es motivo para reventar el worker."""
+    registry.run_now("fantasma", lambda: "valor")
+
+
+# ------------------------------------------------------- resultado recordado
+def test_remember_when_true_recuerda(registry_con_memoria):
+    registry_con_memoria.join("k", lambda v: None)
+    registry_con_memoria.run_now("k", lambda: None, remember_when=lambda v: True)
+    assert registry_con_memoria.join("k", lambda v: None)[0] is Claim.REMEMBERED
+
+
+def test_remember_when_false_no_recuerda(registry_con_memoria):
+    """El caso de la metadata sin internet: el None es temporal y hay que
+    poder reintentarlo cuando vuelva la conexión."""
+    registry_con_memoria.join("k", lambda v: None)
+    registry_con_memoria.run_now("k", lambda: None, remember_when=lambda v: False)
+    assert registry_con_memoria.join("k", lambda v: None)[0] is Claim.CLAIMED
+
+
+def test_remember_when_recibe_el_valor_resuelto(registry_con_memoria):
+    vistos = []
+    registry_con_memoria.join("k", lambda v: None)
+    registry_con_memoria.run_now("k", lambda: "el valor",
+                                  remember_when=lambda v: vistos.append(v) or True)
+    assert vistos == ["el valor"]
+
+
+def test_remember_when_tambien_se_aplica_a_un_resultado_de_error(registry_con_memoria):
+    registry_con_memoria.join("k", lambda v: None)
+    registry_con_memoria.run_now(
+        "k", lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+        on_error=lambda e: "falló", remember_when=lambda v: v != "falló")
+    assert registry_con_memoria.join("k", lambda v: None)[0] is Claim.CLAIMED
+
+
+def test_sin_remember_when_recuerda_siempre(registry_con_memoria):
+    registry_con_memoria.join("k", lambda v: None)
+    registry_con_memoria.run_now("k", lambda: "valor")
+    assert registry_con_memoria.join("k", lambda v: None)[0] is Claim.REMEMBERED
+
+
+# ================================================================== submit --
+def test_submit_resuelve_en_el_pool(registry):
+    recibidos = []
+    registry.submit("k", lambda: "valor", recibidos.append)
+    assert _esperar(lambda: recibidos == ["valor"])
+    assert registry.in_flight() == 0
+
+
+def test_submit_dedupe_pedidos_concurrentes(registry):
+    """El corazón del módulo: dos pedidos de la misma clave mientras el
+    primero sigue en curso hacen UN solo trabajo, y los dos reciben el
+    mismo resultado."""
+    trabajo = TrabajoBloqueado("una sola vez")
+    recibidos = []
+    lock = threading.Lock()
+
+    def anotar(v):
+        with lock:
+            recibidos.append(v)
+
+    registry.submit("k", trabajo, anotar)
+    assert trabajo.arranco.wait(timeout=5)
+    assert registry.in_flight() == 1
+
+    registry.submit("k", trabajo, anotar)
+    registry.submit("k", trabajo, anotar)
+    trabajo.seguir.set()
+
+    assert _esperar(lambda: len(recibidos) == 3)
+    assert trabajo.llamadas == 1
+    assert recibidos == ["una sola vez"] * 3
+    assert registry.in_flight() == 0
+
+
+def test_submit_claves_distintas_corren_en_paralelo(registry):
+    trabajo_a = TrabajoBloqueado("a")
+    trabajo_b = TrabajoBloqueado("b")
+    recibidos = {}
+    lock = threading.Lock()
+
+    def anotar(nombre):
+        def _cb(v):
+            with lock:
+                recibidos[nombre] = v
+        return _cb
+
+    registry.submit("a", trabajo_a, anotar("a"))
+    registry.submit("b", trabajo_b, anotar("b"))
+
+    assert trabajo_a.arranco.wait(timeout=5)
+    assert trabajo_b.arranco.wait(timeout=5)
+    assert registry.in_flight() == 2
+
+    trabajo_a.seguir.set()
+    trabajo_b.seguir.set()
+
+    assert _esperar(lambda: len(recibidos) == 2)
+    assert recibidos == {"a": "a", "b": "b"}
+
+
+def test_submit_con_resultado_recordado_contesta_en_el_mismo_hilo(registry_con_memoria):
+    """No debe ocupar un worker: se resuelve en el acto, que es lo que
+    hace barato un rescan de 300 filas."""
+    registry_con_memoria.submit("k", lambda: "valor", lambda v: None)
+    assert _esperar(lambda: registry_con_memoria.in_flight() == 0)
+
+    hilo_del_callback = []
+    registry_con_memoria.submit(
+        "k",
+        lambda: (_ for _ in ()).throw(AssertionError("no debería rehacer el trabajo")),
+        lambda v: hilo_del_callback.append(threading.current_thread()))
+
+    assert hilo_del_callback == [threading.current_thread()]
+
+
+def test_submit_un_trabajo_que_falla_no_deja_a_nadie_esperando(registry):
+    recibidos = []
+    registry.submit("k", lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+                     recibidos.append)
+    assert _esperar(lambda: recibidos == [None])
+    assert registry.in_flight() == 0
+
+
+def test_un_callback_puede_volver_a_pedir_sin_deadlock(registry):
+    """Los callbacks se llaman fuera del lock, a propósito: una fila que
+    se redibuja al recibir su resultado vuelve a pedir en el acto, y con
+    el lock tomado eso sería un deadlock."""
+    recibidos = []
+
+    def reentrante(valor):
+        recibidos.append(valor)
+        if len(recibidos) == 1:
+            registry.submit("otra", lambda: "segundo", recibidos.append)
+
+    registry.submit("primera", lambda: "primero", reentrante)
+
+    assert _esperar(lambda: recibidos == ["primero", "segundo"])
+    assert registry.in_flight() == 0
+
+
+# ================================================================== forget --
+def test_forget_vacia_pedidos_y_resultados(registry_con_memoria):
+    registry_con_memoria.join("en-curso", lambda v: None)
+    registry_con_memoria.join("recordado", lambda v: None)
+    registry_con_memoria.run_now("recordado", lambda: "valor")
+
+    registry_con_memoria.forget()
+
+    assert registry_con_memoria.in_flight() == 0
+    assert registry_con_memoria.join("recordado", lambda v: None)[0] is Claim.CLAIMED
+
+
+def test_forget_sobre_un_registry_sin_memoria_no_falla(registry):
+    registry.join("k", lambda v: None)
+    registry.forget()
+    assert registry.in_flight() == 0
+
+
+# ============================================================
 # FILE: tests/test_library.py
 # ============================================================
 """Nombres de archivo, escaneo y las operaciones que tocan el disco.
@@ -13677,6 +15689,51 @@ def test_send_to_wbfs_drive_gc_nunca_divide_el_archivo(make_game, tmp_path, monk
 
     assert destino.read_bytes() == b"contenido de prueba gc"
     assert not destino.with_suffix(".wbf1").exists()
+
+
+# ------------------------------------------------- WBFS multi-juego --
+def test_send_to_wbfs_drive_wbfs_multi_juego_no_copia_directo(make_game, tmp_path, monkeypatch):
+    """Un .wbfs cuyo contenedor trae más de un juego no se puede copiar
+    tal cual al destino de un solo juego (wbfs/<ID6>/<ID6>.wbfs): eso es
+    justo lo que `identify_file` no detecta (solo mira el primer ID6, ver
+    `wit_wrapper._find_id6_line`), así que el chequeo tiene que pasar acá,
+    antes del atajo de copia directa."""
+    from wiibackup_manager.disc_header import DiscInfo
+
+    contenido = [
+        DiscInfo(game_id="RMCP01", title="Mario Kart Wii", source="wit"),
+        DiscInfo(game_id="RSBE01", title="Super Smash Bros. Brawl", source="wit"),
+    ]
+    monkeypatch.setattr(library.wit_wrapper, "is_available", lambda _binary: True)
+    monkeypatch.setattr(library.wit_wrapper, "list_wbfs_container",
+                        lambda _path, _binary: contenido)
+
+    juego = make_game(name="contenedor.wbfs", game_id="RMCP01",
+                      title="Mario Kart Wii", fmt="WBFS",
+                      contenido=b"contenedor multi-juego")
+
+    with pytest.raises(library.MultiGameContainerError):
+        library.send_to_wbfs_drive(juego, tmp_path)
+
+    assert not library.wbfs_dest_path(juego, tmp_path).exists()
+
+
+def test_send_to_wbfs_drive_wbfs_un_solo_juego_copia_directo(make_game, tmp_path, monkeypatch):
+    """Contraparte del test anterior: un contenedor de un solo juego sigue
+    yendo por el atajo de copia directa de siempre."""
+    from wiibackup_manager.disc_header import DiscInfo
+
+    contenido = [DiscInfo(game_id="RMCP01", title="Mario Kart Wii", source="wit")]
+    monkeypatch.setattr(library.wit_wrapper, "is_available", lambda _binary: True)
+    monkeypatch.setattr(library.wit_wrapper, "list_wbfs_container",
+                        lambda _path, _binary: contenido)
+
+    juego = make_game(name="juego.wbfs", game_id="RMCP01", title="Mario Kart Wii",
+                      fmt="WBFS", contenido=b"contenido de prueba wbfs")
+
+    destino = library.send_to_wbfs_drive(juego, tmp_path)
+
+    assert destino.read_bytes() == b"contenido de prueba wbfs"
 
 
 # ----------------------------------------------------------- Escaneo --
@@ -14156,6 +16213,687 @@ def test_un_listener_que_falla_no_rompe_al_que_registro(log):
 
 
 # ============================================================
+# FILE: tests/test_oscwii_client.py
+# ============================================================
+"""Pruebas de `oscwii_client.py`.
+
+Mismo criterio que `test_gametdb.py`: no existía ningún test dedicado a
+este módulo (`HomebrewApp` solo se usaba como fixture en otros archivos),
+así que se cubre desde cero priorizando el manejo de errores -timeouts,
+JSON/ZIP mal formados, caída de la API con fallback a caché, dedupe de
+descargas concurrentes- por sobre el camino feliz.
+
+Nada toca la red de verdad: se fakea `urllib.request.urlopen` con objetos
+simples (sin `unittest.mock`), y `config.CACHE_DIR` se aísla a `tmp_path`
+en cada test."""
+from __future__ import annotations
+
+import json
+import threading
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+import pytest
+
+from wiibackup_manager import config, oscwii_client
+from wiibackup_manager.oscwii_client import HomebrewApp
+
+
+# --------------------------------------------------------------- fixtures --
+@pytest.fixture(autouse=True)
+def _sandbox_oscwii_client(tmp_path, monkeypatch):
+    """Aísla la caché en disco y el estado en memoria del módulo (los
+    registries de pedidos en vuelo son módulo-nivel y persisten entre
+    tests dentro del mismo proceso si no se limpian)."""
+    monkeypatch.setattr(config, "CACHE_DIR", tmp_path / "cache")
+    oscwii_client._list_jobs.forget()
+    oscwii_client._icon_jobs.forget()
+    yield
+    oscwii_client._list_jobs.forget()
+    oscwii_client._icon_jobs.forget()
+
+
+# ------------------------------------------------------------- utilidades --
+class FakeResponse:
+    """Imita el objeto que devuelve `urlopen` dentro de un `with`."""
+
+    def __init__(self, status: int = 200, data: bytes = b""):
+        self.status = status
+        self._data = data
+
+    def read(self) -> bytes:
+        return self._data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _api_dict(**overrides) -> dict:
+    """Elemento de la respuesta de la API, con la forma documentada en el
+    docstring del módulo. `overrides` reemplaza claves de primer nivel
+    enteras (ej. `url={...}` reemplaza todo el sub-dict `url`)."""
+    d = {
+        "slug": "WiiDonut",
+        "name": "Wii Donut",
+        "author": "jornmann, Andy Sloane",
+        "category": "demos",
+        "description": {"short": "corto", "long": "largo"},
+        "file_size": {"binary": 430656, "icon": 2404,
+                      "zip_compressed": 226230, "zip_uncompressed": 433665},
+        "release_date": 1644364800,
+        "supported_platforms": ["wii", "vwii", "wii_mini"],
+        "peripherals": ["Wii Remote"],
+        "url": {"icon": "https://hbb1.oscwii.org/api/contents/WiiDonut/icon.png",
+                "zip": "https://hbb1.oscwii.org/api/contents/WiiDonut/WiiDonut.zip"},
+        "version": "1.0.0",
+    }
+    d.update(overrides)
+    return d
+
+
+def _app(slug="WiiDonut",
+         icon_url="https://hbb1.oscwii.org/api/contents/WiiDonut/icon.png") -> HomebrewApp:
+    return HomebrewApp(slug=slug, name=slug, icon_url=icon_url)
+
+
+def _esperar(condicion, timeout: float = 5.0) -> bool:
+    """Espera a que `condicion()` sea verdadera.
+
+    Los pedidos asincrónicos se resuelven en un hilo del pool, así que el
+    resultado no llega en el mismo hilo que los pidió."""
+    limite = time.monotonic() + timeout
+    while time.monotonic() < limite:
+        if condicion():
+            return True
+        time.sleep(0.01)
+    return bool(condicion())
+
+
+# ============================================================================
+# Bloque A: HomebrewApp.from_api_dict / _parse_apps
+# ============================================================================
+
+def test_from_api_dict_no_es_dict():
+    assert HomebrewApp.from_api_dict("no soy un dict") is None
+    assert HomebrewApp.from_api_dict(["lista"]) is None
+    assert HomebrewApp.from_api_dict(None) is None
+
+
+def test_from_api_dict_sin_slug():
+    d = _api_dict()
+    del d["slug"]
+    assert HomebrewApp.from_api_dict(d) is None
+
+
+def test_from_api_dict_slug_vacio_o_espacios():
+    assert HomebrewApp.from_api_dict(_api_dict(slug="   ")) is None
+
+
+def test_from_api_dict_sin_name():
+    d = _api_dict()
+    del d["name"]
+    assert HomebrewApp.from_api_dict(d) is None
+
+
+def test_from_api_dict_name_vacio():
+    assert HomebrewApp.from_api_dict(_api_dict(name="")) is None
+
+
+def test_from_api_dict_url_no_es_dict():
+    assert HomebrewApp.from_api_dict(_api_dict(url="no soy un dict")) is None
+
+
+def test_from_api_dict_sin_zip_url():
+    """Sin URL de ZIP la app no se puede instalar: no vale mostrarla."""
+    d = _api_dict(url={"icon": "https://x/icon.png"})
+    assert HomebrewApp.from_api_dict(d) is None
+
+
+def test_from_api_dict_zip_url_vacio():
+    assert HomebrewApp.from_api_dict(_api_dict(url={"zip": "   "})) is None
+
+
+def test_from_api_dict_campos_opcionales_con_tipo_incorrecto_usan_default():
+    d = _api_dict(author=123, category=None, description="no es dict",
+                  file_size="tampoco es dict")
+    app = HomebrewApp.from_api_dict(d)
+    assert app is not None
+    assert app.author == ""
+    assert app.category == ""
+    assert app.short_description == ""
+    assert app.long_description == ""
+    assert app.zip_compressed_size is None
+    assert app.zip_uncompressed_size is None
+
+
+def test_from_api_dict_release_date_bool_no_es_valido():
+    """bool es subclase de int en Python: un `true`/`false` de la API no
+    puede colarse como epoch (mismo caso que `config.Settings.load`)."""
+    app = HomebrewApp.from_api_dict(_api_dict(release_date=True))
+    assert app.release_date is None
+
+
+def test_from_api_dict_supported_platforms_no_lista_da_vacio():
+    app = HomebrewApp.from_api_dict(_api_dict(supported_platforms="wii"))
+    assert app.supported_platforms == ()
+
+
+def test_from_api_dict_supported_platforms_filtra_elementos_no_string():
+    app = HomebrewApp.from_api_dict(
+        _api_dict(supported_platforms=["wii", 123, None, "vwii"]))
+    assert app.supported_platforms == ("wii", "vwii")
+
+
+def test_from_api_dict_completo():
+    app = HomebrewApp.from_api_dict(_api_dict())
+    assert app.slug == "WiiDonut"
+    assert app.name == "Wii Donut"
+    assert app.zip_url.endswith("WiiDonut.zip")
+    assert app.zip_compressed_size == 226230
+    assert app.zip_uncompressed_size == 433665
+    assert app.supported_platforms == ("wii", "vwii", "wii_mini")
+    assert app.peripherals == ("Wii Remote",)
+    assert app.short_description == "corto"
+    assert app.long_description == "largo"
+
+
+def test_to_cache_dict_round_trip():
+    original = HomebrewApp.from_api_dict(_api_dict())
+    reconstruido = HomebrewApp.from_api_dict(original.to_cache_dict())
+    assert reconstruido == original
+
+
+def test_parse_apps_json_invalido():
+    apps, err = oscwii_client._parse_apps(b"{esto no es json")
+    assert apps is None
+    assert "JSON inv" in err
+
+
+def test_parse_apps_no_es_lista():
+    apps, err = oscwii_client._parse_apps(json.dumps({"no": "es lista"}).encode())
+    assert apps is None
+    assert "lista" in err
+
+
+def test_parse_apps_lista_vacia_es_valida():
+    """Distinto de "corrupto": un catálogo vacío de verdad se acepta."""
+    apps, err = oscwii_client._parse_apps(b"[]")
+    assert apps == ()
+    assert err is None
+
+
+def test_parse_apps_ningun_elemento_valido():
+    raw = json.dumps([{"foo": "bar"}, {"slug": "", "name": "x"}]).encode()
+    apps, err = oscwii_client._parse_apps(raw)
+    assert apps is None
+    assert "ningún elemento" in err
+
+
+def test_parse_apps_mezcla_de_validos_e_invalidos():
+    raw = json.dumps([_api_dict(slug="A"), {"foo": "bar"},
+                       _api_dict(slug="B")]).encode()
+    apps, err = oscwii_client._parse_apps(raw)
+    assert err is None
+    assert [a.slug for a in apps] == ["A", "B"]
+
+
+# ============================================================================
+# Bloque B: _fetch_remote / _load_cache / _store_cache / list_apps
+# ============================================================================
+
+def test_fetch_remote_http_error(monkeypatch):
+    monkeypatch.setattr(
+        urllib.request, "urlopen",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            urllib.error.HTTPError("http://x", 500, "boom", None, None)))
+    apps, err = oscwii_client._fetch_remote()
+    assert apps is None
+    assert err == "HTTP 500"
+
+
+@pytest.mark.parametrize("excepcion", [
+    urllib.error.URLError("sin red"),
+    TimeoutError("se colgó"),
+    OSError("desconectado"),
+])
+def test_fetch_remote_error_de_red(monkeypatch, excepcion):
+    monkeypatch.setattr(urllib.request, "urlopen",
+                         lambda *a, **kw: (_ for _ in ()).throw(excepcion))
+    apps, err = oscwii_client._fetch_remote()
+    assert apps is None
+    assert err
+
+
+def test_fetch_remote_status_no_200(monkeypatch):
+    monkeypatch.setattr(urllib.request, "urlopen",
+                         lambda *a, **kw: FakeResponse(503, b""))
+    apps, err = oscwii_client._fetch_remote()
+    assert apps is None
+    assert "503" in err
+
+
+def test_fetch_remote_json_malformado(monkeypatch):
+    monkeypatch.setattr(urllib.request, "urlopen",
+                         lambda *a, **kw: FakeResponse(200, b"no es json"))
+    apps, err = oscwii_client._fetch_remote()
+    assert apps is None
+    assert "JSON inv" in err
+
+
+def test_fetch_remote_exitoso(monkeypatch):
+    raw = json.dumps([_api_dict()]).encode()
+    monkeypatch.setattr(urllib.request, "urlopen",
+                         lambda *a, **kw: FakeResponse(200, raw))
+    apps, err = oscwii_client._fetch_remote()
+    assert err is None
+    assert len(apps) == 1
+    assert apps[0].slug == "WiiDonut"
+
+
+def test_load_cache_sin_archivo():
+    apps, err = oscwii_client._load_cache()
+    assert apps is None
+    assert "no hay" in err
+
+
+def test_load_cache_falla_lectura(monkeypatch):
+    path = oscwii_client.contents_cache_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"[]")
+
+    def boom_read_bytes(self, *a, **kw):
+        raise OSError("permiso denegado")
+
+    monkeypatch.setattr(Path, "read_bytes", boom_read_bytes)
+    apps, err = oscwii_client._load_cache()
+    assert apps is None
+    assert "permiso" in err
+
+
+def test_load_cache_json_corrupto():
+    path = oscwii_client.contents_cache_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"esto no es json")
+    apps, err = oscwii_client._load_cache()
+    assert apps is None
+    assert "JSON inv" in err
+
+
+def test_load_cache_exitoso():
+    path = oscwii_client.contents_cache_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(json.dumps([_api_dict()]).encode())
+    apps, err = oscwii_client._load_cache()
+    assert err is None
+    assert len(apps) == 1
+
+
+def test_store_cache_falla_escritura_no_propaga(monkeypatch):
+    app = HomebrewApp.from_api_dict(_api_dict())
+
+    def boom_write_text_atomic(path, payload):
+        raise OSError("disco lleno")
+
+    monkeypatch.setattr(config, "write_text_atomic", boom_write_text_atomic)
+    oscwii_client._store_cache((app,))  # no debe lanzar
+
+
+def test_store_cache_exitoso_deja_el_archivo():
+    app = HomebrewApp.from_api_dict(_api_dict())
+    oscwii_client._store_cache((app,))
+    data = json.loads(oscwii_client.contents_cache_path().read_bytes())
+    assert data == [app.to_cache_dict()]
+
+
+def test_list_apps_api_ok_actualiza_cache(monkeypatch):
+    app = HomebrewApp.from_api_dict(_api_dict())
+    monkeypatch.setattr(oscwii_client, "_fetch_remote", lambda: ((app,), None))
+
+    result = oscwii_client.list_apps()
+
+    assert result.status == oscwii_client.FetchStatus.OK
+    assert result.apps == (app,)
+    cached = json.loads(oscwii_client.contents_cache_path().read_bytes())
+    assert cached == [app.to_cache_dict()]
+
+
+def test_list_apps_api_ok_con_lista_vacia_no_es_error(monkeypatch):
+    """`()` es un catálogo real, no un fallo: no debe disparar el
+    fallback a caché."""
+    monkeypatch.setattr(oscwii_client, "_fetch_remote", lambda: ((), None))
+    monkeypatch.setattr(
+        oscwii_client, "_load_cache",
+        lambda: (_ for _ in ()).throw(AssertionError("no debería consultar la caché")))
+
+    result = oscwii_client.list_apps()
+    assert result.status == oscwii_client.FetchStatus.OK
+    assert result.apps == ()
+
+
+def test_list_apps_api_falla_usa_cache_valida(monkeypatch):
+    cacheada = HomebrewApp.from_api_dict(_api_dict(slug="Cacheada"))
+    monkeypatch.setattr(oscwii_client, "_fetch_remote", lambda: (None, "sin red"))
+    monkeypatch.setattr(oscwii_client, "_load_cache", lambda: ((cacheada,), None))
+
+    result = oscwii_client.list_apps()
+    assert result.status == oscwii_client.FetchStatus.STALE_CACHE
+    assert result.apps == (cacheada,)
+    assert result.error == "sin red"  # el motivo de la API, no el de la caché
+
+
+def test_list_apps_sin_api_ni_cache_da_error(monkeypatch):
+    monkeypatch.setattr(oscwii_client, "_fetch_remote", lambda: (None, "sin red"))
+    monkeypatch.setattr(oscwii_client, "_load_cache", lambda: (None, "no hay caché"))
+
+    result = oscwii_client.list_apps()
+    assert result.status == oscwii_client.FetchStatus.ERROR
+    assert result.apps == ()
+    assert result.error == "sin red"
+
+
+def test_list_apps_fetch_remote_excepcion_inesperada(monkeypatch):
+    def boom():
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(oscwii_client, "_fetch_remote", boom)
+    monkeypatch.setattr(oscwii_client, "_load_cache", lambda: (None, "no hay caché"))
+
+    result = oscwii_client.list_apps()
+    assert result.status == oscwii_client.FetchStatus.ERROR
+    assert "boom" in result.error
+
+
+def test_list_apps_load_cache_excepcion_inesperada(monkeypatch):
+    monkeypatch.setattr(oscwii_client, "_fetch_remote", lambda: (None, "sin red"))
+
+    def boom():
+        raise RuntimeError("boom-cache")
+
+    monkeypatch.setattr(oscwii_client, "_load_cache", boom)
+
+    result = oscwii_client.list_apps()
+    assert result.status == oscwii_client.FetchStatus.ERROR
+    assert result.error == "sin red"
+
+
+# ============================================================================
+# Bloque C: fetch_apps_async
+# ============================================================================
+
+def test_fetch_apps_async_sin_on_done_no_dispara_nada(monkeypatch):
+    monkeypatch.setattr(
+        oscwii_client, "list_apps",
+        lambda: (_ for _ in ()).throw(AssertionError("no debería llamarse")))
+    oscwii_client.fetch_apps_async(on_done=None)
+    assert oscwii_client._list_jobs.in_flight() == 0
+
+
+def test_fetch_apps_async_dedupe_pedidos_concurrentes(monkeypatch):
+    llamadas = []
+    iniciado = threading.Event()
+    liberar = threading.Event()
+    resultado = oscwii_client.AppListResult(status=oscwii_client.FetchStatus.OK, apps=())
+
+    def fake_list_apps():
+        llamadas.append(1)
+        iniciado.set()
+        assert liberar.wait(timeout=5), "el test no liberó a tiempo"
+        return resultado
+
+    monkeypatch.setattr(oscwii_client, "list_apps", fake_list_apps)
+
+    resultados = []
+    lock = threading.Lock()
+
+    def hacer_callback(nombre):
+        def _cb(r):
+            with lock:
+                resultados.append((nombre, r))
+        return _cb
+
+    oscwii_client.fetch_apps_async(on_done=hacer_callback("uno"))
+    assert iniciado.wait(timeout=5)
+    oscwii_client.fetch_apps_async(on_done=hacer_callback("dos"))
+    liberar.set()
+
+    deadline = time.monotonic() + 5
+    while len(resultados) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert len(llamadas) == 1
+    assert resultados[0][1] is resultado
+    assert resultados[1][1] is resultado
+
+
+def test_list_error_result_mapea_la_excepcion(monkeypatch):
+    """El cableado propio de este módulo: a diferencia de las carátulas y
+    los íconos (que se resuelven como None), un fallo inesperado de
+    `list_apps` tiene que llegar a la interfaz como un `AppListResult` de
+    error con el motivo adentro."""
+    resultado = oscwii_client._list_error_result(RuntimeError("boom"))
+    assert resultado.status == oscwii_client.FetchStatus.ERROR
+    assert resultado.apps == ()
+    assert "boom" in resultado.error
+
+
+def test_fetch_apps_async_excepcion_inesperada_da_error(monkeypatch):
+    """Y el mismo cableado de punta a punta: `list_apps` ya captura por su
+    cuenta todo lo previsto, así que esto cubre un error de programación
+    que se escape, que no puede quedar perdido en un hilo del pool."""
+    def boom():
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(oscwii_client, "list_apps", boom)
+    resultados = []
+
+    oscwii_client.fetch_apps_async(on_done=resultados.append)
+
+    assert _esperar(lambda: len(resultados) == 1)
+    assert resultados[0].status == oscwii_client.FetchStatus.ERROR
+    assert "boom" in resultados[0].error
+    assert oscwii_client._list_jobs.in_flight() == 0
+
+
+# ============================================================================
+# Bloque D: íconos
+# ============================================================================
+
+def test_icon_cache_path_sanea_slug_peligroso():
+    p = oscwii_client.icon_cache_path("../../etc/passwd")
+    assert p.name == "etcpasswd.png"
+    assert p.parent == oscwii_client.icons_cache_dir()
+
+
+def test_icon_cache_path_slug_vacio_usa_app():
+    p = oscwii_client.icon_cache_path("")
+    assert p.name == "app.png"
+
+
+def test_get_icon_path_sin_icon_url_no_toca_red(monkeypatch):
+    monkeypatch.setattr(urllib.request, "urlopen",
+                         lambda *a, **kw: (_ for _ in ()).throw(
+                             AssertionError("no debería llamar a la red")))
+    assert oscwii_client.get_icon_path(_app(icon_url="")) is None
+
+
+@pytest.mark.parametrize("excepcion", [
+    urllib.error.HTTPError("http://x", 404, "not found", None, None),
+    urllib.error.URLError("sin red"),
+    TimeoutError(),
+    OSError("desconectado"),
+])
+def test_get_icon_path_error_de_red(monkeypatch, excepcion):
+    monkeypatch.setattr(urllib.request, "urlopen",
+                         lambda *a, **kw: (_ for _ in ()).throw(excepcion))
+    assert oscwii_client.get_icon_path(_app()) is None
+
+
+def test_get_icon_path_status_no_200(monkeypatch):
+    monkeypatch.setattr(urllib.request, "urlopen",
+                         lambda *a, **kw: FakeResponse(503, b""))
+    assert oscwii_client.get_icon_path(_app()) is None
+
+
+def test_get_icon_path_respuesta_no_es_png(monkeypatch):
+    monkeypatch.setattr(urllib.request, "urlopen",
+                         lambda *a, **kw: FakeResponse(200, b"<html>404</html>"))
+    app = _app()
+    result = oscwii_client.get_icon_path(app)
+    assert result is None
+    assert not oscwii_client.icon_cache_path(app.slug).exists()
+
+
+def test_get_icon_path_exitoso_guarda_y_devuelve(monkeypatch):
+    data = oscwii_client.PNG_MAGIC + b"contenido-de-mentira"
+    monkeypatch.setattr(urllib.request, "urlopen",
+                         lambda *a, **kw: FakeResponse(200, data))
+    result = oscwii_client.get_icon_path(_app())
+    assert result.read_bytes() == data
+
+
+def test_get_icon_path_usa_cache_sin_pedir_red(monkeypatch):
+    app = _app()
+    cache_path = oscwii_client.icon_cache_path(app.slug)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_bytes(oscwii_client.PNG_MAGIC + b"ya cacheado")
+    monkeypatch.setattr(urllib.request, "urlopen",
+                         lambda *a, **kw: (_ for _ in ()).throw(
+                             AssertionError("no debería llamar a la red")))
+    result = oscwii_client.get_icon_path(app)
+    assert result == cache_path
+
+
+def test_get_icon_path_force_ignora_cache_existente(monkeypatch):
+    app = _app()
+    cache_path = oscwii_client.icon_cache_path(app.slug)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_bytes(oscwii_client.PNG_MAGIC + b"viejo")
+    nuevo = oscwii_client.PNG_MAGIC + b"nuevo"
+    monkeypatch.setattr(urllib.request, "urlopen",
+                         lambda *a, **kw: FakeResponse(200, nuevo))
+    result = oscwii_client.get_icon_path(app, force=True)
+    assert result.read_bytes() == nuevo
+
+
+def test_get_icon_path_falla_escritura_temporal(monkeypatch):
+    data = oscwii_client.PNG_MAGIC + b"x"
+    monkeypatch.setattr(urllib.request, "urlopen",
+                         lambda *a, **kw: FakeResponse(200, data))
+
+    def boom_write_bytes(self, *a, **kw):
+        raise OSError("disco lleno")
+
+    monkeypatch.setattr(Path, "write_bytes", boom_write_bytes)
+    assert oscwii_client.get_icon_path(_app()) is None
+
+
+def test_get_icon_path_falla_escritura_y_tambien_falla_la_limpieza(monkeypatch):
+    data = oscwii_client.PNG_MAGIC + b"x"
+    monkeypatch.setattr(urllib.request, "urlopen",
+                         lambda *a, **kw: FakeResponse(200, data))
+
+    def boom_write_bytes(self, *a, **kw):
+        raise OSError("disco lleno")
+
+    def boom_unlink(self, *a, **kw):
+        raise OSError("también falla el borrado")
+
+    monkeypatch.setattr(Path, "write_bytes", boom_write_bytes)
+    monkeypatch.setattr(Path, "unlink", boom_unlink)
+    assert oscwii_client.get_icon_path(_app()) is None
+
+
+def test_fetch_icon_async_sin_on_done_no_hace_nada(monkeypatch):
+    monkeypatch.setattr(oscwii_client, "get_icon_path",
+                         lambda *a, **kw: (_ for _ in ()).throw(
+                             AssertionError("no debería descargar")))
+    oscwii_client.fetch_icon_async(_app(), on_done=None)
+    assert oscwii_client._icon_jobs.in_flight() == 0
+
+
+def test_fetch_icon_async_sin_icon_url_da_none_sincronico(monkeypatch):
+    monkeypatch.setattr(oscwii_client, "get_icon_path",
+                         lambda *a, **kw: (_ for _ in ()).throw(
+                             AssertionError("no debería descargar")))
+    resultados = []
+    oscwii_client.fetch_icon_async(_app(icon_url=""), on_done=resultados.append)
+    assert resultados == [None]
+
+
+def test_fetch_icon_async_usa_cache_sincronico(monkeypatch):
+    app = _app()
+    cache_path = oscwii_client.icon_cache_path(app.slug)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_bytes(oscwii_client.PNG_MAGIC + b"ya cacheado")
+    monkeypatch.setattr(oscwii_client, "get_icon_path",
+                         lambda *a, **kw: (_ for _ in ()).throw(
+                             AssertionError("no debería descargar de nuevo")))
+    resultados = []
+    oscwii_client.fetch_icon_async(app, on_done=resultados.append)
+    assert resultados == [cache_path]
+
+
+def test_fetch_icon_async_dedupe_pedidos_concurrentes(monkeypatch, tmp_path):
+    app = _app()
+    llamadas = []
+    iniciado = threading.Event()
+    liberar = threading.Event()
+    destino = tmp_path / "icono.png"
+
+    def fake_get_icon_path(a, force=False):
+        llamadas.append(a.slug)
+        iniciado.set()
+        assert liberar.wait(timeout=5), "el test no liberó a tiempo"
+        return destino
+
+    monkeypatch.setattr(oscwii_client, "get_icon_path", fake_get_icon_path)
+
+    resultados = []
+    lock = threading.Lock()
+
+    def hacer_callback(nombre):
+        def _cb(path):
+            with lock:
+                resultados.append((nombre, path))
+        return _cb
+
+    oscwii_client.fetch_icon_async(app, on_done=hacer_callback("uno"))
+    assert iniciado.wait(timeout=5)
+    oscwii_client.fetch_icon_async(app, on_done=hacer_callback("dos"))
+    liberar.set()
+
+    deadline = time.monotonic() + 5
+    while len(resultados) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert len(llamadas) == 1
+    assert resultados[0][1] == destino
+    assert resultados[1][1] == destino
+
+
+def test_fetch_icon_async_excepcion_inesperada_da_none(monkeypatch):
+    """El ícono es cosmético: un fallo inesperado se resuelve como "no hay
+    ícono" (la tarjeta se queda con el placeholder), nunca como una
+    excepción perdida en un hilo del pool."""
+    def boom(app, force=False):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(oscwii_client, "get_icon_path", boom)
+    resultados = []
+
+    oscwii_client.fetch_icon_async(_app(), on_done=resultados.append)
+
+    assert _esperar(lambda: len(resultados) == 1)
+    assert resultados == [None]
+    assert oscwii_client._icon_jobs.in_flight() == 0
+
+
+# ============================================================
 # FILE: tests/test_oscwii_installer.py
 # ============================================================
 """Pruebas de la validación de ZIP de `oscwii_installer.py`.
@@ -14172,7 +16910,10 @@ from __future__ import annotations
 
 import zipfile
 
+import pytest
+
 from wiibackup_manager import oscwii_installer
+from wiibackup_manager.oscwii_client import HomebrewApp
 from wiibackup_manager.oscwii_installer import InstallStatus
 
 
@@ -14250,6 +16991,90 @@ def test_validate_zip_rechaza_entrada_fuera_de_lo_permitido(tmp_path):
     assert zf is None
     assert status is InstallStatus.UNSAFE_ZIP
     assert "otra_carpeta" in err
+
+
+# ----------------------------------------------------------- install_app --
+def _fake_app(**overrides) -> HomebrewApp:
+    kwargs = dict(slug="TestApp", name="Test App",
+                 zip_url="https://hbb1.oscwii.org/api/contents/TestApp/TestApp.zip")
+    kwargs.update(overrides)
+    return HomebrewApp(**kwargs)
+
+
+def test_install_app_rechaza_dest_root_critico(tmp_path, monkeypatch):
+    """Defensa en profundidad (Blindaje 4 reusado): aunque hoy la UI nunca
+    deje elegir una ruta crítica del sistema como destino, `install_app`
+    tiene que rechazarla por su cuenta si algún día se la llama desde
+    otro lugar sin ese filtro. Se simula la ruta crítica con
+    `drives.CRITICAL_MOUNTPOINTS` (en vez de apuntar a "/" de verdad) para
+    no depender de -ni arriesgar- el sistema real que corre la prueba."""
+    monkeypatch.setattr(oscwii_installer.drives, "CRITICAL_MOUNTPOINTS",
+                        frozenset({str(tmp_path)}))
+
+    def _no_deberia_descargar(*_a, **_k):
+        raise AssertionError(
+            "install_app no debería llegar a descargar nada si dest_root "
+            "ya se rechazó por ser una ruta crítica")
+    monkeypatch.setattr(oscwii_installer, "_download_zip", _no_deberia_descargar)
+
+    result = oscwii_installer.install_app(_fake_app(), tmp_path)
+
+    assert not result.ok
+    assert result.status is InstallStatus.UNSAFE_DEST_ROOT
+    assert not (tmp_path / "apps").exists()
+
+
+def test_install_app_con_destino_valido_instala_normal(tmp_path, monkeypatch):
+    """No-regresión: un destino normal (no crítico) sigue instalando la
+    app como siempre, atravesando la validación nueva sin que interfiera."""
+    dest_root = tmp_path / "usb"
+    dest_root.mkdir()
+
+    zip_entries = {
+        "apps/TestApp/boot.dol": b"A" * 100,
+        "apps/TestApp/meta.xml": b"<app/>",
+    }
+
+    def _fake_download_zip(app, dest_path, cancel_event, on_progress):
+        _make_zip(dest_path, zip_entries)
+        return True, "", "d41d8cd98f00b204e9800998ecf8427e", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    monkeypatch.setattr(oscwii_installer, "_download_zip", _fake_download_zip)
+
+    result = oscwii_installer.install_app(_fake_app(), dest_root)
+
+    assert result.ok, result.error
+    assert result.status is InstallStatus.OK
+    assert (dest_root / "apps" / "TestApp" / "boot.dol").read_bytes() == b"A" * 100
+    assert (dest_root / "apps" / "TestApp" / "meta.xml").read_bytes() == b"<app/>"
+
+
+# ------------------------------------------------------- _extract_member --
+def test_extraccion_cortada_no_deja_temporales_en_la_unidad(tmp_path, monkeypatch):
+    """Una extracción que se corta a mitad (unidad desconectada, disco
+    lleno) no puede dejar un `.boot.dol.parcial-<pid>` tirado en la unidad
+    del usuario.
+
+    Mientras `_extract_member` armaba el temporal a mano era el único de
+    los cuatro lugares con este patrón que no limpiaba ante un error; al
+    pasar a `fsutil.atomic_target` la limpieza quedó garantizada para
+    todos. Esta prueba es la guarda de que no se vuelva a perder."""
+    zip_path = tmp_path / "app.zip"
+    _make_zip(zip_path, {"apps/TestApp/boot.dol": b"A" * 100})
+    dest_root = tmp_path / "usb"
+    (dest_root / "apps").mkdir(parents=True)
+
+    def _falla_a_mitad(src, dst, *a, **kw):
+        dst.write(b"AA")  # algo ya se escribió al temporal
+        raise OSError("unidad desconectada")
+    monkeypatch.setattr(oscwii_installer.shutil, "copyfileobj", _falla_a_mitad)
+
+    with zipfile.ZipFile(zip_path) as zf:
+        info = zf.infolist()[0]
+        with pytest.raises(OSError):
+            oscwii_installer._extract_member(zf, info, dest_root)
+
+    quedaron = list((dest_root / "apps" / "TestApp").iterdir())
+    assert quedaron == [], f"quedaron temporales huérfanos: {quedaron}"
 
 
 # ============================================================
@@ -14794,5 +17619,3 @@ def test_is_available_con_un_binario_inexistente():
 
 def test_find_wit_con_un_binario_inexistente():
     assert wit_wrapper.find_wit("wit-que-no-existe-en-ningun-lado") is None
-
-
