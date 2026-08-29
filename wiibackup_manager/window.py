@@ -181,7 +181,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         # `self._content_nav_page` al elegirla.
         self._sidebar_items = [
             ("juegos", "applications-games-symbolic", _("Juegos")),
-            ("cola", "emblem-synchronizing-symbolic", _("Cola de Tareas")),
+            ("cola", "emblem-synchronizing-symbolic", _("Transferir")),
             ("fabrica", "drive-removable-media-symbolic", _("Modo Fábrica")),
             ("tienda", "system-software-install-symbolic", _("Homebrew Store")),
             ("ajustes", "emblem-system-symbolic", _("Ajustes")),
@@ -400,7 +400,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
     def _build_cola_page(self):
         toolbar_view = Adw.ToolbarView()
         header = Adw.HeaderBar()
-        header.set_title_widget(Adw.WindowTitle(title=_("Cola de Tareas")))
+        header.set_title_widget(Adw.WindowTitle(title=_("Transferir")))
         toolbar_view.add_top_bar(header)
 
         # `TransferView` es el mismo widget que antes vivía en la pestaña
