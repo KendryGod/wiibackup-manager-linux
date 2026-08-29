@@ -265,3 +265,107 @@ def test_zip_con_apps_y_controllers_instala_los_dos(tmp_path, monkeypatch):
     assert (dest_root / "controllers" / "gcadapter.ini").read_bytes() == b"[controller]\n"
     assert len(result.installed_paths) == 3
     assert _sin_rastros_de_staging_o_respaldo(dest_root)
+
+
+# ------------------------------- El respaldo que no se pudo borrar (final) --
+def _fingir_rmtree_del_respaldo_que_falla(monkeypatch):
+    """Hace fallar el borrado del respaldo (y solo ese: el staging se
+    sigue limpiando de verdad).
+
+    El reemplazo RESPETA `ignore_errors`, igual que el `rmtree` real: si
+    no lo hiciera, el test pasaría también con la versión vieja del código
+    -que llamaba a `rmtree(..., ignore_errors=True)`- y no probaría nada.
+    Así, un `ignore_errors=True` se traga el error y no queda ningún
+    respaldo reportado, que es exactamente lo que se está arreglando."""
+    real = oscwii_installer.shutil.rmtree
+
+    def _rmtree(path, ignore_errors=False, **kw):
+        if ".wbm-respaldo-" in str(path):
+            if ignore_errors:
+                return
+            raise OSError("unidad de solo lectura")
+        return real(path, ignore_errors=ignore_errors, **kw)
+
+    monkeypatch.setattr(oscwii_installer.shutil, "rmtree", _rmtree)
+
+
+# Cuando el intercambio sale bien, el respaldo de la versión anterior se
+# borra. Si ESE borrado falla, la app quedó instalada correctamente pero
+# la versión anterior entera sigue ocupando lugar en una carpeta oculta
+# que el usuario no va a encontrar solo. Antes se ignoraba en silencio
+# (`rmtree(..., ignore_errors=True)`).
+
+def test_un_respaldo_que_no_se_puede_borrar_se_reporta(tmp_path, monkeypatch):
+    dest_root = tmp_path / "usb"
+    app_dir = dest_root / "apps" / "TestApp"
+    app_dir.mkdir(parents=True)
+    (app_dir / "boot.dol").write_bytes(b"version vieja" * 100)
+
+    _con_descarga_de(monkeypatch, {
+        "apps/TestApp/boot.dol": b"version nueva" * 100,
+    })
+
+    _fingir_rmtree_del_respaldo_que_falla(monkeypatch)
+
+    result = oscwii_installer.install_app(_fake_app(), dest_root)
+
+    # La instalación es un éxito: la app nueva YA está en su lugar.
+    assert result.ok, result.error
+    assert (app_dir / "boot.dol").read_bytes() == b"version nueva" * 100
+
+    # Pero el respaldo quedó, y eso se dice.
+    assert len(result.orphaned_backups) == 1
+    respaldo = result.orphaned_backups[0]
+    assert ".wbm-respaldo-" in respaldo.name
+    assert respaldo.is_dir(), "sigue ocupando espacio: por eso hay que avisar"
+    assert (respaldo / "boot.dol").read_bytes() == b"version vieja" * 100
+
+
+def test_el_aviso_del_respaldo_huerfano_dice_cuanto_ocupa(tmp_path, monkeypatch):
+    """El mensaje sale del mismo formateador que usa la conversión
+    (`library.format_orphaned_backups`), que para una carpeta suma el
+    árbol entero -no informa 0 bytes por ser un directorio."""
+    dest_root = tmp_path / "usb"
+    app_dir = dest_root / "apps" / "TestApp"
+    app_dir.mkdir(parents=True)
+    (app_dir / "boot.dol").write_bytes(b"x" * (2 * 1024 * 1024))
+
+    _con_descarga_de(monkeypatch, {"apps/TestApp/boot.dol": b"nuevo"})
+
+    _fingir_rmtree_del_respaldo_que_falla(monkeypatch)
+
+    result = oscwii_installer.install_app(_fake_app(), dest_root)
+    aviso = library.format_orphaned_backups(result.orphaned_backups)
+
+    assert "2.0 MB" in aviso
+    assert str(result.orphaned_backups[0]) in aviso
+
+
+def test_una_instalacion_nueva_no_reporta_respaldos(tmp_path, monkeypatch):
+    """No había versión anterior, así que no hay respaldo que borrar ni
+    nada que avisar."""
+    dest_root = tmp_path / "usb"
+    dest_root.mkdir()
+    _con_descarga_de(monkeypatch, {"apps/TestApp/boot.dol": b"contenido"})
+
+    result = oscwii_installer.install_app(_fake_app(), dest_root)
+
+    assert result.ok, result.error
+    assert result.orphaned_backups == ()
+
+
+def test_una_actualizacion_normal_no_reporta_respaldos(tmp_path, monkeypatch):
+    """No-regresión: con el borrado funcionando, el resultado no menciona
+    ningún respaldo y no queda nada en el destino."""
+    dest_root = tmp_path / "usb"
+    app_dir = dest_root / "apps" / "TestApp"
+    app_dir.mkdir(parents=True)
+    (app_dir / "boot.dol").write_bytes(b"vieja")
+
+    _con_descarga_de(monkeypatch, {"apps/TestApp/boot.dol": b"nueva"})
+
+    result = oscwii_installer.install_app(_fake_app(), dest_root)
+
+    assert result.ok, result.error
+    assert result.orphaned_backups == ()
+    assert _sin_rastros_de_staging_o_respaldo(dest_root)

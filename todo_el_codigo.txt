@@ -1386,6 +1386,30 @@ def atomic_target(dest: Path, *, mkparents: bool = False) -> Iterator[Path]:
         raise
 
 
+def path_size(path: Path) -> int:
+    """Bytes que ocupa `path`: el tamaño del archivo, o la suma del árbol
+    entero si es una carpeta.
+
+    Devuelve 0 si no se puede averiguar (permisos, se lo llevaron en el
+    medio, la unidad se desconectó). Es a propósito: esto se usa para
+    AVISARLE al usuario cuánto espacio le quedó ocupado un respaldo que no
+    se pudo borrar, así que no poder medirlo no puede hacer fallar nada
+    -el aviso importa más que el número."""
+    try:
+        if path.is_dir():
+            total = 0
+            for raiz, _dirs, archivos in os.walk(path):
+                for nombre in archivos:
+                    try:
+                        total += os.lstat(os.path.join(raiz, nombre)).st_size
+                    except OSError:
+                        pass
+            return total
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
 # -------------------------------------------- Datos instalados de la app --
 def installed_data_dirs(repo_relative: str, share_relative: str) -> list:
     """Directorios donde puede estar un dato instalado de la app, del más
@@ -2926,6 +2950,27 @@ def format_size(n: int) -> str:
     return f"{n / (1024 ** 2):.1f} MB"
 
 
+def format_orphaned_backups(rutas) -> str:
+    """Mensaje para el usuario sobre respaldos temporales que no se
+    pudieron borrar, con cuánto espacio ocupan y dónde están.
+
+    El "dónde" es lo que hace útil el aviso: son archivos ocultos (el
+    nombre empieza con punto) de varios GB, así que sin la ruta el usuario
+    ve la unidad más llena de lo que debería y no tiene forma de encontrar
+    lo que la está ocupando."""
+    rutas = [Path(r) for r in rutas]
+    if not rutas:
+        return ""
+    total = sum(fsutil.path_size(r) for r in rutas)
+    if len(rutas) == 1:
+        return _("No se pudo eliminar un respaldo temporal de {size} en "
+                 "{path}.").format(size=format_size(total), path=rutas[0])
+    return _("No se pudieron eliminar {n} respaldos temporales ({size} en "
+             "total): {paths}.").format(
+                 n=len(rutas), size=format_size(total),
+                 paths=", ".join(str(r) for r in rutas))
+
+
 def format_eta(seconds: float) -> str:
     """Tiempo estimado restante en formato corto ('45s', '2m 15s', '1h 5m')."""
     seconds = max(0, int(seconds))
@@ -3760,6 +3805,10 @@ class DestinationGuard:
         self._saved: list = []
         self._committed = False
         self._outputs_before: set = set()
+        # Respaldos que la operación terminó bien pero no se pudieron
+        # borrar (ver `_discard`). Quien usa el guard los lee DESPUÉS del
+        # `with` para avisarle al usuario y anotarlo en el historial.
+        self.orphaned_backups: list = []
 
     def __enter__(self) -> "DestinationGuard":
         if not self.enabled:
@@ -3875,11 +3924,24 @@ class DestinationGuard:
         self._saved = []
 
     def _discard(self) -> None:
+        """Borra los respaldos: la operación salió bien y ya no hacen
+        falta.
+
+        Un borrado que falla NO se ignora. El respaldo es un archivo
+        oculto que puede pesar varios GB (un WBFS entero, y en un juego
+        dividido son tres archivos), así que quedarse callado dejaba al
+        usuario con la unidad llena por algo que no puede ver ni
+        encontrar. Tampoco es un error de la operación -la conversión
+        terminó bien y el resultado está donde tiene que estar-, así que
+        no se levanta nada: se anota en `orphaned_backups` y quien usa el
+        guard lo reporta (`format_orphaned_backups` +
+        `oplog.record_orphaned_backup`)."""
+        self.orphaned_backups = []
         for _original, respaldo in self._saved:
             try:
                 respaldo.unlink(missing_ok=True)
             except OSError:
-                pass
+                self.orphaned_backups.append(respaldo)
         self._saved = []
 
 
@@ -4631,6 +4693,11 @@ _VALID_STATUSES = frozenset(STATUS_LABELS)
 MAX_ENTRIES = 500
 
 
+# Nombre (sin traducir, mismo criterio que `OperationKind.value`) de la
+# entrada que avisa que un respaldo temporal quedó ocupando espacio.
+ORPHANED_BACKUP_OPERATION = "Respaldo temporal no eliminado"
+
+
 @dataclass(frozen=True)
 class LogEntry:
     """Una operación terminada.
@@ -4677,6 +4744,26 @@ class LogEntry:
         """Fecha y hora para mostrar: '2026-08-23 14:35'."""
         moment = self.when()
         return moment.strftime("%Y-%m-%d %H:%M") if moment else self.timestamp
+
+
+def record_orphaned_backup(op_log: "Optional[OperationLog]", target: str,
+                           detail: str) -> None:
+    """Anota que una operación terminó bien pero dejó un respaldo temporal
+    sin borrar.
+
+    Va como entrada propia y no dentro del detalle de la operación que lo
+    dejó: la operación se completó -su entrada dice "Completada" y está
+    bien que lo diga- pero quedó espacio ocupado por un archivo oculto que
+    el usuario no va a encontrar solo. Con entrada propia el problema es
+    visible al mirar el historial en vez de estar escondido al final del
+    detalle de otra cosa.
+
+    `STATUS_PARTIAL` ("Terminada con errores") y no `STATUS_ERROR`: nada
+    de lo que el usuario pidió falló. Tolera `op_log=None` para que quien
+    llama no tenga que preguntar (mismo criterio que `golden_configs._log`)."""
+    if op_log is None:
+        return
+    op_log.record(ORPHANED_BACKUP_OPERATION, target, STATUS_PARTIAL, detail)
 
 
 def _coerce_entry(raw) -> Optional[LogEntry]:
@@ -5621,6 +5708,12 @@ class InstallResult:
     error: str = ""
     # Rutas finales escritas bajo dest_root/apps, para loguear o listar.
     installed_paths: tuple = ()
+    # Respaldos de la versión anterior que se instalaron bien pero no se
+    # pudieron borrar después (ver `_stage_and_swap_unit`). La
+    # instalación es un éxito igual -`status` sigue siendo OK- pero
+    # quedaron carpetas ocultas ocupando espacio en la unidad, y eso hay
+    # que decirlo.
+    orphaned_backups: tuple = ()
 
     @property
     def ok(self) -> bool:
@@ -5965,7 +6058,7 @@ def _group_members(members: list) -> tuple[dict, list]:
 def _stage_and_swap_unit(zf: zipfile.ZipFile, unit_members: list,
                          final_dir: Path,
                          cancel_event: Optional[threading.Event],
-                         on_step: Callable[[], None]) -> list[Path]:
+                         on_step: Callable[[], None]) -> tuple[list, list]:
     """Instala UNA unidad -una subcarpeta de primer nivel del ZIP, ej.
     "apps/WiiDonut"- como bloque atómico: todo o nada, nunca una mezcla
     de archivos viejos y nuevos. Mismo patrón que
@@ -5993,7 +6086,13 @@ def _stage_and_swap_unit(zf: zipfile.ZipFile, unit_members: list,
        varios pares de archivos WBFS- pero el problema es el mismo, y
        vale la misma excepción.
 
-    Devuelve las rutas finales escritas (para `InstallResult.installed_paths`)."""
+    Devuelve (rutas finales escritas, respaldos que no se pudieron
+    borrar). Lo segundo casi siempre viene vacío: es el respaldo del paso
+    2, que se borra cuando el intercambio ya salió bien. Si ESE borrado
+    falla, la app quedó instalada correctamente pero su versión anterior
+    sigue ocupando lugar en una carpeta oculta que el usuario no va a
+    encontrar solo, así que se reporta en vez de ignorarse (mismo criterio
+    que `library.DestinationGuard._discard`)."""
     parent = final_dir.parent
     parent.mkdir(parents=True, exist_ok=True)
     pid = os.getpid()
@@ -6027,7 +6126,9 @@ def _stage_and_swap_unit(zf: zipfile.ZipFile, unit_members: list,
         except BaseException:
             shutil.rmtree(staging_dir, ignore_errors=True)
             raise
-        return [final_dir / Path(*r.parts) for r in relativos]
+        # Instalación nueva: no había versión anterior, así que tampoco
+        # hay respaldo que borrar.
+        return [final_dir / Path(*r.parts) for r in relativos], []
 
     try:
         os.replace(final_dir, backup_dir)
@@ -6054,9 +6155,16 @@ def _stage_and_swap_unit(zf: zipfile.ZipFile, unit_members: list,
         shutil.rmtree(staging_dir, ignore_errors=True)
         raise
     else:
-        shutil.rmtree(backup_dir, ignore_errors=True)
+        huerfanos: list = []
+        try:
+            shutil.rmtree(backup_dir)
+        except OSError:
+            # La app nueva YA está en su lugar: esto no cambia el
+            # resultado de la instalación, pero deja la versión anterior
+            # entera ocupando espacio en una carpeta oculta.
+            huerfanos.append(backup_dir)
 
-    return [final_dir / Path(*r.parts) for r in relativos]
+    return [final_dir / Path(*r.parts) for r in relativos], huerfanos
 
 
 # -------------------------------------------------------------------- API --
@@ -6152,11 +6260,14 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
                            (hechos[0] / total) if total else 1.0)
 
                 written: list = []
+                huerfanos: list = []
                 for unit_key, unit_members in unidades.items():
                     _check_cancel(cancel_event)
                     final_dir = dest_root / unit_key
-                    written.extend(_stage_and_swap_unit(
-                        zf, unit_members, final_dir, cancel_event, _paso))
+                    escritos, respaldos = _stage_and_swap_unit(
+                        zf, unit_members, final_dir, cancel_event, _paso)
+                    written.extend(escritos)
+                    huerfanos.extend(respaldos)
 
                 for info in sueltos:
                     _check_cancel(cancel_event)
@@ -6166,7 +6277,8 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
                 zf.close()
 
         return InstallResult(InstallStatus.OK, app.slug,
-                             installed_paths=tuple(written))
+                             installed_paths=tuple(written),
+                             orphaned_backups=tuple(huerfanos))
 
     except CancelRequested:
         return InstallResult(InstallStatus.CANCELLED, app.slug,
@@ -7756,7 +7868,7 @@ gi.require_version("Adw", "1")
 gi.require_version("Pango", "1.0")
 from gi.repository import Adw, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
 
-from .. import drives, golden_configs, oscwii_client, oscwii_installer
+from .. import drives, golden_configs, library, oplog, oscwii_client, oscwii_installer
 from ..i18n import _
 from ..oscwii_client import HomebrewApp
 from ..oscwii_installer import InstallStatus
@@ -8335,6 +8447,18 @@ class HomebrewStoreView(Gtk.Box):
                 self._show_toast(
                     _("Se aplicó la configuración maestra de '{name}'.")
                     .format(name=app.name))
+            # Mismo criterio que el aviso de la config maestra: la app
+            # quedó instalada (la tarjeta sigue en DONE), pero si el
+            # respaldo de la versión anterior no se pudo borrar hay una
+            # carpeta oculta ocupando espacio que el usuario no va a
+            # encontrar solo. Se avisa y se anota en el historial en vez
+            # de dejarlo pasar (ver `oscwii_installer._stage_and_swap_unit`).
+            if result.orphaned_backups:
+                aviso = library.format_orphaned_backups(result.orphaned_backups)
+                self._show_toast(
+                    _("'{name}' se instaló. {detail}")
+                    .format(name=app.name, detail=aviso))
+                oplog.record_orphaned_backup(self.op_log, app.name, aviso)
         elif result.status is InstallStatus.CANCELLED:
             state = _InstallState(kind=_CardState.IDLE)
             self._show_toast(_("Instalación de '{name}' cancelada.").format(name=app.name))
@@ -12108,6 +12232,17 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 detail = (f"a {dest.name}" if ok else result.stderr.strip()[:200])
                 msg = (f"Convertido a {dest.name}" if ok
                        else f"Error al convertir: {result.stderr.strip()[:200]}")
+                # El guard ya intentó borrar el respaldo al salir del
+                # `with`. Si no pudo, la conversión igual salió bien: el
+                # aviso se suma al mensaje y va como entrada propia del
+                # historial, en vez de perderse (ver
+                # `DestinationGuard._discard`).
+                if guard.orphaned_backups:
+                    aviso = library.format_orphaned_backups(guard.orphaned_backups)
+                    msg = f"{msg}. {aviso}"
+                    detail = f"{detail} · {aviso}" if detail else aviso
+                    GLib.idle_add(oplog.record_orphaned_backup,
+                                  self.op_log, game.title, aviso)
             except wit_wrapper.OperationCancelled:
                 # `wit_wrapper` ya mató el proceso y limpió el destino a
                 # medio escribir: no es un error, no hay nada que reportar
@@ -17653,6 +17788,96 @@ def test_baja_a_disco_antes_de_intercambiar(tmp_path, monkeypatch):
     assert orden == ["fsync", "replace"]
 
 
+# ------------------------------------------ Respaldos que quedan huérfanos --
+# Cuando la operación sale bien, `DestinationGuard` borra el respaldo. Si
+# ESE borrado falla, antes se ignoraba en silencio: el respaldo es un
+# archivo oculto que puede pesar varios GB (y en un WBFS dividido son
+# tres), así que el usuario se quedaba con la unidad llena por algo que no
+# podía ver ni encontrar.
+
+def test_un_commit_normal_no_deja_respaldos_huerfanos(tmp_path):
+    dest = tmp_path / "juego.wbfs"
+    dest.write_bytes(b"lo que ya estaba")
+
+    with library.DestinationGuard(dest) as guard:
+        dest.write_bytes(b"lo nuevo")
+        guard.commit()
+
+    assert guard.orphaned_backups == []
+    assert dest.read_bytes() == b"lo nuevo"
+    assert [p.name for p in tmp_path.iterdir()] == ["juego.wbfs"]
+
+
+def test_un_respaldo_que_no_se_puede_borrar_queda_registrado(tmp_path, monkeypatch):
+    """La operación salió bien igual -el resultado está donde tiene que
+    estar- así que no se levanta ninguna excepción: el respaldo que quedó
+    se anota para que quien usa el guard lo reporte."""
+    dest = tmp_path / "juego.wbfs"
+    dest.write_bytes(b"lo que ya estaba")
+
+    def _unlink_que_falla(self, *a, **kw):
+        raise OSError("unidad de solo lectura")
+    monkeypatch.setattr(Path, "unlink", _unlink_que_falla)
+
+    with library.DestinationGuard(dest) as guard:
+        dest.write_bytes(b"lo nuevo")
+        guard.commit()
+
+    assert len(guard.orphaned_backups) == 1
+    respaldo = guard.orphaned_backups[0]
+    assert respaldo.name.startswith(".juego.wbfs.respaldo-")
+    assert respaldo.exists(), "el respaldo sigue ahí: por eso hay que avisar"
+    assert dest.read_bytes() == b"lo nuevo"
+
+
+def test_un_wbfs_dividido_reporta_todos_los_respaldos(tmp_path, monkeypatch):
+    """Un juego dividido son varios archivos (wbfs/wbf1/wbf2), o sea
+    varios respaldos: el aviso tiene que nombrarlos a todos."""
+    for nombre in ("juego.wbfs", "juego.wbf1", "juego.wbf2"):
+        (tmp_path / nombre).write_bytes(b"x" * 16)
+
+    monkeypatch.setattr(Path, "unlink",
+                        lambda self, *a, **kw: (_ for _ in ()).throw(
+                            OSError("unidad de solo lectura")))
+
+    with library.DestinationGuard(tmp_path / "juego.wbfs") as guard:
+        guard.commit()
+
+    assert len(guard.orphaned_backups) == 3
+
+
+def test_el_aviso_de_respaldo_huerfano_dice_cuanto_y_donde(tmp_path):
+    """Sin la ruta el aviso no sirve: son archivos ocultos, así que el
+    usuario ve la unidad más llena y no tiene cómo encontrar qué la
+    ocupa."""
+    respaldo = tmp_path / ".juego.wbfs.respaldo-123"
+    respaldo.write_bytes(b"x" * (3 * 1024 * 1024))
+
+    aviso = library.format_orphaned_backups([respaldo])
+
+    assert str(respaldo) in aviso
+    assert "3.0 MB" in aviso
+
+
+def test_el_aviso_con_varios_respaldos_suma_el_total(tmp_path):
+    rutas = []
+    for i in range(3):
+        r = tmp_path / f".parte{i}.respaldo-123"
+        r.write_bytes(b"x" * (1024 * 1024))
+        rutas.append(r)
+
+    aviso = library.format_orphaned_backups(rutas)
+
+    assert "3" in aviso
+    assert "3.0 MB" in aviso
+    for r in rutas:
+        assert str(r) in aviso
+
+
+def test_sin_respaldos_huerfanos_no_hay_aviso():
+    assert library.format_orphaned_backups([]) == ""
+
+
 # ============================================================
 # FILE: tests/test_operations.py
 # ============================================================
@@ -18018,6 +18243,39 @@ def test_un_listener_que_falla_no_rompe_al_que_registro(log):
     log.add_listener(lambda: otros.append(1))
     log.record("Eliminando", "x", oplog.STATUS_OK)
     assert otros == [1]
+
+
+# ----------------------------------------- Aviso de respaldo huérfano --
+def test_registrar_un_respaldo_huerfano(log):
+    """Entrada propia y no un detalle escondido dentro de la operación que
+    lo dejó: la operación se completó bien -su entrada dice "Completada" y
+    está bien que lo diga- pero quedó espacio ocupado por un archivo
+    oculto, y eso tiene que verse al mirar el historial."""
+    oplog.record_orphaned_backup(
+        log, "Twilight Princess",
+        "No se pudo eliminar un respaldo temporal de 4.2 GB en /media/usb/.x.wbfs.respaldo-1")
+
+    entrada = log.entries()[0]
+    assert entrada.operation == oplog.ORPHANED_BACKUP_OPERATION
+    assert entrada.target == "Twilight Princess"
+    assert entrada.status == oplog.STATUS_PARTIAL
+    assert "4.2 GB" in entrada.detail
+    assert ".x.wbfs.respaldo-1" in entrada.detail
+
+
+def test_el_estado_no_es_error_porque_la_operacion_salio_bien(log):
+    """`STATUS_ERROR` diría que falló algo que el usuario pidió, y no es
+    el caso: lo que quedó pendiente es la limpieza."""
+    oplog.record_orphaned_backup(log, "x", "detalle")
+    assert log.entries()[0].status != oplog.STATUS_ERROR
+    assert log.entries()[0].status_label  # se puede mostrar
+
+
+def test_registrar_sin_historial_no_revienta():
+    """Mismo criterio que `golden_configs._log`: quien llama no tiene que
+    preguntar si hay historial (la vista de la tienda puede construirse
+    sin uno)."""
+    oplog.record_orphaned_backup(None, "x", "detalle")
 
 
 # ============================================================
@@ -19307,6 +19565,110 @@ def test_zip_con_apps_y_controllers_instala_los_dos(tmp_path, monkeypatch):
     assert (dest_root / "apps" / "Nintendont" / "boot.dol").read_bytes() == b"nintendont" * 50
     assert (dest_root / "controllers" / "gcadapter.ini").read_bytes() == b"[controller]\n"
     assert len(result.installed_paths) == 3
+    assert _sin_rastros_de_staging_o_respaldo(dest_root)
+
+
+# ------------------------------- El respaldo que no se pudo borrar (final) --
+def _fingir_rmtree_del_respaldo_que_falla(monkeypatch):
+    """Hace fallar el borrado del respaldo (y solo ese: el staging se
+    sigue limpiando de verdad).
+
+    El reemplazo RESPETA `ignore_errors`, igual que el `rmtree` real: si
+    no lo hiciera, el test pasaría también con la versión vieja del código
+    -que llamaba a `rmtree(..., ignore_errors=True)`- y no probaría nada.
+    Así, un `ignore_errors=True` se traga el error y no queda ningún
+    respaldo reportado, que es exactamente lo que se está arreglando."""
+    real = oscwii_installer.shutil.rmtree
+
+    def _rmtree(path, ignore_errors=False, **kw):
+        if ".wbm-respaldo-" in str(path):
+            if ignore_errors:
+                return
+            raise OSError("unidad de solo lectura")
+        return real(path, ignore_errors=ignore_errors, **kw)
+
+    monkeypatch.setattr(oscwii_installer.shutil, "rmtree", _rmtree)
+
+
+# Cuando el intercambio sale bien, el respaldo de la versión anterior se
+# borra. Si ESE borrado falla, la app quedó instalada correctamente pero
+# la versión anterior entera sigue ocupando lugar en una carpeta oculta
+# que el usuario no va a encontrar solo. Antes se ignoraba en silencio
+# (`rmtree(..., ignore_errors=True)`).
+
+def test_un_respaldo_que_no_se_puede_borrar_se_reporta(tmp_path, monkeypatch):
+    dest_root = tmp_path / "usb"
+    app_dir = dest_root / "apps" / "TestApp"
+    app_dir.mkdir(parents=True)
+    (app_dir / "boot.dol").write_bytes(b"version vieja" * 100)
+
+    _con_descarga_de(monkeypatch, {
+        "apps/TestApp/boot.dol": b"version nueva" * 100,
+    })
+
+    _fingir_rmtree_del_respaldo_que_falla(monkeypatch)
+
+    result = oscwii_installer.install_app(_fake_app(), dest_root)
+
+    # La instalación es un éxito: la app nueva YA está en su lugar.
+    assert result.ok, result.error
+    assert (app_dir / "boot.dol").read_bytes() == b"version nueva" * 100
+
+    # Pero el respaldo quedó, y eso se dice.
+    assert len(result.orphaned_backups) == 1
+    respaldo = result.orphaned_backups[0]
+    assert ".wbm-respaldo-" in respaldo.name
+    assert respaldo.is_dir(), "sigue ocupando espacio: por eso hay que avisar"
+    assert (respaldo / "boot.dol").read_bytes() == b"version vieja" * 100
+
+
+def test_el_aviso_del_respaldo_huerfano_dice_cuanto_ocupa(tmp_path, monkeypatch):
+    """El mensaje sale del mismo formateador que usa la conversión
+    (`library.format_orphaned_backups`), que para una carpeta suma el
+    árbol entero -no informa 0 bytes por ser un directorio."""
+    dest_root = tmp_path / "usb"
+    app_dir = dest_root / "apps" / "TestApp"
+    app_dir.mkdir(parents=True)
+    (app_dir / "boot.dol").write_bytes(b"x" * (2 * 1024 * 1024))
+
+    _con_descarga_de(monkeypatch, {"apps/TestApp/boot.dol": b"nuevo"})
+
+    _fingir_rmtree_del_respaldo_que_falla(monkeypatch)
+
+    result = oscwii_installer.install_app(_fake_app(), dest_root)
+    aviso = library.format_orphaned_backups(result.orphaned_backups)
+
+    assert "2.0 MB" in aviso
+    assert str(result.orphaned_backups[0]) in aviso
+
+
+def test_una_instalacion_nueva_no_reporta_respaldos(tmp_path, monkeypatch):
+    """No había versión anterior, así que no hay respaldo que borrar ni
+    nada que avisar."""
+    dest_root = tmp_path / "usb"
+    dest_root.mkdir()
+    _con_descarga_de(monkeypatch, {"apps/TestApp/boot.dol": b"contenido"})
+
+    result = oscwii_installer.install_app(_fake_app(), dest_root)
+
+    assert result.ok, result.error
+    assert result.orphaned_backups == ()
+
+
+def test_una_actualizacion_normal_no_reporta_respaldos(tmp_path, monkeypatch):
+    """No-regresión: con el borrado funcionando, el resultado no menciona
+    ningún respaldo y no queda nada en el destino."""
+    dest_root = tmp_path / "usb"
+    app_dir = dest_root / "apps" / "TestApp"
+    app_dir.mkdir(parents=True)
+    (app_dir / "boot.dol").write_bytes(b"vieja")
+
+    _con_descarga_de(monkeypatch, {"apps/TestApp/boot.dol": b"nueva"})
+
+    result = oscwii_installer.install_app(_fake_app(), dest_root)
+
+    assert result.ok, result.error
+    assert result.orphaned_backups == ()
     assert _sin_rastros_de_staging_o_respaldo(dest_root)
 
 

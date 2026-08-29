@@ -148,6 +148,30 @@ def atomic_target(dest: Path, *, mkparents: bool = False) -> Iterator[Path]:
         raise
 
 
+def path_size(path: Path) -> int:
+    """Bytes que ocupa `path`: el tamaño del archivo, o la suma del árbol
+    entero si es una carpeta.
+
+    Devuelve 0 si no se puede averiguar (permisos, se lo llevaron en el
+    medio, la unidad se desconectó). Es a propósito: esto se usa para
+    AVISARLE al usuario cuánto espacio le quedó ocupado un respaldo que no
+    se pudo borrar, así que no poder medirlo no puede hacer fallar nada
+    -el aviso importa más que el número."""
+    try:
+        if path.is_dir():
+            total = 0
+            for raiz, _dirs, archivos in os.walk(path):
+                for nombre in archivos:
+                    try:
+                        total += os.lstat(os.path.join(raiz, nombre)).st_size
+                    except OSError:
+                        pass
+            return total
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
 # -------------------------------------------- Datos instalados de la app --
 def installed_data_dirs(repo_relative: str, share_relative: str) -> list:
     """Directorios donde puede estar un dato instalado de la app, del más

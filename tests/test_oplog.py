@@ -142,3 +142,36 @@ def test_un_listener_que_falla_no_rompe_al_que_registro(log):
     log.add_listener(lambda: otros.append(1))
     log.record("Eliminando", "x", oplog.STATUS_OK)
     assert otros == [1]
+
+
+# ----------------------------------------- Aviso de respaldo huérfano --
+def test_registrar_un_respaldo_huerfano(log):
+    """Entrada propia y no un detalle escondido dentro de la operación que
+    lo dejó: la operación se completó bien -su entrada dice "Completada" y
+    está bien que lo diga- pero quedó espacio ocupado por un archivo
+    oculto, y eso tiene que verse al mirar el historial."""
+    oplog.record_orphaned_backup(
+        log, "Twilight Princess",
+        "No se pudo eliminar un respaldo temporal de 4.2 GB en /media/usb/.x.wbfs.respaldo-1")
+
+    entrada = log.entries()[0]
+    assert entrada.operation == oplog.ORPHANED_BACKUP_OPERATION
+    assert entrada.target == "Twilight Princess"
+    assert entrada.status == oplog.STATUS_PARTIAL
+    assert "4.2 GB" in entrada.detail
+    assert ".x.wbfs.respaldo-1" in entrada.detail
+
+
+def test_el_estado_no_es_error_porque_la_operacion_salio_bien(log):
+    """`STATUS_ERROR` diría que falló algo que el usuario pidió, y no es
+    el caso: lo que quedó pendiente es la limpieza."""
+    oplog.record_orphaned_backup(log, "x", "detalle")
+    assert log.entries()[0].status != oplog.STATUS_ERROR
+    assert log.entries()[0].status_label  # se puede mostrar
+
+
+def test_registrar_sin_historial_no_revienta():
+    """Mismo criterio que `golden_configs._log`: quien llama no tiene que
+    preguntar si hay historial (la vista de la tienda puede construirse
+    sin uno)."""
+    oplog.record_orphaned_backup(None, "x", "detalle")

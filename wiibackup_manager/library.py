@@ -48,6 +48,27 @@ def format_size(n: int) -> str:
     return f"{n / (1024 ** 2):.1f} MB"
 
 
+def format_orphaned_backups(rutas) -> str:
+    """Mensaje para el usuario sobre respaldos temporales que no se
+    pudieron borrar, con cuánto espacio ocupan y dónde están.
+
+    El "dónde" es lo que hace útil el aviso: son archivos ocultos (el
+    nombre empieza con punto) de varios GB, así que sin la ruta el usuario
+    ve la unidad más llena de lo que debería y no tiene forma de encontrar
+    lo que la está ocupando."""
+    rutas = [Path(r) for r in rutas]
+    if not rutas:
+        return ""
+    total = sum(fsutil.path_size(r) for r in rutas)
+    if len(rutas) == 1:
+        return _("No se pudo eliminar un respaldo temporal de {size} en "
+                 "{path}.").format(size=format_size(total), path=rutas[0])
+    return _("No se pudieron eliminar {n} respaldos temporales ({size} en "
+             "total): {paths}.").format(
+                 n=len(rutas), size=format_size(total),
+                 paths=", ".join(str(r) for r in rutas))
+
+
 def format_eta(seconds: float) -> str:
     """Tiempo estimado restante en formato corto ('45s', '2m 15s', '1h 5m')."""
     seconds = max(0, int(seconds))
@@ -882,6 +903,10 @@ class DestinationGuard:
         self._saved: list = []
         self._committed = False
         self._outputs_before: set = set()
+        # Respaldos que la operación terminó bien pero no se pudieron
+        # borrar (ver `_discard`). Quien usa el guard los lee DESPUÉS del
+        # `with` para avisarle al usuario y anotarlo en el historial.
+        self.orphaned_backups: list = []
 
     def __enter__(self) -> "DestinationGuard":
         if not self.enabled:
@@ -997,11 +1022,24 @@ class DestinationGuard:
         self._saved = []
 
     def _discard(self) -> None:
+        """Borra los respaldos: la operación salió bien y ya no hacen
+        falta.
+
+        Un borrado que falla NO se ignora. El respaldo es un archivo
+        oculto que puede pesar varios GB (un WBFS entero, y en un juego
+        dividido son tres archivos), así que quedarse callado dejaba al
+        usuario con la unidad llena por algo que no puede ver ni
+        encontrar. Tampoco es un error de la operación -la conversión
+        terminó bien y el resultado está donde tiene que estar-, así que
+        no se levanta nada: se anota en `orphaned_backups` y quien usa el
+        guard lo reporta (`format_orphaned_backups` +
+        `oplog.record_orphaned_backup`)."""
+        self.orphaned_backups = []
         for _original, respaldo in self._saved:
             try:
                 respaldo.unlink(missing_ok=True)
             except OSError:
-                pass
+                self.orphaned_backups.append(respaldo)
         self._saved = []
 
 

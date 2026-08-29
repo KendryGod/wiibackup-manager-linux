@@ -2366,6 +2366,17 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 detail = (f"a {dest.name}" if ok else result.stderr.strip()[:200])
                 msg = (f"Convertido a {dest.name}" if ok
                        else f"Error al convertir: {result.stderr.strip()[:200]}")
+                # El guard ya intentó borrar el respaldo al salir del
+                # `with`. Si no pudo, la conversión igual salió bien: el
+                # aviso se suma al mensaje y va como entrada propia del
+                # historial, en vez de perderse (ver
+                # `DestinationGuard._discard`).
+                if guard.orphaned_backups:
+                    aviso = library.format_orphaned_backups(guard.orphaned_backups)
+                    msg = f"{msg}. {aviso}"
+                    detail = f"{detail} · {aviso}" if detail else aviso
+                    GLib.idle_add(oplog.record_orphaned_backup,
+                                  self.op_log, game.title, aviso)
             except wit_wrapper.OperationCancelled:
                 # `wit_wrapper` ya mató el proceso y limpió el destino a
                 # medio escribir: no es un error, no hay nada que reportar

@@ -157,6 +157,12 @@ class InstallResult:
     error: str = ""
     # Rutas finales escritas bajo dest_root/apps, para loguear o listar.
     installed_paths: tuple = ()
+    # Respaldos de la versión anterior que se instalaron bien pero no se
+    # pudieron borrar después (ver `_stage_and_swap_unit`). La
+    # instalación es un éxito igual -`status` sigue siendo OK- pero
+    # quedaron carpetas ocultas ocupando espacio en la unidad, y eso hay
+    # que decirlo.
+    orphaned_backups: tuple = ()
 
     @property
     def ok(self) -> bool:
@@ -501,7 +507,7 @@ def _group_members(members: list) -> tuple[dict, list]:
 def _stage_and_swap_unit(zf: zipfile.ZipFile, unit_members: list,
                          final_dir: Path,
                          cancel_event: Optional[threading.Event],
-                         on_step: Callable[[], None]) -> list[Path]:
+                         on_step: Callable[[], None]) -> tuple[list, list]:
     """Instala UNA unidad -una subcarpeta de primer nivel del ZIP, ej.
     "apps/WiiDonut"- como bloque atómico: todo o nada, nunca una mezcla
     de archivos viejos y nuevos. Mismo patrón que
@@ -529,7 +535,13 @@ def _stage_and_swap_unit(zf: zipfile.ZipFile, unit_members: list,
        varios pares de archivos WBFS- pero el problema es el mismo, y
        vale la misma excepción.
 
-    Devuelve las rutas finales escritas (para `InstallResult.installed_paths`)."""
+    Devuelve (rutas finales escritas, respaldos que no se pudieron
+    borrar). Lo segundo casi siempre viene vacío: es el respaldo del paso
+    2, que se borra cuando el intercambio ya salió bien. Si ESE borrado
+    falla, la app quedó instalada correctamente pero su versión anterior
+    sigue ocupando lugar en una carpeta oculta que el usuario no va a
+    encontrar solo, así que se reporta en vez de ignorarse (mismo criterio
+    que `library.DestinationGuard._discard`)."""
     parent = final_dir.parent
     parent.mkdir(parents=True, exist_ok=True)
     pid = os.getpid()
@@ -563,7 +575,9 @@ def _stage_and_swap_unit(zf: zipfile.ZipFile, unit_members: list,
         except BaseException:
             shutil.rmtree(staging_dir, ignore_errors=True)
             raise
-        return [final_dir / Path(*r.parts) for r in relativos]
+        # Instalación nueva: no había versión anterior, así que tampoco
+        # hay respaldo que borrar.
+        return [final_dir / Path(*r.parts) for r in relativos], []
 
     try:
         os.replace(final_dir, backup_dir)
@@ -590,9 +604,16 @@ def _stage_and_swap_unit(zf: zipfile.ZipFile, unit_members: list,
         shutil.rmtree(staging_dir, ignore_errors=True)
         raise
     else:
-        shutil.rmtree(backup_dir, ignore_errors=True)
+        huerfanos: list = []
+        try:
+            shutil.rmtree(backup_dir)
+        except OSError:
+            # La app nueva YA está en su lugar: esto no cambia el
+            # resultado de la instalación, pero deja la versión anterior
+            # entera ocupando espacio en una carpeta oculta.
+            huerfanos.append(backup_dir)
 
-    return [final_dir / Path(*r.parts) for r in relativos]
+    return [final_dir / Path(*r.parts) for r in relativos], huerfanos
 
 
 # -------------------------------------------------------------------- API --
@@ -688,11 +709,14 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
                            (hechos[0] / total) if total else 1.0)
 
                 written: list = []
+                huerfanos: list = []
                 for unit_key, unit_members in unidades.items():
                     _check_cancel(cancel_event)
                     final_dir = dest_root / unit_key
-                    written.extend(_stage_and_swap_unit(
-                        zf, unit_members, final_dir, cancel_event, _paso))
+                    escritos, respaldos = _stage_and_swap_unit(
+                        zf, unit_members, final_dir, cancel_event, _paso)
+                    written.extend(escritos)
+                    huerfanos.extend(respaldos)
 
                 for info in sueltos:
                     _check_cancel(cancel_event)
@@ -702,7 +726,8 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
                 zf.close()
 
         return InstallResult(InstallStatus.OK, app.slug,
-                             installed_paths=tuple(written))
+                             installed_paths=tuple(written),
+                             orphaned_backups=tuple(huerfanos))
 
     except CancelRequested:
         return InstallResult(InstallStatus.CANCELLED, app.slug,

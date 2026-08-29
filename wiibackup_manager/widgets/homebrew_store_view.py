@@ -22,7 +22,7 @@ gi.require_version("Adw", "1")
 gi.require_version("Pango", "1.0")
 from gi.repository import Adw, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
 
-from .. import drives, golden_configs, oscwii_client, oscwii_installer
+from .. import drives, golden_configs, library, oplog, oscwii_client, oscwii_installer
 from ..i18n import _
 from ..oscwii_client import HomebrewApp
 from ..oscwii_installer import InstallStatus
@@ -601,6 +601,18 @@ class HomebrewStoreView(Gtk.Box):
                 self._show_toast(
                     _("Se aplicó la configuración maestra de '{name}'.")
                     .format(name=app.name))
+            # Mismo criterio que el aviso de la config maestra: la app
+            # quedó instalada (la tarjeta sigue en DONE), pero si el
+            # respaldo de la versión anterior no se pudo borrar hay una
+            # carpeta oculta ocupando espacio que el usuario no va a
+            # encontrar solo. Se avisa y se anota en el historial en vez
+            # de dejarlo pasar (ver `oscwii_installer._stage_and_swap_unit`).
+            if result.orphaned_backups:
+                aviso = library.format_orphaned_backups(result.orphaned_backups)
+                self._show_toast(
+                    _("'{name}' se instaló. {detail}")
+                    .format(name=app.name, detail=aviso))
+                oplog.record_orphaned_backup(self.op_log, app.name, aviso)
         elif result.status is InstallStatus.CANCELLED:
             state = _InstallState(kind=_CardState.IDLE)
             self._show_toast(_("Instalación de '{name}' cancelada.").format(name=app.name))

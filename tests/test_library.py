@@ -786,3 +786,93 @@ def test_baja_a_disco_antes_de_intercambiar(tmp_path, monkeypatch):
     library.copy_atomic(src, dest)
 
     assert orden == ["fsync", "replace"]
+
+
+# ------------------------------------------ Respaldos que quedan huérfanos --
+# Cuando la operación sale bien, `DestinationGuard` borra el respaldo. Si
+# ESE borrado falla, antes se ignoraba en silencio: el respaldo es un
+# archivo oculto que puede pesar varios GB (y en un WBFS dividido son
+# tres), así que el usuario se quedaba con la unidad llena por algo que no
+# podía ver ni encontrar.
+
+def test_un_commit_normal_no_deja_respaldos_huerfanos(tmp_path):
+    dest = tmp_path / "juego.wbfs"
+    dest.write_bytes(b"lo que ya estaba")
+
+    with library.DestinationGuard(dest) as guard:
+        dest.write_bytes(b"lo nuevo")
+        guard.commit()
+
+    assert guard.orphaned_backups == []
+    assert dest.read_bytes() == b"lo nuevo"
+    assert [p.name for p in tmp_path.iterdir()] == ["juego.wbfs"]
+
+
+def test_un_respaldo_que_no_se_puede_borrar_queda_registrado(tmp_path, monkeypatch):
+    """La operación salió bien igual -el resultado está donde tiene que
+    estar- así que no se levanta ninguna excepción: el respaldo que quedó
+    se anota para que quien usa el guard lo reporte."""
+    dest = tmp_path / "juego.wbfs"
+    dest.write_bytes(b"lo que ya estaba")
+
+    def _unlink_que_falla(self, *a, **kw):
+        raise OSError("unidad de solo lectura")
+    monkeypatch.setattr(Path, "unlink", _unlink_que_falla)
+
+    with library.DestinationGuard(dest) as guard:
+        dest.write_bytes(b"lo nuevo")
+        guard.commit()
+
+    assert len(guard.orphaned_backups) == 1
+    respaldo = guard.orphaned_backups[0]
+    assert respaldo.name.startswith(".juego.wbfs.respaldo-")
+    assert respaldo.exists(), "el respaldo sigue ahí: por eso hay que avisar"
+    assert dest.read_bytes() == b"lo nuevo"
+
+
+def test_un_wbfs_dividido_reporta_todos_los_respaldos(tmp_path, monkeypatch):
+    """Un juego dividido son varios archivos (wbfs/wbf1/wbf2), o sea
+    varios respaldos: el aviso tiene que nombrarlos a todos."""
+    for nombre in ("juego.wbfs", "juego.wbf1", "juego.wbf2"):
+        (tmp_path / nombre).write_bytes(b"x" * 16)
+
+    monkeypatch.setattr(Path, "unlink",
+                        lambda self, *a, **kw: (_ for _ in ()).throw(
+                            OSError("unidad de solo lectura")))
+
+    with library.DestinationGuard(tmp_path / "juego.wbfs") as guard:
+        guard.commit()
+
+    assert len(guard.orphaned_backups) == 3
+
+
+def test_el_aviso_de_respaldo_huerfano_dice_cuanto_y_donde(tmp_path):
+    """Sin la ruta el aviso no sirve: son archivos ocultos, así que el
+    usuario ve la unidad más llena y no tiene cómo encontrar qué la
+    ocupa."""
+    respaldo = tmp_path / ".juego.wbfs.respaldo-123"
+    respaldo.write_bytes(b"x" * (3 * 1024 * 1024))
+
+    aviso = library.format_orphaned_backups([respaldo])
+
+    assert str(respaldo) in aviso
+    assert "3.0 MB" in aviso
+
+
+def test_el_aviso_con_varios_respaldos_suma_el_total(tmp_path):
+    rutas = []
+    for i in range(3):
+        r = tmp_path / f".parte{i}.respaldo-123"
+        r.write_bytes(b"x" * (1024 * 1024))
+        rutas.append(r)
+
+    aviso = library.format_orphaned_backups(rutas)
+
+    assert "3" in aviso
+    assert "3.0 MB" in aviso
+    for r in rutas:
+        assert str(r) in aviso
+
+
+def test_sin_respaldos_huerfanos_no_hay_aviso():
+    assert library.format_orphaned_backups([]) == ""

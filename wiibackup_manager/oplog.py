@@ -54,6 +54,11 @@ _VALID_STATUSES = frozenset(STATUS_LABELS)
 MAX_ENTRIES = 500
 
 
+# Nombre (sin traducir, mismo criterio que `OperationKind.value`) de la
+# entrada que avisa que un respaldo temporal quedó ocupando espacio.
+ORPHANED_BACKUP_OPERATION = "Respaldo temporal no eliminado"
+
+
 @dataclass(frozen=True)
 class LogEntry:
     """Una operación terminada.
@@ -100,6 +105,26 @@ class LogEntry:
         """Fecha y hora para mostrar: '2026-08-23 14:35'."""
         moment = self.when()
         return moment.strftime("%Y-%m-%d %H:%M") if moment else self.timestamp
+
+
+def record_orphaned_backup(op_log: "Optional[OperationLog]", target: str,
+                           detail: str) -> None:
+    """Anota que una operación terminó bien pero dejó un respaldo temporal
+    sin borrar.
+
+    Va como entrada propia y no dentro del detalle de la operación que lo
+    dejó: la operación se completó -su entrada dice "Completada" y está
+    bien que lo diga- pero quedó espacio ocupado por un archivo oculto que
+    el usuario no va a encontrar solo. Con entrada propia el problema es
+    visible al mirar el historial en vez de estar escondido al final del
+    detalle de otra cosa.
+
+    `STATUS_PARTIAL` ("Terminada con errores") y no `STATUS_ERROR`: nada
+    de lo que el usuario pidió falló. Tolera `op_log=None` para que quien
+    llama no tenga que preguntar (mismo criterio que `golden_configs._log`)."""
+    if op_log is None:
+        return
+    op_log.record(ORPHANED_BACKUP_OPERATION, target, STATUS_PARTIAL, detail)
 
 
 def _coerce_entry(raw) -> Optional[LogEntry]:
