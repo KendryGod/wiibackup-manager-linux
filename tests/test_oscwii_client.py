@@ -27,15 +27,15 @@ from wiibackup_manager.oscwii_client import HomebrewApp
 # --------------------------------------------------------------- fixtures --
 @pytest.fixture(autouse=True)
 def _sandbox_oscwii_client(tmp_path, monkeypatch):
-    """Aísla la caché en disco y el estado en memoria del módulo (las
-    listas/diccionarios de pedidos en vuelo son módulo-nivel y persisten
-    entre tests dentro del mismo proceso si no se limpian)."""
+    """Aísla la caché en disco y el estado en memoria del módulo (los
+    registries de pedidos en vuelo son módulo-nivel y persisten entre
+    tests dentro del mismo proceso si no se limpian)."""
     monkeypatch.setattr(config, "CACHE_DIR", tmp_path / "cache")
-    oscwii_client._list_inflight.clear()
-    oscwii_client._icon_inflight.clear()
+    oscwii_client._list_jobs.forget()
+    oscwii_client._icon_jobs.forget()
     yield
-    oscwii_client._list_inflight.clear()
-    oscwii_client._icon_inflight.clear()
+    oscwii_client._list_jobs.forget()
+    oscwii_client._icon_jobs.forget()
 
 
 # ------------------------------------------------------------- utilidades --
@@ -82,6 +82,19 @@ def _api_dict(**overrides) -> dict:
 def _app(slug="WiiDonut",
          icon_url="https://hbb1.oscwii.org/api/contents/WiiDonut/icon.png") -> HomebrewApp:
     return HomebrewApp(slug=slug, name=slug, icon_url=icon_url)
+
+
+def _esperar(condicion, timeout: float = 5.0) -> bool:
+    """Espera a que `condicion()` sea verdadera.
+
+    Los pedidos asincrónicos se resuelven en un hilo del pool, así que el
+    resultado no llega en el mismo hilo que los pidió."""
+    limite = time.monotonic() + timeout
+    while time.monotonic() < limite:
+        if condicion():
+            return True
+        time.sleep(0.01)
+    return bool(condicion())
 
 
 # ============================================================================
@@ -392,7 +405,7 @@ def test_list_apps_load_cache_excepcion_inesperada(monkeypatch):
 
 
 # ============================================================================
-# Bloque C: fetch_apps_async / _run_list_job
+# Bloque C: fetch_apps_async
 # ============================================================================
 
 def test_fetch_apps_async_sin_on_done_no_dispara_nada(monkeypatch):
@@ -400,7 +413,7 @@ def test_fetch_apps_async_sin_on_done_no_dispara_nada(monkeypatch):
         oscwii_client, "list_apps",
         lambda: (_ for _ in ()).throw(AssertionError("no debería llamarse")))
     oscwii_client.fetch_apps_async(on_done=None)
-    assert oscwii_client._list_inflight == []
+    assert oscwii_client._list_jobs.in_flight() == 0
 
 
 def test_fetch_apps_async_dedupe_pedidos_concurrentes(monkeypatch):
@@ -440,36 +453,33 @@ def test_fetch_apps_async_dedupe_pedidos_concurrentes(monkeypatch):
     assert resultados[1][1] is resultado
 
 
-def test_run_list_job_excepcion_inesperada_da_error(monkeypatch):
+def test_list_error_result_mapea_la_excepcion(monkeypatch):
+    """El cableado propio de este módulo: a diferencia de las carátulas y
+    los íconos (que se resuelven como None), un fallo inesperado de
+    `list_apps` tiene que llegar a la interfaz como un `AppListResult` de
+    error con el motivo adentro."""
+    resultado = oscwii_client._list_error_result(RuntimeError("boom"))
+    assert resultado.status == oscwii_client.FetchStatus.ERROR
+    assert resultado.apps == ()
+    assert "boom" in resultado.error
+
+
+def test_fetch_apps_async_excepcion_inesperada_da_error(monkeypatch):
+    """Y el mismo cableado de punta a punta: `list_apps` ya captura por su
+    cuenta todo lo previsto, así que esto cubre un error de programación
+    que se escape, que no puede quedar perdido en un hilo del pool."""
     def boom():
         raise RuntimeError("boom")
 
     monkeypatch.setattr(oscwii_client, "list_apps", boom)
     resultados = []
-    oscwii_client._list_inflight.append(resultados.append)
 
-    oscwii_client._run_list_job()
+    oscwii_client.fetch_apps_async(on_done=resultados.append)
 
-    assert len(resultados) == 1
+    assert _esperar(lambda: len(resultados) == 1)
     assert resultados[0].status == oscwii_client.FetchStatus.ERROR
     assert "boom" in resultados[0].error
-
-
-def test_run_list_job_callback_con_excepcion_no_bloquea_los_demas(monkeypatch):
-    resultado_ok = oscwii_client.AppListResult(status=oscwii_client.FetchStatus.OK, apps=())
-    monkeypatch.setattr(oscwii_client, "list_apps", lambda: resultado_ok)
-    resultados = []
-
-    def cb_malo(r):
-        raise RuntimeError("boom")
-
-    def cb_bueno(r):
-        resultados.append(r)
-
-    oscwii_client._list_inflight.extend([cb_malo, cb_bueno])
-    oscwii_client._run_list_job()
-
-    assert resultados == [resultado_ok]
+    assert oscwii_client._list_jobs.in_flight() == 0
 
 
 # ============================================================================
@@ -586,7 +596,7 @@ def test_fetch_icon_async_sin_on_done_no_hace_nada(monkeypatch):
                          lambda *a, **kw: (_ for _ in ()).throw(
                              AssertionError("no debería descargar")))
     oscwii_client.fetch_icon_async(_app(), on_done=None)
-    assert oscwii_client._icon_inflight == {}
+    assert oscwii_client._icon_jobs.in_flight() == 0
 
 
 def test_fetch_icon_async_sin_icon_url_da_none_sincronico(monkeypatch):
@@ -649,34 +659,18 @@ def test_fetch_icon_async_dedupe_pedidos_concurrentes(monkeypatch, tmp_path):
     assert resultados[1][1] == destino
 
 
-def test_run_icon_job_get_icon_path_excepcion_inesperada_da_none(monkeypatch):
+def test_fetch_icon_async_excepcion_inesperada_da_none(monkeypatch):
+    """El ícono es cosmético: un fallo inesperado se resuelve como "no hay
+    ícono" (la tarjeta se queda con el placeholder), nunca como una
+    excepción perdida en un hilo del pool."""
     def boom(app, force=False):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(oscwii_client, "get_icon_path", boom)
-    app = _app()
     resultados = []
-    oscwii_client._icon_inflight[app.slug] = [resultados.append]
 
-    oscwii_client._run_icon_job(app)
+    oscwii_client.fetch_icon_async(_app(), on_done=resultados.append)
 
+    assert _esperar(lambda: len(resultados) == 1)
     assert resultados == [None]
-
-
-def test_run_icon_job_callback_con_excepcion_no_bloquea_los_demas(monkeypatch, tmp_path):
-    destino = tmp_path / "x.png"
-    monkeypatch.setattr(oscwii_client, "get_icon_path",
-                         lambda app, force=False: destino)
-    app = _app()
-    resultados = []
-
-    def cb_malo(path):
-        raise RuntimeError("boom")
-
-    def cb_bueno(path):
-        resultados.append(path)
-
-    oscwii_client._icon_inflight[app.slug] = [cb_malo, cb_bueno]
-    oscwii_client._run_icon_job(app)
-
-    assert resultados == [destino]
+    assert oscwii_client._icon_jobs.in_flight() == 0

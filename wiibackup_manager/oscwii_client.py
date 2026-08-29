@@ -49,10 +49,8 @@ tarjeta/USB (SD:/apps/<carpeta>/boot.dol + meta.xml + icon.png).
 from __future__ import annotations
 
 import json
-import threading
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -60,6 +58,7 @@ from typing import Callable, Optional
 
 from . import config
 from .fsutil import PNG_MAGIC, atomic_target
+from .inflight import InflightRegistry
 
 OSC_API_BASE = "https://hbb1.oscwii.org"
 OSC_CONTENTS_URL = f"{OSC_API_BASE}/api/v3/contents"
@@ -318,9 +317,12 @@ def list_apps() -> AppListResult:
 # disparar otro. `on_done` corre en el hilo del pool: quien toque widgets
 # de GTK adentro tiene que reenviarlo con `GLib.idle_add` (eso lo hace la
 # UI del Paso 3, no este módulo).
-_list_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="oscwii-list")
-_list_inflight: list = []
-_list_lock = threading.Lock()
+# El catálogo es uno solo, así que este registry tiene una única clave
+# (`_LIST_KEY`): o hay un pedido en curso o no lo hay. Es el caso
+# degenerado del mismo patrón que usan los íconos de acá abajo y las
+# carátulas/metadata de `gametdb`.
+_list_jobs = InflightRegistry(1, "oscwii-list")
+_LIST_KEY = "contents"
 
 AppListCallback = Callable[[AppListResult], None]
 
@@ -329,28 +331,15 @@ def fetch_apps_async(on_done: Optional[AppListCallback] = None) -> None:
     """Pide la lista de apps y llama a `on_done(resultado)` al terminar."""
     if on_done is None:
         return
-    with _list_lock:
-        _list_inflight.append(on_done)
-        if len(_list_inflight) > 1:
-            return
-    _list_executor.submit(_run_list_job)
+    _list_jobs.submit(_LIST_KEY, list_apps, on_done,
+                      on_error=_list_error_result)
 
 
-def _run_list_job() -> None:
-    try:
-        result = list_apps()
-    except Exception as e:  # noqa: BLE001
-        result = AppListResult(status=FetchStatus.ERROR, apps=(), error=str(e))
-    with _list_lock:
-        callbacks = list(_list_inflight)
-        _list_inflight.clear()
-    for cb in callbacks:
-        try:
-            cb(result)
-        except Exception:
-            # Un callback que falla (p. ej. una vista que ya se cerró) no
-            # puede llevarse puestos a los demás.
-            pass
+def _list_error_result(exc: BaseException) -> AppListResult:
+    """Un fallo inesperado de `list_apps` (que ya captura todo lo previsto
+    por su cuenta) igual tiene que llegar a la interfaz como un resultado
+    y no como una excepción perdida en un hilo del pool."""
+    return AppListResult(status=FetchStatus.ERROR, apps=(), error=str(exc))
 
 
 # --- Íconos de cada app (Paso 3: la tienda los muestra en cada tarjeta) --
@@ -431,10 +420,7 @@ def get_icon_path(app: HomebrewApp, force: bool = False) -> Optional[Path]:
 # cientos de tarjetas pidiendo su ícono a la vez- se cuelgan del que ya
 # está en vuelo en vez de disparar una descarga por tarjeta.
 _ICON_DOWNLOAD_WORKERS = 6
-_icon_executor = ThreadPoolExecutor(
-    max_workers=_ICON_DOWNLOAD_WORKERS, thread_name_prefix="oscwii-icon")
-_icon_inflight: dict = {}
-_icon_lock = threading.Lock()
+_icon_jobs = InflightRegistry(_ICON_DOWNLOAD_WORKERS, "oscwii-icon")
 
 IconCallback = Callable[[Optional[Path]], None]
 
@@ -457,25 +443,4 @@ def fetch_icon_async(app: HomebrewApp, on_done: Optional[IconCallback] = None) -
         on_done(cached)
         return
 
-    with _icon_lock:
-        waiting = _icon_inflight.get(app.slug)
-        if waiting is not None:
-            waiting.append(on_done)
-            return
-        _icon_inflight[app.slug] = [on_done]
-
-    _icon_executor.submit(_run_icon_job, app)
-
-
-def _run_icon_job(app: HomebrewApp) -> None:
-    try:
-        path = get_icon_path(app)
-    except Exception:
-        path = None
-    with _icon_lock:
-        callbacks = _icon_inflight.pop(app.slug, [])
-    for cb in callbacks:
-        try:
-            cb(path)
-        except Exception:
-            pass
+    _icon_jobs.submit(app.slug, lambda: get_icon_path(app), on_done)

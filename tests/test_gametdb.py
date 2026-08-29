@@ -37,19 +37,17 @@ def _sandbox_gametdb(tmp_path, monkeypatch):
 
     Sin esto, dos tests que corran en el mismo proceso compartirían
     `config.CACHE_DIR`/`COVERS_DIR` (fijados una sola vez por `conftest.py`
-    al importar) y los diccionarios `_inflight`/`_extra_cache`/el índice de
-    wiitdb en memoria, que persisten entre tests porque son módulo-nivel."""
+    al importar), los registries de pedidos en vuelo y el índice de wiitdb
+    en memoria, que persisten entre tests porque son módulo-nivel."""
     monkeypatch.setattr(config, "CACHE_DIR", tmp_path / "cache")
     monkeypatch.setattr(config, "COVERS_DIR", tmp_path / "cache" / "covers")
     monkeypatch.setattr(gametdb, "_wiitdb_index", None)
     monkeypatch.setattr(gametdb, "_wiitdb_failed_at", 0.0)
-    gametdb._inflight.clear()
-    gametdb._extra_inflight.clear()
-    gametdb._extra_cache.clear()
+    gametdb._cover_jobs.forget()
+    gametdb._extra_jobs.forget()
     yield
-    gametdb._inflight.clear()
-    gametdb._extra_inflight.clear()
-    gametdb._extra_cache.clear()
+    gametdb._cover_jobs.forget()
+    gametdb._extra_jobs.forget()
 
 
 # ------------------------------------------------------------- utilidades --
@@ -98,6 +96,19 @@ def _fake_urlopen_sequence(items):
         return item
 
     return _fake
+
+
+def _esperar(condicion, timeout: float = 5.0) -> bool:
+    """Espera a que `condicion()` sea verdadera.
+
+    Los pedidos asincrónicos se resuelven en un hilo del pool, así que el
+    resultado no llega en el mismo hilo que los pidió."""
+    limite = time.monotonic() + timeout
+    while time.monotonic() < limite:
+        if condicion():
+            return True
+        time.sleep(0.01)
+    return bool(condicion())
 
 
 def _zip_with_member(name: str, data: bytes) -> bytes:
@@ -510,40 +521,26 @@ def test_fetch_cover_async_dedupe_pedidos_concurrentes(monkeypatch, tmp_path):
     assert resultados[1][1] == resultado_path
 
 
-def test_run_cover_job_callback_con_excepcion_no_bloquea_los_demas(tmp_path, monkeypatch):
-    destino = tmp_path / "x.png"
-    monkeypatch.setattr(gametdb, "get_cover_path", lambda *a, **kw: destino)
-    key = ("RMCP01", "EN", "wii")
-    resultados = []
-
-    def cb_malo(path):
-        raise RuntimeError("boom")
-
-    def cb_bueno(path):
-        resultados.append(path)
-
-    gametdb._inflight[key] = [cb_malo, cb_bueno]
-    gametdb._run_cover_job(key)
-
-    assert resultados == [destino]
-    assert key not in gametdb._inflight
-
-
-def test_run_cover_job_get_cover_path_excepcion_inesperada_da_none(monkeypatch):
+def test_fetch_cover_async_excepcion_inesperada_da_none(monkeypatch):
     """Un error de programación en `get_cover_path` (no una excepción de
     red ya contemplada) no puede dejar el worker colgado ni el callback
-    sin llamar: se resuelve como "no hay carátula"."""
+    sin llamar: se resuelve como "no hay carátula".
+
+    Va por la API pública y no por las internas del registry: lo que se
+    verifica acá es el cableado de gametdb (que no pasa ningún `on_error`,
+    o sea que le corresponde el None por defecto). El comportamiento
+    genérico del registry se prueba en `test_inflight.py`."""
     def fake_get_cover_path(*a, **kw):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(gametdb, "get_cover_path", fake_get_cover_path)
-    key = ("RMCP01", "EN", "wii")
     resultados = []
-    gametdb._inflight[key] = [resultados.append]
 
-    gametdb._run_cover_job(key)
+    gametdb.fetch_cover_async("RMCP01", region="EN", on_done=resultados.append)
 
+    assert _esperar(lambda: len(resultados) == 1)
     assert resultados == [None]
+    assert gametdb.covers_in_flight() == 0
 
 
 # ============================================================================
@@ -957,16 +954,27 @@ def test_fetch_extra_info_async_sin_on_done_no_hace_nada(monkeypatch):
 
 
 def test_fetch_extra_info_async_usa_resultado_cacheado_sin_recalcular(monkeypatch):
+    """El segundo pedido igual se contesta en el acto y en el hilo que
+    llama, sin volver a consultar el índice ni ocupar el worker."""
+    cached_info = gametdb.GameExtraInfo(genre="Racing")
+    llamadas = []
+    monkeypatch.setattr(gametdb, "get_game_extra_info",
+                         lambda gid, lang: llamadas.append(1) or cached_info)
+    monkeypatch.setattr(gametdb, "wiitdb_index_available", lambda: True)
+
+    primeros = []
+    gametdb.fetch_extra_info_async("RMCP01", language="EN", on_done=primeros.append)
+    assert _esperar(lambda: len(primeros) == 1)
+
+    # Ahora consultar de nuevo sería un error: el resultado ya se recordó.
     monkeypatch.setattr(gametdb, "get_game_extra_info",
                          lambda *a, **kw: (_ for _ in ()).throw(
                              AssertionError("no debería recalcular")))
-    key = ("RMCP01", "EN")
-    cached_info = gametdb.GameExtraInfo(genre="Racing")
-    gametdb._extra_cache[key] = cached_info
-
     resultados = []
     gametdb.fetch_extra_info_async("RMCP01", language="EN", on_done=resultados.append)
+
     assert resultados == [cached_info]
+    assert len(llamadas) == 1
 
 
 def test_fetch_extra_info_async_dedupe_pedidos_concurrentes(monkeypatch):
@@ -1008,65 +1016,80 @@ def test_fetch_extra_info_async_dedupe_pedidos_concurrentes(monkeypatch):
     assert resultados[0][1] is resultados[1][1]
 
 
-def test_run_extra_info_job_cachea_none_si_el_indice_esta_disponible(monkeypatch):
+# La regla de "qué resultado vale la pena recordar" es la única lógica de
+# negocio que gametdb le pasa al registry compartido, así que se prueba
+# como lo que es: una función suya, y después su cableado de punta a punta.
+def test_result_is_final_con_info_encontrada(monkeypatch):
+    monkeypatch.setattr(gametdb, "wiitdb_index_available", lambda: False)
+    assert gametdb._extra_result_is_final(gametdb.GameExtraInfo(genre="Racing"))
+
+
+def test_result_is_final_none_con_el_indice_disponible(monkeypatch):
     """None puede significar "GameTDB no tiene este juego" (definitivo) o
     "no se pudo bajar el volcado" (temporal). Con el índice disponible, es
-    lo primero: se cachea."""
-    monkeypatch.setattr(gametdb, "get_game_extra_info", lambda gid, lang: None)
+    lo primero: se recuerda."""
     monkeypatch.setattr(gametdb, "wiitdb_index_available", lambda: True)
-    key = ("ZZZZ99", "EN")
-    gametdb._extra_inflight[key] = [lambda info: None]
-
-    gametdb._run_extra_info_job(key)
-
-    assert key in gametdb._extra_cache
-    assert gametdb._extra_cache[key] is None
+    assert gametdb._extra_result_is_final(None)
 
 
-def test_run_extra_info_job_no_cachea_none_si_el_indice_no_esta_disponible(monkeypatch):
+def test_result_is_final_none_sin_el_indice_disponible(monkeypatch):
     """Sin índice disponible (sin internet / servidor caído), el None es
-    temporal: no se cachea, para poder reintentar cuando vuelva la
+    temporal: NO se recuerda, para poder reintentar cuando vuelva la
     conexión."""
-    monkeypatch.setattr(gametdb, "get_game_extra_info", lambda gid, lang: None)
     monkeypatch.setattr(gametdb, "wiitdb_index_available", lambda: False)
-    key = ("ZZZZ99", "EN")
-    gametdb._extra_inflight[key] = [lambda info: None]
-
-    gametdb._run_extra_info_job(key)
-
-    assert key not in gametdb._extra_cache
+    assert not gametdb._extra_result_is_final(None)
 
 
-def test_run_extra_info_job_callback_con_excepcion_no_bloquea_los_demas(monkeypatch):
+def test_un_none_definitivo_se_recuerda_y_no_se_vuelve_a_consultar(monkeypatch):
+    """Cableado de punta a punta de la regla anterior: con el índice
+    disponible, el segundo pedido igual se contesta con lo recordado sin
+    volver a consultar."""
+    llamadas = []
     monkeypatch.setattr(gametdb, "get_game_extra_info",
-                         lambda gid, lang: gametdb.GameExtraInfo(genre="Racing"))
+                         lambda gid, lang: llamadas.append(1) or None)
     monkeypatch.setattr(gametdb, "wiitdb_index_available", lambda: True)
-    key = ("RMCP01", "EN")
-    resultados = []
 
-    def cb_malo(info):
-        raise RuntimeError("boom")
+    primeros = []
+    gametdb.fetch_extra_info_async("ZZZZ99", language="EN", on_done=primeros.append)
+    assert _esperar(lambda: len(primeros) == 1)
 
-    def cb_bueno(info):
-        resultados.append(info)
+    segundos = []
+    gametdb.fetch_extra_info_async("ZZZZ99", language="EN", on_done=segundos.append)
 
-    gametdb._extra_inflight[key] = [cb_malo, cb_bueno]
-    gametdb._run_extra_info_job(key)
-
-    assert len(resultados) == 1
-    assert resultados[0].genre == "Racing"
+    assert segundos == [None]      # contestado en el acto, sin pasar por el pool
+    assert len(llamadas) == 1      # no se volvió a consultar
 
 
-def test_run_extra_info_job_excepcion_inesperada_da_none(monkeypatch):
+def test_un_none_temporal_no_se_recuerda_y_se_reintenta(monkeypatch):
+    """La otra mitad: sin índice disponible el None no se recuerda, así
+    que un pedido posterior vuelve a intentar de verdad."""
+    llamadas = []
+    monkeypatch.setattr(gametdb, "get_game_extra_info",
+                         lambda gid, lang: llamadas.append(1) or None)
+    monkeypatch.setattr(gametdb, "wiitdb_index_available", lambda: False)
+
+    primeros = []
+    gametdb.fetch_extra_info_async("ZZZZ99", language="EN", on_done=primeros.append)
+    assert _esperar(lambda: len(primeros) == 1)
+
+    segundos = []
+    gametdb.fetch_extra_info_async("ZZZZ99", language="EN", on_done=segundos.append)
+    assert _esperar(lambda: len(segundos) == 1)
+
+    assert segundos == [None]
+    assert len(llamadas) == 2      # se reintentó
+
+
+def test_fetch_extra_info_async_excepcion_inesperada_da_none(monkeypatch):
     def fake_get_extra(gid, lang):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(gametdb, "get_game_extra_info", fake_get_extra)
     monkeypatch.setattr(gametdb, "wiitdb_index_available", lambda: True)
-    key = ("RMCP01", "EN")
     resultados = []
-    gametdb._extra_inflight[key] = [resultados.append]
 
-    gametdb._run_extra_info_job(key)
+    gametdb.fetch_extra_info_async("RMCP01", language="EN", on_done=resultados.append)
 
+    assert _esperar(lambda: len(resultados) == 1)
     assert resultados == [None]
+    assert gametdb.extra_info_in_flight() == 0

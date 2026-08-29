@@ -20,7 +20,6 @@ import urllib.request
 import urllib.error
 import xml.etree.ElementTree as ET
 import zipfile
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -29,6 +28,7 @@ from . import config
 from .disc_header import is_valid_game_id, validate_game_id
 from .fsutil import PNG_MAGIC, atomic_target
 from .i18n import _
+from .inflight import InflightRegistry
 
 # Una plantilla por consola, aunque hoy las dos apunten al mismo lugar:
 # se probó en serio contra el servidor (pedidos reales, no documentación)
@@ -256,18 +256,14 @@ def get_cover_path(game_id: str, region: str = "EN", force: bool = False,
 # cuántas vistas pidan carátulas al mismo tiempo, nunca hay más de
 # `_COVER_DOWNLOAD_WORKERS` descargas en vuelo. Y una carátula lenta o
 # colgada ocupa como mucho un worker; el resto sigue.
+#
+# La clave del registry es (game_id, región, consola): un rescan
+# reconstruye todas las filas y vuelve a pedir las mismas carátulas, y sin
+# esto cada rescan encolaría de nuevo descargas que ya están corriendo.
+# Ver `inflight.InflightRegistry`, compartido con la metadata de acá abajo
+# y con la lista/íconos de `oscwii_client`.
 _COVER_DOWNLOAD_WORKERS = 6
-_cover_executor = ThreadPoolExecutor(
-    max_workers=_COVER_DOWNLOAD_WORKERS, thread_name_prefix="cover-dl"
-)
-
-# Descargas en vuelo, por (game_id, región). Un rescan reconstruye todas
-# las filas y vuelve a pedir las mismas carátulas: sin esto, cada rescan
-# encolaría de nuevo descargas que ya están corriendo. En vez de eso, el
-# pedido nuevo se cuelga del que ya está en curso y recibe el mismo
-# resultado cuando termina.
-_inflight: dict = {}
-_inflight_lock = threading.Lock()
+_cover_jobs = InflightRegistry(_COVER_DOWNLOAD_WORKERS, "cover-dl")
 
 CoverCallback = Callable[[Optional[Path]], None]
 
@@ -302,40 +298,15 @@ def fetch_cover_async(game_id: str, region: str = "EN",
         on_done(cached)
         return
 
-    key = (game_id, region, console)
-    with _inflight_lock:
-        waiting = _inflight.get(key)
-        if waiting is not None:
-            # Ya hay una descarga en curso para esta carátula: colgarse de
-            # ella en vez de encolar otra igual.
-            waiting.append(on_done)
-            return
-        _inflight[key] = [on_done]
-
-    _cover_executor.submit(_run_cover_job, key)
-
-
-def _run_cover_job(key: tuple) -> None:
-    game_id, region, console = key
-    try:
-        path = get_cover_path(game_id, region, console=console)
-    except Exception:
-        path = None
-    with _inflight_lock:
-        callbacks = _inflight.pop(key, [])
-    for cb in callbacks:
-        try:
-            cb(path)
-        except Exception:
-            # Un callback que falla (p. ej. una fila que ya no existe) no
-            # puede llevarse puestos a los demás ni al worker del pool.
-            pass
+    _cover_jobs.submit(
+        (game_id, region, console),
+        lambda: get_cover_path(game_id, region, console=console),
+        on_done)
 
 
 def covers_in_flight() -> int:
     """Cuántas carátulas distintas se están descargando ahora mismo."""
-    with _inflight_lock:
-        return len(_inflight)
+    return _cover_jobs.in_flight()
 
 
 # --- Metadata extendida (género, jugadores, fecha, publisher, developer) ---
@@ -790,25 +761,22 @@ def get_game_extra_info(game_id: str,
 # es una búsqueda en un dict y no necesita paralelismo. Lo importante es
 # que nada de esto ocurra en el hilo de GTK: una biblioteca de 300 juegos
 # pide metadata para las 300 filas y no puede congelar la ventana.
-_metadata_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wiitdb")
-
 ExtraInfoCallback = Callable[[Optional[GameExtraInfo]], None]
 
 # Consultas de metadata en vuelo y resultados ya resueltos, por
-# (game_id, idioma). Mismo patrón que el `_inflight` de las carátulas, y
-# por el mismo motivo: la Biblioteca, Transferir y el panel de detalle
-# piden lo mismo, y cada rescan vuelve a pedir la biblioteca entera. Sin
-# esto, 300 juegos generaban 300 tareas encoladas contra UN solo worker,
-# cada una reteniendo su callback (y con él la fila que lo creó) hasta que
-# le tocara el turno.
+# (game_id, idioma). El mismo registry que usan las carátulas de acá
+# arriba, y por el mismo motivo: la Biblioteca, Transferir y el panel de
+# detalle piden lo mismo, y cada rescan vuelve a pedir la biblioteca
+# entera. Sin esto, 300 juegos generaban 300 tareas encoladas contra UN
+# solo worker, cada una reteniendo su callback (y con él la fila que lo
+# creó) hasta que le tocara el turno.
 #
-# La caché de resultados es barata y vale la pena: lo que se guarda es una
-# referencia al GameExtraInfo que ya está en memoria dentro del índice de
-# wiitdb.xml, no una copia, y evita rehacer la búsqueda y el parseo de
+# `remember_results=True`: acá, a diferencia de las carátulas, el
+# resultado se guarda en memoria. Es barato -lo que se guarda es una
+# referencia al GameExtraInfo que ya está adentro del índice de
+# wiitdb.xml, no una copia- y evita rehacer la búsqueda y el parseo de
 # controles/sinopsis en cada rescan.
-_extra_inflight: dict = {}
-_extra_cache: dict = {}
-_extra_lock = threading.Lock()
+_extra_jobs = InflightRegistry(1, "wiitdb", remember_results=True)
 
 
 def fetch_extra_info_async(game_id: str, language: str = DEFAULT_LANGUAGE,
@@ -832,53 +800,24 @@ def fetch_extra_info_async(game_id: str, language: str = DEFAULT_LANGUAGE,
         return
 
     game_id = validate_game_id(game_id)
-    key = (game_id, language)
-
-    with _extra_lock:
-        if key in _extra_cache:
-            cached = _extra_cache[key]
-            resolver = True
-        else:
-            resolver = False
-            waiting = _extra_inflight.get(key)
-            if waiting is not None:
-                # Ya hay una consulta igual en curso: colgarse de ella.
-                waiting.append(on_done)
-                return
-            _extra_inflight[key] = [on_done]
-    if resolver:
-        on_done(cached)
-        return
-
-    _metadata_executor.submit(_run_extra_info_job, key)
+    _extra_jobs.submit(
+        (game_id, language),
+        lambda: get_game_extra_info(game_id, language),
+        on_done,
+        remember_when=_extra_result_is_final)
 
 
-def _run_extra_info_job(key: tuple) -> None:
-    game_id, language = key
-    try:
-        info = get_game_extra_info(game_id, language)
-    except Exception:
-        info = None
-    # Un None puede significar dos cosas muy distintas: "GameTDB no tiene
-    # este juego" (definitivo, vale cachearlo) o "no se pudo bajar el
-    # volcado" (temporal: sin internet, servidor caído). Cachear el
-    # segundo como definitivo dejaba la biblioteca sin metadata para
-    # siempre aunque volviera la conexión.
-    definitivo = info is not None or wiitdb_index_available()
-    with _extra_lock:
-        callbacks = _extra_inflight.pop(key, [])
-        if definitivo:
-            _extra_cache[key] = info
-    for cb in callbacks:
-        try:
-            cb(info)
-        except Exception:
-            # Un callback que falla (p. ej. una fila que ya no existe) no
-            # puede llevarse puestos a los demás ni al worker.
-            pass
+def _extra_result_is_final(info: Optional[GameExtraInfo]) -> bool:
+    """Si vale la pena recordar `info` como respuesta definitiva.
+
+    Un None puede significar dos cosas muy distintas: "GameTDB no tiene
+    este juego" (definitivo, vale recordarlo) o "no se pudo bajar el
+    volcado" (temporal: sin internet, servidor caído). Recordar el segundo
+    como definitivo dejaba la biblioteca sin metadata para siempre aunque
+    volviera la conexión."""
+    return info is not None or wiitdb_index_available()
 
 
 def extra_info_in_flight() -> int:
     """Cuántas consultas de metadata distintas están en curso."""
-    with _extra_lock:
-        return len(_extra_inflight)
+    return _extra_jobs.in_flight()
