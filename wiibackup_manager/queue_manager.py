@@ -638,6 +638,16 @@ class TransferQueue:
                   "ruta en Preferencias.").format(binary=job.wit_binary),
                 oplog.STATUS_ERROR, op=op)
             return
+        except library.RollbackFailedError as e:
+            # Caso grave: la conversión falló Y ADEMÁS no se pudo devolver
+            # el original a su lugar (típico en un WBFS dividido si falla
+            # justo una de las partes). `user_message` distingue esto de
+            # un "la conversión falló" común -acá el juego puede haber
+            # quedado inservible, y el respaldo que sigue existiendo (ver
+            # `e.pending`) es la única forma de rescatarlo a mano.
+            self._finish_job(job, JobStatus.ERROR, e.user_message(),
+                             oplog.STATUS_ERROR, op=op)
+            return
         except Exception as e:  # noqa: BLE001
             if job.cancel_token.cancelled:
                 # El fallo es consecuencia de haber matado a `wit` al

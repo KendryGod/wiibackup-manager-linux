@@ -774,6 +774,54 @@ def wbfs_group(dest: Path) -> list:
     return miembros
 
 
+class RollbackFailedError(RuntimeError):
+    """`DestinationGuard._restore()` no pudo devolver TODOS los
+    originales apartados a su lugar: al menos un respaldo temporal
+    quedó sin restaurar.
+
+    Nunca se levanta desde una operación exitosa: solo puede pasar
+    adentro de `_restore()`, que a su vez solo corre después de que algo
+    YA había fallado antes (la conversión, una cancelación, o el propio
+    apartado del respaldo en `__enter__`). O sea que cuando esto se
+    levanta hay DOS problemas encadenados, no uno -y `original_error`,
+    si se lo pudo determinar, es el primero de los dos: quien atrape
+    esta excepción tiene que nombrar ambos en el mensaje final, "algo
+    falló" no alcanza para un archivo que puede haber quedado
+    inservible.
+
+    `pending` es la lista de `(original, respaldo)` que no volvieron a
+    su lugar -en un WBFS dividido puede ser una sola de las tres partes-:
+    el archivo de respaldo TODAVÍA existe en esa ruta, nada se perdió,
+    pero alguien tiene que moverlo a mano."""
+
+    def __init__(self, pending: list[tuple[Path, Path]],
+                original_error: BaseException | None = None):
+        self.pending = list(pending)
+        self.original_error = original_error
+        detalle = "; ".join(
+            f"{original} (respaldo en {respaldo})"
+            for original, respaldo in self.pending)
+        super().__init__(
+            "No se pudo restaurar el archivo original después de un "
+            f"error: {detalle}")
+
+    def user_message(self) -> str:
+        """El mensaje para mostrarle al usuario -no `str(self)` a secas:
+        acá hay DOS problemas (por qué se estaba restaurando, y que
+        además la restauración falló) y hay que nombrar los dos, o el
+        usuario ve "la conversión falló" sin enterarse de que el
+        original puede haber quedado inservible. Si no se conoce el
+        motivo original (`self.original_error is None`, el caso más raro:
+        `_restore()` se llamó sin que nada hubiera fallado antes) se
+        vuelve al mensaje de acá nomás."""
+        if self.original_error is None:
+            return str(self)
+        return _(
+            "La conversión falló ({motivo}) y además no se pudo "
+            "restaurar completamente el archivo original: {detalle}"
+        ).format(motivo=str(self.original_error), detalle=str(self))
+
+
 class DestinationGuard:
     """Aparta lo que ya hay en el destino y lo devuelve si algo falla.
 
@@ -821,10 +869,19 @@ class DestinationGuard:
             respaldo = original.with_name(f".{original.name}{marca}")
             try:
                 os.replace(original, respaldo)
-            except OSError:
+            except OSError as e:
                 # No se pudo apartar: se deshace lo ya apartado y se sale
-                # sin tocar nada, mejor que quedar a mitad de camino.
-                self._restore()
+                # sin tocar nada, mejor que quedar a mitad de camino. Si
+                # ESE deshacer también falla, lo que se propaga es
+                # `RollbackFailedError` (más grave: hay un original que
+                # quedó movido a un nombre de respaldo, no solo un intento
+                # de apartado que no arrancó) con este `OSError` como
+                # motivo original.
+                try:
+                    self._restore()
+                except RollbackFailedError as rollback_error:
+                    rollback_error.original_error = e
+                    raise
                 raise
             self._saved.append((original, respaldo))
         # La foto va DESPUÉS de apartar el respaldo, no antes: el respaldo
@@ -850,7 +907,18 @@ class DestinationGuard:
             self._discard()
         else:
             self._cleanup_partials()
-            self._restore()
+            try:
+                self._restore()
+            except RollbackFailedError as rollback_error:
+                # `exc` es lo que haya fallado DENTRO del `with` (la
+                # conversión, una cancelación) -el motivo por el que se
+                # llegó a intentar restaurar en primer lugar. Si además
+                # restaurar falla, quien atrape esto necesita los dos
+                # datos: no alcanza con saber que el respaldo quedó a
+                # medio volver, si no también por qué se estaba
+                # restaurando.
+                rollback_error.original_error = exc
+                raise
         return False  # nunca se traga la excepción
 
     def _cleanup_partials(self) -> None:
@@ -882,11 +950,24 @@ class DestinationGuard:
                 pass
 
     def _restore(self) -> None:
+        """Devuelve cada respaldo a su nombre original. Se intenta con
+        TODOS aunque alguno falle -en un WBFS dividido (wbfs/wbf1/wbf2)
+        no tiene sentido dejar dos partes sin restaurar porque la
+        tercera se atoró (permiso, disco desconectándose a medias)- y
+        `self._saved` solo se vacía si TODOS volvieron a su lugar. Si
+        algo falló, `self._saved` queda con exactamente lo pendiente (no
+        vacío, no lo restaurado con éxito) y se levanta
+        `RollbackFailedError`: silenciar esto acá dejaba un juego a medio
+        restaurar sin que nadie -ni la app, ni el usuario- se enterara."""
+        fallidos: list[tuple[Path, Path]] = []
         for original, respaldo in reversed(self._saved):
             try:
                 os.replace(respaldo, original)
             except OSError:
-                pass
+                fallidos.append((original, respaldo))
+        if fallidos:
+            self._saved = [par for par in self._saved if par in fallidos]
+            raise RollbackFailedError(self._saved)
         self._saved = []
 
     def _discard(self) -> None:

@@ -10,7 +10,10 @@ llamada directa -documentado como parámetro inyectable en
 """
 from __future__ import annotations
 
+import os
+import subprocess
 import time
+from pathlib import Path
 
 from wiibackup_manager import library
 from wiibackup_manager.operations import OperationManager
@@ -118,3 +121,67 @@ def test_send_to_wbfs_drive_gc_no_divide_aunque_el_destino_lo_pida(make_game, tm
     destino = library.gc_dest_path(juego, dest_root)
     assert destino.read_bytes() == contenido
     assert not destino.with_suffix(".wbf1").exists()
+
+
+# ------------------------------------------- RollbackFailedError hasta la UI --
+def test_copy_con_rollback_fallido_distingue_los_dos_problemas_en_error_msg(
+        make_game, tmp_path, monkeypatch):
+    """El caso central que reportó la revisión de seguridad: `wit` falla
+    Y ADEMÁS `DestinationGuard` no puede devolver el original a su lugar
+    (acá, simulado para las dos partes de un WBFS dividido). El mensaje
+    que llega a `job.error_msg` -lo que ve el usuario en la fila de la
+    cola- tiene que nombrar los dos problemas, no solo "la conversión
+    falló" como si el original se hubiera recuperado sin drama."""
+    monkeypatch.setattr(library, "free_space", lambda path: 10 ** 12)
+    monkeypatch.setattr(library.wit_wrapper, "is_available", lambda _binary: True)
+
+    def _fake_convert(src, dest, target_format, binary, **kwargs):
+        # Simula lo que deja `wit` cuando falla a mitad de camino: los
+        # nombres finales ya tienen contenido nuevo (corrupto/parcial).
+        Path(dest).write_bytes(b"nuevo-corrupto")
+        Path(dest).with_suffix(".wbf1").write_bytes(b"nuevo-corrupto-1")
+        return subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="wit: fallo simulado")
+
+    monkeypatch.setattr(library.wit_wrapper, "convert", _fake_convert)
+
+    real_replace = os.replace
+
+    def _falla_solo_al_restaurar(origen, destino):
+        if Path(origen).name.startswith("."):
+            raise OSError("no se pudo restaurar (simulado)")
+        return real_replace(origen, destino)
+
+    monkeypatch.setattr(library.os, "replace", _falla_solo_al_restaurar)
+
+    # `fmt="ISO"` fuerza el camino de `wit` (una copia WBFS directa no
+    # pasa por DestinationGuard ni por wit_wrapper.convert).
+    juego = make_game(name="juego.iso", game_id="RMCP01", title="Mario Kart Wii",
+                      fmt="ISO", contenido=b"contenido de origen")
+    dest_root = tmp_path / "dest"
+    dest_root.mkdir()
+
+    # El destino ya tiene un WBFS dividido de una transferencia anterior:
+    # es lo que hace que `DestinationGuard` se active (`enabled=True`) y
+    # tenga algo que apartar/restaurar.
+    destino = library.game_dest_path(juego, dest_root)
+    destino.parent.mkdir(parents=True)
+    destino.write_bytes(b"original-wbfs")
+    destino.with_suffix(".wbf1").write_bytes(b"original-wbf1")
+
+    cola = hacer_cola()
+    job = cola.add_jobs([juego], dest_root, overwrite=True)[0]
+    esperar_final(job)
+    cola.shutdown(wait=5)
+
+    assert job.status is JobStatus.ERROR
+    # El motivo original (por qué falló la conversión)...
+    assert "wit: fallo simulado" in job.error_msg
+    # ...Y ADEMÁS que no se pudo restaurar -las dos cosas, no una sola.
+    assert "restaurar" in job.error_msg.lower()
+
+    # El original quedó SIN restaurar de verdad (no es solo el texto del
+    # error): el respaldo sigue ahí, rescatable a mano.
+    assert not destino.exists() or destino.read_bytes() != b"original-wbfs"
+    respaldos = list(dest_root.rglob(".*.respaldo-*"))
+    assert respaldos, "el respaldo temporal debería seguir existiendo"

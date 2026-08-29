@@ -5,6 +5,7 @@ ajeno y armar la ruta de destino de una unidad WBFS.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -395,3 +396,143 @@ def test_export_csv_neutraliza_formulas(make_game):
     csv_texto = library.export_games(juegos, library.EXPORT_CSV)
     assert "\n=1+1" not in csv_texto
     assert ",=1+1" not in csv_texto
+
+
+# --------------------------------------------------------- DestinationGuard --
+def test_destination_guard_restaura_todo_si_la_operacion_falla(tmp_path):
+    """Caso ya existente, sin cambios de comportamiento: si todo se
+    puede restaurar, `_saved` queda vacío y no se levanta nada -la
+    excepción de la operación (acá, el `RuntimeError` simulado) es la
+    única que se propaga."""
+    a = tmp_path / "juego.wbfs"
+    b = tmp_path / "juego.wbf1"
+    a.write_bytes(b"original-a")
+    b.write_bytes(b"original-b")
+
+    with pytest.raises(RuntimeError, match="la conversión falló"):
+        with library.DestinationGuard(a) as guard:
+            # Simula lo que deja `wit` a mitad de una conversión que
+            # después falla: los nombres finales ya tienen contenido
+            # nuevo (parcial, corrupto, lo que sea).
+            a.write_bytes(b"nuevo-a")
+            b.write_bytes(b"nuevo-b")
+            raise RuntimeError("la conversión falló")
+
+    assert a.read_bytes() == b"original-a"
+    assert b.read_bytes() == b"original-b"
+    assert guard._saved == []
+
+
+def test_destination_guard_restore_exitoso_no_deja_respaldos_sueltos(tmp_path):
+    a = tmp_path / "juego.wbfs"
+    a.write_bytes(b"original-a")
+
+    with pytest.raises(RuntimeError):
+        with library.DestinationGuard(a) as guard:
+            respaldo = guard._saved[0][1]
+            assert respaldo.exists()  # apartado, listo para restaurar
+            raise RuntimeError("falló")
+
+    assert not respaldo.exists()  # se lo movió de vuelta, no quedó duplicado
+    assert a.exists()
+
+
+def test_destination_guard_restore_con_una_parte_que_falla_levanta_rollback_failed(
+        tmp_path, monkeypatch):
+    """El caso central: un WBFS dividido (wbfs/wbf1) donde restaurar UNA
+    de las partes falla. Antes esto se ignoraba en silencio y `_saved`
+    se vaciaba igual, como si hubiera salido bien -acá se confirma que
+    ahora se levanta `RollbackFailedError` con el detalle correcto, que
+    la parte que SÍ se pudo restaurar vuelve a su lugar igual (no todo o
+    nada), y que `_saved` conserva justo lo pendiente."""
+    a = tmp_path / "juego.wbfs"
+    b = tmp_path / "juego.wbf1"
+    a.write_bytes(b"original-a")
+    b.write_bytes(b"original-b")
+
+    real_replace = os.replace
+
+    def _replace_que_falla_para_b(origen, destino):
+        if Path(destino) == b:
+            raise OSError("simulado: no se pudo restaurar juego.wbf1")
+        return real_replace(origen, destino)
+
+    monkeypatch.setattr(library.os, "replace", _replace_que_falla_para_b)
+
+    with pytest.raises(library.RollbackFailedError) as exc_info:
+        with library.DestinationGuard(a) as guard:
+            a.write_bytes(b"nuevo-a")
+            b.write_bytes(b"nuevo-b")
+            raise RuntimeError("la conversión falló")
+
+    error = exc_info.value
+
+    # La parte que SÍ se pudo restaurar (a) volvió a su lugar. La que
+    # falló (b) queda SIN el nombre público: `_cleanup_partials` ya
+    # había borrado el contenido nuevo que dejó la conversión fallida
+    # (para dejarle el lugar libre al respaldo) y el `os.replace` que
+    # tenía que traer de vuelta el respaldo es justo el que falló -así
+    # que el juego queda directamente inexistente, no solo corrupto.
+    # No se pierde nada igual: el respaldo (ver más abajo) sigue intacto.
+    assert a.read_bytes() == b"original-a"
+    assert not b.exists()
+
+    # `_saved` conserva EXACTAMENTE lo pendiente, no se vacía.
+    assert guard._saved == [(b, guard._saved[0][1])]
+    assert error.pending == guard._saved
+
+    # El respaldo de la parte que falló sigue existiendo, en la ruta que
+    # informa el error: es lo que permite rescatarlo a mano.
+    original_pendiente, respaldo_pendiente = error.pending[0]
+    assert original_pendiente == b
+    assert respaldo_pendiente.exists()
+    assert respaldo_pendiente.read_bytes() == b"original-b"
+
+    # El original que sí se restauró NO aparece en pending.
+    assert a not in [orig for orig, _resp in error.pending]
+
+    assert str(b) in str(error)
+    assert str(respaldo_pendiente) in str(error)
+
+
+def test_rollback_failed_error_encadena_el_error_original(tmp_path, monkeypatch):
+    """`__exit__` tiene que engancharle a `RollbackFailedError` la
+    excepción que estaba activa DENTRO del `with` (la de la conversión
+    fallida) como `original_error`: sin esto, `user_message()` no puede
+    distinguir "la conversión falló" de "encima no se pudo restaurar"."""
+    a = tmp_path / "juego.wbfs"
+    a.write_bytes(b"original-a")
+
+    real_replace = os.replace
+
+    def _falla_solo_al_restaurar(origen, destino):
+        # Apartar (`__enter__`) mueve el ORIGINAL a un nombre oculto
+        # (".juego.wbfs.respaldo-N"); restaurar mueve ese oculto DE
+        # VUELTA al nombre público. Fallar solo cuando el origen ya es
+        # el oculto es lo que aísla el fallo a la restauración -si
+        # fallara también al apartar, ni siquiera se llegaría a armar
+        # el `with` para probar esto.
+        if Path(origen).name.startswith("."):
+            raise OSError("no se pudo restaurar")
+        return real_replace(origen, destino)
+
+    monkeypatch.setattr(library.os, "replace", _falla_solo_al_restaurar)
+
+    with pytest.raises(library.RollbackFailedError) as exc_info:
+        with library.DestinationGuard(a):
+            raise RuntimeError("la conversión falló feo")
+
+    error = exc_info.value
+    assert isinstance(error.original_error, RuntimeError)
+    assert str(error.original_error) == "la conversión falló feo"
+
+    mensaje = error.user_message()
+    assert "la conversión falló feo" in mensaje
+    assert "no se pudo restaurar" in mensaje.lower() or "restaurar" in mensaje.lower()
+
+
+def test_rollback_failed_error_sin_original_error_usa_el_mensaje_base():
+    error = library.RollbackFailedError(
+        [(Path("/a/juego.wbfs"), Path("/a/.juego.wbfs.respaldo-1"))])
+    assert error.original_error is None
+    assert error.user_message() == str(error)

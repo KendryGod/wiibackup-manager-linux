@@ -2373,6 +2373,15 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 cancelled = True
                 detail = "cancelada por el usuario"
                 msg = f"Conversión de '{game.title}' cancelada."
+            except library.RollbackFailedError as e:
+                # Caso grave: además de fallar la conversión, no se pudo
+                # devolver el original a su lugar (ver
+                # `library.RollbackFailedError`). `user_message` nombra
+                # los dos problemas -no alcanza con "error al convertir"
+                # cuando el archivo puede haber quedado inservible.
+                ok = False
+                msg = e.user_message()
+                detail = str(e)
             except Exception as e:
                 if cancel.cancelled:
                     cancelled = True
