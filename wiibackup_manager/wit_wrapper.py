@@ -229,6 +229,20 @@ WIT_INACTIVITY_TIMEOUT = 600.0
 # (una unidad a 1 MB/s copiando un dual-layer de 8 GB serían ~2h15m).
 WIT_ABSOLUTE_TIMEOUT = 4 * 60 * 60.0
 
+# `wit ISOSIZE` es la excepción entre las operaciones sin progreso
+# medible: no recorre el archivo, solo lee la estructura del disco
+# (medido con juegos reales de 350 MB y de 7.3 GB: 0.02 s los dos). Con el
+# timeout general de 30 minutos, un archivo corrupto o un medio que
+# reintenta sin fin retenía la cola de transferencias todo ese rato antes
+# de marcarse como error -y la cola pregunta el tamaño ANTES de cada
+# copia, así que el resto de la tanda esperaba también.
+#
+# 90 segundos son ~4500 veces lo que tarda de verdad: sobra para un USB
+# lento o con sectores que reintentan, y falla rápido cuando el archivo no
+# tiene arreglo. Que se agote no rompe nada: `iso_size_bytes` devuelve
+# None y quien llama estima el tamaño por otro lado.
+ISOSIZE_TIMEOUT = 90.0
+
 
 def _strip_ansi(text: str) -> str:
     return _ANSI_ESCAPE_RE.sub("", text)
@@ -717,11 +731,14 @@ def iso_size_bytes(path: Path, binary: str = "wit") -> Optional[int]:
 
     `wit ISOSIZE --long` lee la estructura del disco (no el archivo
     entero): medido con juegos reales de 350 MB y 7.3 GB, tarda 0.02s.
+    Por eso corre con `ISOSIZE_TIMEOUT` y no con el timeout general (ver
+    el comentario de esa constante).
     La salida trae una línea por juego con bloques y MiB; se suman los
     MiB, que cubre también el caso de un WBFS multi-juego."""
     if not find_wit(binary):
         return None
-    result = _run(binary, "ISOSIZE", "--long", str(path))
+    result = _run(binary, "ISOSIZE", "--long", str(path),
+                  timeout=ISOSIZE_TIMEOUT)
     if result.returncode != 0:
         return None
     total_mib = 0

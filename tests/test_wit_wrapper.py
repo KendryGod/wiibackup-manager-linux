@@ -161,3 +161,54 @@ def test_is_available_con_un_binario_inexistente():
 
 def test_find_wit_con_un_binario_inexistente():
     assert wit_wrapper.find_wit("wit-que-no-existe-en-ningun-lado") is None
+
+
+# ------------------------------------------------- Timeout de ISOSIZE --
+# `wit ISOSIZE` no recorre el archivo, solo lee la estructura del disco
+# (0.02 s medido con juegos reales). Con el timeout general de 30 minutos,
+# un archivo corrupto retenía la cola de transferencias todo ese rato: la
+# cola pregunta el tamaño ANTES de cada copia, así que el resto de la
+# tanda esperaba también.
+def test_isosize_usa_su_propio_timeout(monkeypatch, tmp_path):
+    visto = {}
+
+    def _run_espia(binary, *args, timeout=None):
+        visto["args"] = args
+        visto["timeout"] = timeout
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(wit_wrapper, "find_wit", lambda b: "/usr/bin/wit")
+    monkeypatch.setattr(wit_wrapper, "_run", _run_espia)
+
+    wit_wrapper.iso_size_bytes(tmp_path / "juego.iso")
+
+    assert visto["args"][0] == "ISOSIZE"
+    assert visto["timeout"] == wit_wrapper.ISOSIZE_TIMEOUT
+    assert visto["timeout"] != wit_wrapper.DEFAULT_WIT_TIMEOUT
+
+
+def test_el_timeout_de_isosize_esta_en_el_rango_previsto():
+    """Suficiente para un USB lento o con sectores que reintentan, y muy
+    lejos de los 30 minutos que se heredaban del timeout general."""
+    assert 60.0 <= wit_wrapper.ISOSIZE_TIMEOUT <= 120.0
+
+
+def test_el_timeout_general_no_cambio():
+    """VERIFY sí puede tardar legítimamente muchísimo (lee el disco
+    entero), así que su límite queda como estaba: lo que se acortó es
+    ISOSIZE, no todas las operaciones sin progreso."""
+    assert wit_wrapper.DEFAULT_WIT_TIMEOUT == 1800.0
+
+
+def test_isosize_que_se_queda_sin_tiempo_devuelve_none(monkeypatch, tmp_path):
+    """Que se agote el timeout no rompe nada: `iso_size_bytes` devuelve
+    None y quien llama estima el tamaño por otro lado (la copia no se
+    cancela por esto)."""
+    def _run_timeout(binary, *args, timeout=None):
+        return wit_wrapper._timeout_result(
+            list(args), subprocess.TimeoutExpired(args, timeout), timeout)
+
+    monkeypatch.setattr(wit_wrapper, "find_wit", lambda b: "/usr/bin/wit")
+    monkeypatch.setattr(wit_wrapper, "_run", _run_timeout)
+
+    assert wit_wrapper.iso_size_bytes(tmp_path / "juego.iso") is None
