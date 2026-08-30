@@ -843,7 +843,13 @@ class RollbackFailedError(RuntimeError):
 # misma carpeta que el original (ver `atomicfs.hidden_sibling`). El nombre
 # tiene que ser reconocible: `_cleanup_partials` lo protege explícitamente
 # de la limpieza de temporales de `wit`, que barre `.{nombre}.{lo que sea}`.
-_MARCA_RESPALDO = "respaldo"
+#
+# Es público porque hay un segundo lector: `recovery_service` reconoce por
+# esta misma marca los respaldos que quedaron de una sesión que se cortó a
+# mitad. Que la escriba y la lea la MISMA constante es lo que evita que un
+# día se renombre acá y el Recovery Manager deje de encontrarlos en
+# silencio.
+MARCA_RESPALDO = "respaldo"
 
 
 class DestinationGuard:
@@ -880,7 +886,7 @@ class DestinationGuard:
         # El mecanismo de apartar/devolver/descartar es compartido
         # (`atomicfs.SetAside`); lo que esta clase pone encima es cuándo
         # hacerlo y qué significa cada fallo.
-        self._aside = atomicfs.SetAside(_MARCA_RESPALDO)
+        self._aside = atomicfs.SetAside(MARCA_RESPALDO)
         self._committed = False
         self._outputs_before: set = set()
         # Respaldos que la operación terminó bien pero no se pudieron

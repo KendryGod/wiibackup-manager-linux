@@ -469,7 +469,7 @@ def _extract_member(zf: zipfile.ZipFile, info: zipfile.ZipInfo,
     Si la copia se corta a mitad (unidad desconectada, disco lleno), el
     temporal se borra antes de propagar el error: mientras esta función
     armaba el temporal a mano se olvidaba de eso, y una instalación
-    fallida dejaba un `.boot.dol.parcial-<pid>` tirado en la unidad del
+    fallida dejaba un `.boot.dol.parcial-<sufijo>` tirado en la unidad del
     usuario para siempre."""
     target = dest_root / info.filename
     with atomic_write_target(target, mkparents=True) as tmp:
@@ -508,8 +508,12 @@ def _group_members(members: list) -> tuple[dict, list]:
 # quedan como `.<NombreDeLaApp>.wbm-staging-<pid>` y
 # `.<NombreDeLaApp>.wbm-respaldo-<pid>`. El prefijo "wbm-" los distingue
 # de cualquier cosa que deje otro programa en la misma SD/USB.
-_MARCA_STAGING = "wbm-staging"
-_MARCA_RESPALDO = "wbm-respaldo"
+#
+# Públicas por el mismo motivo que `library.MARCA_RESPALDO`: `recovery_service`
+# reconoce con ellas los restos de una instalación que se cortó a mitad, y
+# tiene que leer exactamente la misma marca que escribió el instalador.
+MARCA_STAGING = "wbm-staging"
+MARCA_RESPALDO = "wbm-respaldo"
 
 
 def _stage_and_swap_unit(zf: zipfile.ZipFile, unit_members: list,
@@ -540,8 +544,8 @@ def _stage_and_swap_unit(zf: zipfile.ZipFile, unit_members: list,
     relativos: list[PurePosixPath] = []
     try:
         with atomicfs.staged_directory(final_dir,
-                                       staging_marca=_MARCA_STAGING,
-                                       backup_marca=_MARCA_RESPALDO) as staging:
+                                       staging_marca=MARCA_STAGING,
+                                       backup_marca=MARCA_RESPALDO) as staging:
             for info in unit_members:
                 _check_cancel(cancel_event)
                 relativo = PurePosixPath(*PurePosixPath(info.filename).parts[2:])

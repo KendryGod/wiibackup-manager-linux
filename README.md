@@ -105,6 +105,13 @@ todo lo que hizo.
   juego que se está convirtiendo)
 - Historial persistente de todas las operaciones, con el motivo de cada
   error
+- **Recuperación de operaciones interrumpidas**: si se cortó la luz o se
+  colgó la PC preparando una unidad, al volver a abrir la app un aviso
+  lista lo que quedó tirado —respaldos, instalaciones a medias, temporales
+  de varios GB que no se ven porque están ocultos— y ofrece restaurar o
+  limpiar cada uno. Antes de mostrar nada verifica que el proceso que lo
+  dejó ya no esté corriendo, así que nunca toca una operación en curso. Si
+  no hay nada que avisar, no aparece ningún aviso
 
 ## Requisitos
 
@@ -436,6 +443,7 @@ wiibackup_manager/
 ├── operations.py                 # Coordina las operaciones largas (evita que se pisen)
 ├── oplog.py                      # Historial persistente de operaciones
 ├── ticket_service.py             # Ticket de entrega: qué contiene una unidad preparada
+├── recovery_service.py           # Restos de operaciones interrumpidas: buscarlos, restaurar, limpiar
 ├── pdf_export.py                 # Dibuja el ticket en un PDF (vía cairo, sin dependencias nuevas)
 ├── styles.py                     # CSS propio y esquema de color (claro/oscuro)
 └── widgets/
@@ -445,6 +453,7 @@ wiibackup_manager/
     ├── transfer_view.py          # Pestaña Transferir: destinos y copia a WBFS
     ├── memory_check_view.py      # Verificar Memoria: prueba con f3 + formateo FAT32
     ├── ticket_dialog.py          # Pide cliente y notas antes de generar el ticket
+    ├── recovery_dialog.py        # Lista los restos encontrados y sus acciones
     ├── log_view.py               # Pestaña Log: historial de operaciones
     └── gtk_helpers.py            # Utilidades chicas compartidas por diálogos de GTK
 ```

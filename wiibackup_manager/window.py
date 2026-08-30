@@ -11,7 +11,8 @@ gi.require_version("Adw", "1")
 gi.require_version("Gdk", "4.0")
 from gi.repository import Adw, Gtk, GLib, Gio, Gdk  # noqa: E402
 
-from . import __version__, config, drives, library, operations, oplog, styles, trash, wit_wrapper
+from . import (__version__, config, drives, library, operations, oplog,
+               recovery_service, styles, trash, wit_wrapper)
 from .disc_header import UNKNOWN_GAME_ID
 from .i18n import _, ngettext
 from .operations import OperationBusy, OperationKind, OperationOutcome
@@ -50,6 +51,7 @@ from .widgets.log_view import LogView
 from .widgets.memory_check_view import MemoryCheckView
 from .widgets import gtk_helpers
 from .widgets.preferences_dialog import PreferencesDialog
+from .widgets.recovery_dialog import RecoveryDialog, summary_text
 from .widgets.transfer_view import TransferView
 
 # Cuántas variantes de nombre se prueban cuando el destino planificado
@@ -111,12 +113,22 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         # aviso en cada rescan automático. Ver `_on_scan_done`.
         self._skipped_dirs: set[str] = set()
 
+        # Recovery Manager: los restos que dejó una sesión que se cortó a
+        # mitad (ver recovery_service.py). Los que el usuario elige ignorar
+        # se anotan SOLO para esta sesión -no se persisten a propósito: el
+        # archivo sigue ocupando lugar, y al próximo arranque corresponde
+        # volver a avisarlo.
+        self._recovery_leftovers: list = []
+        self._recovery_ignored: set = set()
+
         self._build_ui()
 
         if self.settings.auto_scan_on_start:
             GLib.idle_add(self.rescan_library)
 
         GLib.timeout_add_seconds(3, self._poll_library_availability)
+
+        self._start_recovery_scan()
 
     # ---------------------------------------------------------------- UI --
     def _build_ui(self):
@@ -357,6 +369,14 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self._library_banner.connect("button-clicked", lambda *_a: self.rescan_library())
         toolbar_view.add_top_bar(self._library_banner)
         self._update_library_banner()
+
+        # Aviso del Recovery Manager. Arranca oculto y se revela solo si el
+        # escaneo de fondo encuentra algo: cuando no hay restos -el caso
+        # normal- la app no dice absolutamente nada.
+        self._recovery_banner = Adw.Banner(button_label=_("Ver detalles"))
+        self._recovery_banner.connect("button-clicked",
+                                      lambda *_a: self._on_recovery_details())
+        toolbar_view.add_top_bar(self._recovery_banner)
 
         # Barra de acciones en lote: aparece al activar el modo selección.
         self._selection_bar = Gtk.ActionBar()
@@ -1623,6 +1643,68 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             self._update_library_banner()
             self.rescan_library()
         return True  # seguir sondeando
+
+    # ------------------------------------------------- Recovery Manager --
+    def _start_recovery_scan(self):
+        """Busca restos de operaciones interrumpidas, en un hilo de fondo.
+
+        En un hilo porque recorre la biblioteca Y cada unidad removible
+        montada, midiendo cuánto ocupa cada resto: sobre un pendrive lento
+        eso puede tardar varios segundos, y hacerlo en el hilo de GTK sería
+        demorar la aparición de la ventana por un aviso que casi siempre no
+        hay que dar.
+
+        Cualquier problema termina en silencio y sin restos: esto es un
+        extra que corre solo al arrancar, y nada de lo que le pase puede
+        impedir que la app se abra. Los errores de disco ya los absorbe
+        `recovery_service.scan`; el `except` de acá es para el caso raro de
+        que la unidad de la biblioteca se desconecte justo mientras se
+        arman las raíces."""
+        def worker():
+            try:
+                raices = recovery_service.scan_roots(self.settings)
+                encontrados = recovery_service.scan(raices, ops=self.ops)
+            except Exception:  # noqa: BLE001 - un aviso opcional no puede tirar la app
+                encontrados = []
+            GLib.idle_add(self._on_recovery_scan_done, encontrados)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_recovery_scan_done(self, leftovers: list):
+        # El escaneo puede terminar después de que la ventana se cerró (es
+        # un hilo daemon que arrancó al construirla): tocar un widget ya
+        # dispuesto por GTK tira la app entera. Mismo cuidado que con las
+        # carátulas que llegan tarde, ver `gtk_helpers.widget_is_alive`.
+        if not gtk_helpers.widget_is_alive(self._recovery_banner):
+            return False
+        self._recovery_leftovers = [lo for lo in leftovers
+                                    if lo.path not in self._recovery_ignored]
+        self._update_recovery_banner()
+        return False
+
+    def _update_recovery_banner(self):
+        """Sin restos no hay banner. Un aviso que dice "no encontré nada"
+        es ruido en la única pantalla que el usuario ve siempre."""
+        if not self._recovery_leftovers:
+            self._recovery_banner.set_revealed(False)
+            return
+        self._recovery_banner.set_title(summary_text(self._recovery_leftovers))
+        self._recovery_banner.set_revealed(True)
+
+    def _on_recovery_details(self):
+        RecoveryDialog(self._recovery_leftovers, ops=self.ops,
+                       show_toast=self._show_toast,
+                       on_resolved=self._on_recovery_resolved).present(self)
+
+    def _on_recovery_resolved(self, leftover):
+        """Un resto salió de la lista: se restauró, se eliminó o se
+        ignoró. Los tres casos se anotan igual -los dos primeros ya no
+        existen en el disco, así que recordarlos no cambia nada- y el
+        aviso se recalcula: cuando se resuelve el último, desaparece."""
+        self._recovery_ignored.add(leftover.path)
+        self._recovery_leftovers = [lo for lo in self._recovery_leftovers
+                                    if lo.path != leftover.path]
+        self._update_recovery_banner()
 
     # ------------------------------------------------------------ Scan --
     def rescan_library(self):

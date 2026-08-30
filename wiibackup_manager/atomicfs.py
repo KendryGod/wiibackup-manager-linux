@@ -44,6 +44,19 @@ from pathlib import Path
 from typing import Callable, Iterator, Optional
 
 # --------------------------------------------------------------- Nombres --
+# Marca de los temporales de escritura (`.{nombre}.parcial-<sufijo>`).
+# Constante y no un literal suelto porque tiene un segundo lector además
+# del `mkstemp` de acá: `recovery_service`, que reconoce por esta marca los
+# temporales que quedaron de una escritura interrumpida.
+#
+# Ojo con el sufijo: el de `hidden_sibling` es el PID, pero el de estos
+# temporales lo elige `tempfile.mkstemp` al azar (ver `_temp_sibling`, que
+# explica por qué). O sea que un `.parcial-` NO trae PID adentro y no se
+# puede preguntar por su dueño: es la razón por la que `recovery_service`
+# los juzga por antigüedad.
+MARCA_PARCIAL = "parcial"
+
+
 def hidden_sibling(target: Path, marca: str) -> Path:
     """Ruta hermana y oculta de `target`: `.{nombre}.{marca}-{pid}`.
 
@@ -132,7 +145,7 @@ def _temp_sibling(dest: Path, mkparents: bool) -> Iterator[tuple]:
         dest.parent.mkdir(parents=True, exist_ok=True)
 
     fd, nombre = tempfile.mkstemp(dir=dest.parent,
-                                  prefix=f".{dest.name}.parcial-")
+                                  prefix=f".{dest.name}.{MARCA_PARCIAL}-")
     tmp = Path(nombre)
     _ajustar_permisos(tmp)
     try:
@@ -234,6 +247,31 @@ class SetAside:
     def __init__(self, marca: str) -> None:
         self.marca = marca
         self._pairs: list = []
+
+    @classmethod
+    def adopt(cls, marca: str, pairs) -> "SetAside":
+        """Un `SetAside` sobre pares `(original, respaldo)` que YA existen
+        en el disco, apartados por otra corrida de la app.
+
+        Es la puerta para invocar el mecanismo a mano. El uso normal es
+        apartar y devolver dentro de la misma operación -por eso
+        `move_aside` es lo que llena `_pairs`- pero `recovery_service`
+        llega DESPUÉS: encuentra un `.{nombre}.respaldo-<pid>` de un
+        proceso que ya no está y necesita devolverlo a su lugar con
+        exactamente el mismo `os.replace` que habría hecho la operación
+        original si hubiera podido terminar.
+
+        Sin esto, el Recovery Manager habría reimplementado el rename -y
+        con él la decisión de en qué orden se intenta y qué se reporta
+        cuando falla-, que es justo lo que este módulo existe para que no
+        pase. No se verifica que los respaldos existan: `restore()` y
+        `discard()` ya reportan lo que no pudieron hacer, que es la misma
+        respuesta que corresponde para un resto que se esfumó entre que
+        se lo listó y se lo quiso tocar."""
+        aside = cls(marca)
+        aside._pairs = [(Path(original), Path(respaldo))
+                        for original, respaldo in pairs]
+        return aside
 
     @property
     def pairs(self) -> list:

@@ -674,6 +674,22 @@ def _mount_points_of(device_path) -> list[tuple[str, str]]:
     return [(origen, punto) for origen, punto in filas if patron.match(origen)]
 
 
+def mount_points_of(device_path) -> list[Path]:
+    """Dónde está montado `device_path` (o alguna de sus particiones) en
+    este momento, como rutas.
+
+    Es la contracara de `candidate_for_mount_point`: aquella va del punto
+    de montaje al disco físico, y esta del disco físico a las carpetas por
+    las que se lo puede leer. La necesita `recovery_service`, que arranca
+    desde `list_candidate_drives()` -o sea desde discos removibles, que es
+    donde está el BLINDAJE 1- pero tiene que recorrer archivos, y para eso
+    hace falta un punto de montaje.
+
+    Un disco conectado pero sin montar devuelve lista vacía, que es lo
+    correcto: no hay nada que recorrer."""
+    return [Path(punto) for _origen, punto in _mount_points_of(device_path)]
+
+
 def verify_still_safe(device: BlockDevice, *, run=subprocess.run) -> None:
     """BLINDAJE 3: re-chequeo, ya en el hilo de fondo, de que
     `device.path` sigue siendo removible, pesa lo mismo y tiene la misma

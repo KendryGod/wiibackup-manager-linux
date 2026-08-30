@@ -7,6 +7,12 @@ una regresión que las pruebas unitarias no ven: un `_()` que shadowea un
 parámetro, un widget que se construye con un argumento que ya no existe,
 un import circular.
 
+Al final están los dos widgets del Recovery Manager (el aviso de la
+ventana y su diálogo), acá y no en `test_recovery_service.py` por el mismo
+motivo: la lógica de qué es un resto se prueba sin GTK, pero que la fila
+se arme con los métodos que libadwaita realmente tiene solo se ve
+construyéndola.
+
 Necesita un display. En CI se corre bajo Xvfb (ver .github/workflows/ci.yml);
 si no hay ninguno disponible, el test se saltea en vez de fallar, para que
 correr `pytest` en una terminal sin sesión gráfica siga sirviendo.
@@ -186,3 +192,110 @@ def test_la_ventana_tambien_arranca_en_ingles(gtk, tmp_path, monkeypatch):
     assert resultado.get("paginas") == {"juegos", "cola", "memoria", "fabrica",
                                         "tienda", "ajustes"}
     assert resultado.get("vacio") == "No games yet"
+
+
+# ------------------------------------------------------- Recovery Manager --
+def _pid_muerto() -> int:
+    """Un PID que con seguridad ya no corre (ver el fixture equivalente en
+    `test_recovery_service.py`)."""
+    import subprocess
+    import sys
+    p = subprocess.Popen([sys.executable, "-c", ""])
+    p.wait()
+    return p.pid
+
+
+def test_el_aviso_de_restos_aparece_con_lo_que_encuentra_el_escaneo(
+        gtk, tmp_path, monkeypatch):
+    """La ventana entera, con un respaldo huérfano en la biblioteca: el
+    escaneo de fondo tiene que terminar, revelar el banner y contar lo que
+    encontró. Y con la biblioteca limpia, no revelarlo -el silencio total
+    es la mitad del comportamiento pedido."""
+    from gi.repository import Adw, GLib
+
+    from wiibackup_manager import config, oscwii_client, recovery_service
+    from wiibackup_manager.styles import load_css
+    from wiibackup_manager.window import WiiBackupWindow
+
+    biblioteca = tmp_path / "biblioteca"
+    biblioteca.mkdir()
+    (biblioteca / f".Juego.wbfs.respaldo-{_pid_muerto()}").write_bytes(b"\0" * 2048)
+    monkeypatch.setattr(config.Settings, "load",
+                        classmethod(lambda cls: config.Settings(
+                            library_path=str(biblioteca))))
+    monkeypatch.setattr(oscwii_client, "fetch_apps_async", lambda on_done=None: None)
+    # Sin esto, el test recorrería los USB que tenga conectados quien lo
+    # corra: lento, y el resultado dependería de la máquina.
+    monkeypatch.setattr(recovery_service, "scan_roots",
+                        lambda settings=None, **kw: [biblioteca])
+
+    resultado = {}
+
+    class App(Adw.Application):
+        def __init__(self):
+            super().__init__(application_id="com.gamefixsps.WiiBackupManager.TestRec")
+
+        def do_activate(self):
+            load_css()
+            win = WiiBackupWindow(self)
+            win.present()
+            GLib.timeout_add(2500, self._revisar, win)
+
+        def _revisar(self, win):
+            try:
+                resultado["revelado"] = win._recovery_banner.get_revealed()
+                resultado["titulo"] = win._recovery_banner.get_title()
+                resultado["restos"] = len(win._recovery_leftovers)
+                # Resolver el único resto tiene que hacer desaparecer el
+                # aviso, sin esperar a otro escaneo.
+                win._on_recovery_resolved(win._recovery_leftovers[0])
+                resultado["revelado_despues"] = win._recovery_banner.get_revealed()
+            finally:
+                self.quit()
+            return False
+
+    GLib.timeout_add_seconds(60, lambda: (resultado.setdefault("colgada", True),
+                                          False)[1])
+    App().run([])
+
+    assert not resultado.get("colgada"), "la app no terminó de arrancar"
+    assert resultado.get("restos") == 1
+    assert resultado.get("revelado") is True
+    assert "1 resto" in resultado.get("titulo", "")
+    assert resultado.get("revelado_despues") is False
+
+
+def test_el_dialogo_de_restos_se_arma_y_sus_acciones_funcionan(gtk, tmp_path):
+    """El diálogo con un respaldo y una staging: se construye una fila por
+    resto (con "Restaurar" solo en el que se puede), restaurar deja el
+    archivo en su nombre real, e ignorar no toca el disco."""
+    from wiibackup_manager import recovery_service
+    from wiibackup_manager.widgets.recovery_dialog import RecoveryDialog
+
+    pid = _pid_muerto()
+    respaldo = tmp_path / f".Juego.wbfs.respaldo-{pid}"
+    respaldo.write_bytes(b"el juego del cliente")
+    staging = tmp_path / f".WiiDonut.wbm-staging-{pid}"
+    staging.mkdir()
+    (staging / "boot.dol").write_bytes(b"\0" * 16)
+
+    restos = recovery_service.scan([tmp_path])
+    assert len(restos) == 2
+    por_tipo = {lo.kind: lo for lo in restos}
+
+    toasts, resueltos = [], []
+    dialog = RecoveryDialog(restos, ops=None, show_toast=toasts.append,
+                            on_resolved=resueltos.append)
+
+    # Restaurar: el nombre original está libre, así que no hay diálogo de
+    # confirmación de por medio y el archivo vuelve en el acto.
+    dialog._on_restore(por_tipo[recovery_service.LeftoverKind.BACKUP])
+    assert (tmp_path / "Juego.wbfs").read_bytes() == b"el juego del cliente"
+    assert not respaldo.exists()
+
+    # Ignorar: sale de la lista sin tocar nada en el disco.
+    dialog._on_ignore(por_tipo[recovery_service.LeftoverKind.HOMEBREW_STAGING])
+    assert staging.exists()
+
+    assert len(resueltos) == 2
+    assert len(toasts) == 1  # solo el de restaurar; ignorar no avisa nada
