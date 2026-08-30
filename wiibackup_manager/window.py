@@ -47,6 +47,7 @@ from .widgets.game_detail_dialog import GameDetailDialog
 from .widgets.game_row import GameRow
 from .widgets.homebrew_store_view import HomebrewStoreView
 from .widgets.log_view import LogView
+from .widgets.memory_check_view import MemoryCheckView
 from .widgets import gtk_helpers
 from .widgets.preferences_dialog import PreferencesDialog
 from .widgets.transfer_view import TransferView
@@ -153,6 +154,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         # necesita que "juegos" ya exista dentro de `self._content_stack`.
         self._build_juegos_page()
         self._build_cola_page()
+        self._build_verificar_memoria_page()
         self._build_modo_fabrica_page()
         self._build_homebrew_page()
         self._build_ajustes_page()
@@ -182,6 +184,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self._sidebar_items = [
             ("juegos", "applications-games-symbolic", _("Juegos")),
             ("cola", "emblem-synchronizing-symbolic", _("Transferir")),
+            ("memoria", "media-flash-symbolic", _("Verificar Memoria")),
             ("fabrica", "drive-removable-media-symbolic", _("Modo Fábrica")),
             ("tienda", "system-software-install-symbolic", _("Homebrew Store")),
             ("ajustes", "emblem-system-symbolic", _("Ajustes")),
@@ -412,6 +415,27 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self._content_stack.add_named(toolbar_view, "cola")
 
     # ----------------------------------------------------- Página: Modo Fábrica --
+    # ------------------------------------------- Página: Verificar Memoria --
+    def _build_verificar_memoria_page(self):
+        """Verificar con `f3` que una memoria sea real y, si pasa, ofrecer
+        formatearla en FAT32 ahí mismo.
+
+        Mismo reparto que la Homebrew Store y Transferir: la página acá es
+        el marco (header + lugar en el stack) y todo lo demás vive en el
+        widget. Va ANTES de Modo Fábrica en el sidebar a propósito: es el
+        orden real del trabajo -primero se verifica la memoria del cliente,
+        después se la prepara."""
+        toolbar_view = Adw.ToolbarView()
+        header = Adw.HeaderBar()
+        header.set_title_widget(Adw.WindowTitle(title=_("Verificar Memoria")))
+        toolbar_view.add_top_bar(header)
+
+        self.memory_check_view = MemoryCheckView(self._show_toast, self.ops,
+                                                 self.op_log)
+        toolbar_view.set_content(self.memory_check_view)
+        self._content_stack.add_named(toolbar_view, "memoria")
+
+    # ------------------------------------------------ Página: Modo Fábrica --
     def _build_modo_fabrica_page(self):
         toolbar_view = Adw.ToolbarView()
         header = Adw.HeaderBar()
@@ -530,35 +554,22 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
         # BLINDAJE 2: confirmación informada (modelo + tamaño + ruta del
         # dispositivo, tal como se ve en este instante) y el usuario tiene
-        # que escribir "FORMATEAR" a mano para habilitar el botón
-        # destructivo. Nada de esto reemplaza a los blindajes 3 y 4, que
-        # se vuelven a correr en `drives.format_as_wii_usb` pase lo que
-        # pase acá.
-        dialog = Adw.AlertDialog(
+        # que escribir la palabra a mano para habilitar el botón
+        # destructivo. El diálogo es el mismo que usa el formateo de
+        # propósito general de "Verificar Memoria"
+        # (`gtk_helpers.confirm_whole_disk_format`): un solo lugar para el
+        # único blindaje que vive en la interfaz. Nada de esto reemplaza a
+        # los blindajes 3 y 4, que se vuelven a correr adentro de
+        # `drives.format_fat32` pase lo que pase acá.
+        gtk_helpers.confirm_whole_disk_format(
+            self,
             heading=_("¿Formatear esta unidad?"),
             body=_("Vas a formatear:\n{drive}\n\nSe borra TODO su contenido "
                    "actual, sin posibilidad de recuperarlo. Para confirmar, "
-                   "escribí FORMATEAR abajo.").format(drive=device.display_name),
+                   "escribí {{word}} abajo.").format(drive=device.display_name),
+            confirm_label=_("Formatear"),
+            on_confirm=lambda: self._start_factory_format(device),
         )
-        entry = Gtk.Entry(placeholder_text="FORMATEAR")
-        dialog.set_extra_child(entry)
-        dialog.add_response("cancel", _("Cancelar"))
-        dialog.add_response("format", _("Formatear"))
-        dialog.set_response_appearance("format", Adw.ResponseAppearance.DESTRUCTIVE)
-        dialog.set_response_enabled("format", False)
-        dialog.set_default_response("cancel")
-        dialog.set_close_response("cancel")
-        entry.connect(
-            "changed",
-            lambda e: dialog.set_response_enabled("format",
-                                                   e.get_text().strip() == "FORMATEAR"))
-        dialog.connect("response", self._on_factory_confirm_response, device)
-        dialog.present(self)
-
-    def _on_factory_confirm_response(self, _dialog, response, device):
-        if response != "format":
-            return
-        self._start_factory_format(device)
 
     def _start_factory_format(self, device: "drives.BlockDevice"):
         """Corre `drives.format_as_wii_usb` (blindajes 3 y 4 + mkfs +
@@ -2554,6 +2565,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
     def _on_close_request(self, *_args) -> bool:
         self.transfer_view.shutdown()
         self.homebrew_view.shutdown()
+        self.memory_check_view.shutdown()
         return False  # False = seguir con el cierre normal
 
     def _show_toast(self, message: str):

@@ -95,7 +95,8 @@ def test_la_ventana_se_arma_y_se_muestra(gtk, tmp_path, monkeypatch):
                 # del stack de contenido, cada una con su propia fila en el
                 # sidebar.
                 resultado["paginas"] = {
-                    pid for pid in ("juegos", "cola", "fabrica", "tienda", "ajustes")
+                    pid for pid in ("juegos", "cola", "memoria", "fabrica",
+                                    "tienda", "ajustes")
                     if win._content_stack.get_child_by_name(pid) is not None
                 }
                 resultado["filas_sidebar"] = [pid for pid, _icon, _lbl in win._sidebar_items]
@@ -113,8 +114,10 @@ def test_la_ventana_se_arma_y_se_muestra(gtk, tmp_path, monkeypatch):
     assert not resultado.get("colgada"), "la app no terminó de arrancar"
     assert resultado.get("visible") is True
     assert "WiiBackup Manager" in resultado.get("titulo", "")
-    assert resultado.get("paginas") == {"juegos", "cola", "fabrica", "tienda", "ajustes"}
-    assert resultado.get("filas_sidebar") == ["juegos", "cola", "fabrica", "tienda", "ajustes"]
+    assert resultado.get("paginas") == {"juegos", "cola", "memoria", "fabrica",
+                                        "tienda", "ajustes"}
+    assert resultado.get("filas_sidebar") == ["juegos", "cola", "memoria",
+                                              "fabrica", "tienda", "ajustes"]
 
 
 def test_la_ventana_tambien_arranca_en_ingles(gtk, tmp_path, monkeypatch):
@@ -163,7 +166,8 @@ def test_la_ventana_tambien_arranca_en_ingles(gtk, tmp_path, monkeypatch):
         def _revisar(self, win):
             try:
                 resultado["paginas"] = {
-                    pid for pid in ("juegos", "cola", "fabrica", "tienda", "ajustes")
+                    pid for pid in ("juegos", "cola", "memoria", "fabrica",
+                                    "tienda", "ajustes")
                     if win._content_stack.get_child_by_name(pid) is not None
                 }
                 resultado["vacio"] = win.status_page.get_title()
@@ -179,5 +183,6 @@ def test_la_ventana_tambien_arranca_en_ingles(gtk, tmp_path, monkeypatch):
     App().run([])
 
     assert not resultado.get("colgada"), "la app no terminó de arrancar"
-    assert resultado.get("paginas") == {"juegos", "cola", "fabrica", "tienda", "ajustes"}
+    assert resultado.get("paginas") == {"juegos", "cola", "memoria", "fabrica",
+                                        "tienda", "ajustes"}
     assert resultado.get("vacio") == "No games yet"

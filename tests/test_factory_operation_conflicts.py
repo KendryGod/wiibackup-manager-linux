@@ -177,3 +177,76 @@ def test_formatear_se_habilita_apenas_termina_la_transferencia(
 
     formateo = ops.start(OperationKind.FORMATTING, resources=[Path("/dev/sdb")])
     assert formateo.kind is OperationKind.FORMATTING
+
+
+# --------------------------------------- Verificar memoria vs. el resto --
+def test_formatear_se_bloquea_si_se_esta_verificando_la_memoria(
+        sys_class_block, fake_findmnt):
+    """Verificar una memoria con f3 la llena de archivos de prueba: es una
+    escritura larguísima sobre esa unidad. Formatear el mismo disco en el
+    medio -desde Modo Fábrica o desde el botón de la propia página- tiene
+    que esperar."""
+    sys_class_block("sdb", particiones=("sdb1",))
+    punto_montaje = _montar(fake_findmnt, "/run/media/usuario/CLIENTE", "/dev/sdb1")
+
+    ops = OperationManager()
+    # Igual que `memory_check_view._start_check`.
+    ops.start(OperationKind.CHECKING_MEMORY,
+             resources=drives.resources_for_mount_point(punto_montaje))
+
+    with pytest.raises(OperationBusy) as exc:
+        ops.start(OperationKind.FORMATTING, resources=[Path("/dev/sdb")])
+    assert exc.value.blocker.kind is OperationKind.CHECKING_MEMORY
+
+
+def test_verificar_la_memoria_se_bloquea_si_ya_se_esta_formateando(
+        sys_class_block, fake_findmnt):
+    """El sentido inverso: con un formateo en curso sobre ese disco, la
+    verificación no arranca -escribiría en un punto de montaje que está por
+    desaparecer."""
+    sys_class_block("sdb", particiones=("sdb1",))
+    punto_montaje = _montar(fake_findmnt, "/run/media/usuario/CLIENTE", "/dev/sdb1")
+
+    ops = OperationManager()
+    ops.start(OperationKind.FORMATTING, resources=[Path("/dev/sdb")])
+
+    with pytest.raises(OperationBusy) as exc:
+        ops.start(OperationKind.CHECKING_MEMORY,
+                 resources=drives.resources_for_mount_point(punto_montaje))
+    assert exc.value.blocker.kind is OperationKind.FORMATTING
+
+
+def test_verificar_la_memoria_se_bloquea_si_hay_una_transferencia_encima(
+        sys_class_block, fake_findmnt, tmp_path):
+    """Y contra la cola de transferencias, por el mismo motivo: f3 escribe
+    hasta llenar el espacio libre, así que una copia a la misma unidad se
+    quedaría sin lugar a mitad de camino."""
+    sys_class_block("sdb", particiones=("sdb1",))
+    punto_montaje = _montar(fake_findmnt, "/run/media/usuario/CLIENTE", "/dev/sdb1")
+
+    ops = OperationManager()
+    ops.start(OperationKind.TRANSFERRING,
+             read=[tmp_path / "juego.iso"],
+             write=[punto_montaje / "wbfs" / "juego.wbfs"],
+             resources=drives.resources_for_mount_point(punto_montaje))
+
+    with pytest.raises(OperationBusy) as exc:
+        ops.start(OperationKind.CHECKING_MEMORY,
+                 resources=drives.resources_for_mount_point(punto_montaje))
+    assert exc.value.blocker.kind is OperationKind.TRANSFERRING
+
+
+def test_verificar_dos_memorias_distintas_a_la_vez_se_permite(
+        sys_class_block, fake_findmnt):
+    """Lo que NO hay que bloquear: dos memorias distintas no se pisan en
+    nada, y verificarlas de a una sería una espera de horas sin motivo."""
+    sys_class_block("sdb", particiones=("sdb1",))
+    sys_class_block("sdc", particiones=("sdc1",))
+    una = _montar(fake_findmnt, "/run/media/usuario/UNA", "/dev/sdb1")
+    otra = _montar(fake_findmnt, "/run/media/usuario/OTRA", "/dev/sdc1")
+
+    ops = OperationManager()
+    ops.start(OperationKind.CHECKING_MEMORY,
+             resources=drives.resources_for_mount_point(una))
+    ops.start(OperationKind.CHECKING_MEMORY,
+             resources=drives.resources_for_mount_point(otra))

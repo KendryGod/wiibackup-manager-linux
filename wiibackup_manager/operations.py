@@ -73,6 +73,7 @@ class OperationKind(Enum):
     DELETING = "Eliminando"
     RENAMING = "Renombrando"
     INSTALLING_HOMEBREW = "Instalando homebrew"
+    CHECKING_MEMORY = "Verificando la memoria"
     FORMATTING = "Formateando la unidad"
 
     @property

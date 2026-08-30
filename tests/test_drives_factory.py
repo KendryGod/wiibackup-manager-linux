@@ -478,3 +478,321 @@ def test_format_as_wii_usb_aborta_si_la_identidad_cambia_entre_desmontar_y_mkfs(
     assert len(llamadas_udevadm) == 2, (
         "tienen que ser exactamente dos consultas a udevadm: una antes de "
         "desmontar y otra justo antes de mkfs.vfat")
+
+
+# ------------------------------ normalize_fat_label: etiqueta de volumen --
+@pytest.mark.parametrize("entrada, esperado", [
+    (None, ""),
+    ("", ""),
+    ("   ", ""),
+    ("respaldos", "RESPALDOS"),
+    ("  mi disco  ", "MI DISCO"),
+    # Los acentos y la ñ se transliteran: FAT no guarda UTF-8, y
+    # `mkfs.vfat` mide el límite de 11 en bytes.
+    ("Fotos Mamá", "FOTOS MAMA"),
+    ("ñandú", "NANDU"),
+    # Caracteres que `mkfs.vfat` rechaza: se van, no hacen fallar el
+    # comando.
+    ("Fotos:2026", "FOTOS2026"),
+    ("a/b\\c*d?e", "ABCDE"),
+    # Más de 11: se corta en vez de que falle el formateo al final.
+    ("ETIQUETA-DEMASIADO-LARGA", "ETIQUETA-DE"),
+    # Si no queda nada usable, queda vacío = "sin etiqueta" (NO NAME).
+    ("...", ""),
+    ("日本", ""),
+])
+def test_normalize_fat_label(entrada, esperado):
+    assert drives.normalize_fat_label(entrada) == esperado
+
+
+def test_normalize_fat_label_nunca_pasa_del_limite_en_bytes():
+    """El límite de FAT es de 11 BYTES, no de 11 caracteres: por eso la
+    normalización transliteran a ASCII antes de cortar. Un texto de puros
+    acentos, que en UTF-8 ocuparía el doble, tiene que quedar igual dentro
+    del límite."""
+    etiqueta = drives.normalize_fat_label("áéíóúáéíóúáéíóú")
+    assert len(etiqueta.encode()) <= drives.FAT_LABEL_MAX_LEN
+
+
+# ----------------------- format_fat32: el mecanismo blindado compartido --
+def _fake_run_formateo(punto_montaje, comandos):
+    """`run` falso para el camino feliz: registra los comandos en
+    `comandos` y simula umount/mkfs.vfat/udisksctl sin ejecutar nada."""
+    def _run(cmd, **_k):
+        comandos.append(cmd)
+        if cmd[0] == "umount":
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if "mkfs.vfat" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if cmd[0] == "udisksctl" and cmd[1] == "mount":
+            return subprocess.CompletedProcess(
+                cmd, 0, f"Mounted /dev/sdb at {punto_montaje}.\n", "")
+        raise AssertionError(f"comando inesperado: {cmd}")
+    return _run
+
+
+def test_format_fat32_no_crea_la_estructura_de_wii(sys_block, proc_mounts, tmp_path):
+    """La razón de ser de que `format_fat32` exista aparte: es un formateo
+    de propósito general. Formatea y monta, y ahí termina -apps/games/wbfs
+    son cosa de Modo Fábrica, y una memoria formateada para llevar fotos
+    no tiene por qué quedar con tres carpetas de un loader de Wii."""
+    _make_block_device(sys_block, "sdb", removable=True, size_sectors=1000)
+    proc_mounts([])
+    punto_montaje = tmp_path / "run_media" / "SIN_ETIQUETA"
+    punto_montaje.mkdir(parents=True)
+
+    comandos = []
+    device = drives.BlockDevice(path=_dev("sdb"), model="X", size_bytes=1000 * 512)
+    resultado = drives.format_fat32(
+        device, run=_fake_run_formateo(punto_montaje, comandos))
+
+    assert resultado == punto_montaje
+    assert sorted(p.name for p in punto_montaje.iterdir()) == []
+    for carpeta in drives.FACTORY_FOLDERS:
+        assert not (punto_montaje / carpeta).exists()
+
+
+def test_format_fat32_sin_etiqueta_no_le_pasa_n_a_mkfs(
+        sys_block, proc_mounts, tmp_path):
+    """Etiqueta vacía = "sin etiqueta". Se omite `-n` en vez de pasarle un
+    string vacío, así el volumen queda como NO NAME."""
+    _make_block_device(sys_block, "sdb", removable=True, size_sectors=1000)
+    proc_mounts([])
+    punto_montaje = tmp_path / "run_media" / "disco"
+    punto_montaje.mkdir(parents=True)
+
+    comandos = []
+    device = drives.BlockDevice(path=_dev("sdb"), model="X", size_bytes=1000 * 512)
+    drives.format_fat32(device, run=_fake_run_formateo(punto_montaje, comandos),
+                        label="   ")
+
+    mkfs_cmd = next(c for c in comandos if "mkfs.vfat" in c)
+    assert "-n" not in mkfs_cmd
+
+
+def test_format_fat32_normaliza_la_etiqueta_antes_de_pasarla(
+        sys_block, proc_mounts, tmp_path):
+    """Lo que escriba el usuario en el campo de etiqueta llega a
+    `mkfs.vfat` ya normalizado, nunca crudo: si no, un acento o una coma
+    de más harían fallar el formateo recién al final."""
+    _make_block_device(sys_block, "sdb", removable=True, size_sectors=1000)
+    proc_mounts([])
+    punto_montaje = tmp_path / "run_media" / "disco"
+    punto_montaje.mkdir(parents=True)
+
+    comandos = []
+    device = drives.BlockDevice(path=_dev("sdb"), model="X", size_bytes=1000 * 512)
+    drives.format_fat32(device, run=_fake_run_formateo(punto_montaje, comandos),
+                        label="Fotos Mamá")
+
+    mkfs_cmd = next(c for c in comandos if "mkfs.vfat" in c)
+    assert mkfs_cmd[mkfs_cmd.index("-n") + 1] == "FOTOS MAMA"
+
+
+def test_format_fat32_deja_el_cluster_a_mkfs_por_defecto(
+        sys_block, proc_mounts, tmp_path):
+    """Sin `-s`, `mkfs.vfat` elige el tamaño de clúster según el tamaño
+    real del dispositivo. Fijarlo en los 32 KB de Modo Fábrica en una
+    memoria chica deja un FAT32 por debajo del mínimo recomendado de
+    clústeres (`mkfs.vfat` avisa y lo hace igual) y desperdicia 32 KB por
+    archivo: una optimización para los archivos gigantes de un USB de Wii
+    que no tiene sentido en un formateo de propósito general."""
+    _make_block_device(sys_block, "sdb", removable=True, size_sectors=1000)
+    proc_mounts([])
+    punto_montaje = tmp_path / "run_media" / "disco"
+    punto_montaje.mkdir(parents=True)
+
+    comandos = []
+    device = drives.BlockDevice(path=_dev("sdb"), model="X", size_bytes=1000 * 512)
+    drives.format_fat32(device, run=_fake_run_formateo(punto_montaje, comandos))
+
+    mkfs_cmd = next(c for c in comandos if "mkfs.vfat" in c)
+    assert "-s" not in mkfs_cmd
+    assert "-F" in mkfs_cmd and "32" in mkfs_cmd
+    assert str(device.path) in mkfs_cmd
+
+
+def test_format_as_wii_usb_sigue_pidiendo_clusters_de_32kb(
+        sys_block, proc_mounts, tmp_path):
+    """El contrapunto del test de arriba: que `format_fat32` deje el
+    clúster automático NO cambia lo que hace Modo Fábrica, que sí lo fija
+    porque los USB Loaders esperan 32 KB (64 sectores de 512 B)."""
+    _make_block_device(sys_block, "sdb", removable=True, size_sectors=1000)
+    proc_mounts([])
+    punto_montaje = tmp_path / "run_media" / "WII_USB"
+    punto_montaje.mkdir(parents=True)
+
+    comandos = []
+    device = drives.BlockDevice(path=_dev("sdb"), model="X", size_bytes=1000 * 512)
+    drives.format_as_wii_usb(device, run=_fake_run_formateo(punto_montaje, comandos))
+
+    mkfs_cmd = next(c for c in comandos if "mkfs.vfat" in c)
+    assert mkfs_cmd[mkfs_cmd.index("-s") + 1] == str(drives.WII_USB_SECTORS_PER_CLUSTER)
+    assert mkfs_cmd[mkfs_cmd.index("-n") + 1] == drives.WII_USB_LABEL
+
+
+# ------- format_fat32: los blindajes valen igual que para Modo Fábrica --
+def test_format_fat32_respeta_la_lista_blanca_de_removibles(sys_block):
+    """El blindaje que no se relaja por ser un formateo "simple": un disco
+    que el kernel no marca removable=1 se rechaza igual, sin ejecutar un
+    solo comando. Soportar discos externos grandes no significa aceptar
+    discos fijos."""
+    _make_block_device(sys_block, "nvme0n1", removable=False, size_sectors=10**9)
+    device = drives.BlockDevice(path=_dev("nvme0n1"), model="Interno",
+                                size_bytes=10**9 * 512)
+
+    def _no_deberia_correr(*_a, **_k):
+        raise AssertionError("no debería ejecutarse ningún comando")
+
+    with pytest.raises(drives.UnsafeDeviceError):
+        drives.format_fat32(device, run=_no_deberia_correr)
+
+
+def test_format_fat32_aborta_si_hay_una_particion_en_una_ruta_critica(
+        sys_block, proc_mounts):
+    """Blindaje 4 en el camino genérico: aunque el dispositivo sea
+    removible y del tamaño confirmado, una partición montada en /home
+    frena el formateo antes de `mkfs.vfat`."""
+    _make_block_device(sys_block, "sdb", removable=True, size_sectors=1000)
+    proc_mounts(["/dev/sdb1 /home ext4 rw 0 0"])
+    device = drives.BlockDevice(path=_dev("sdb"), model="X", size_bytes=1000 * 512)
+
+    llamadas = []
+
+    def _fake_run(cmd, **_k):
+        llamadas.append(cmd)
+        raise AssertionError("no debería llegar a ejecutar nada")
+
+    with pytest.raises(drives.CriticalMountError):
+        drives.format_fat32(device, run=_fake_run)
+    assert llamadas == []
+
+
+def test_format_fat32_aborta_si_algo_sigue_montado_despues_de_umount(
+        sys_block, proc_mounts):
+    """Blindaje 5: `umount` puede fallar en silencio (permisos,
+    dispositivo ocupado). Si /proc/mounts sigue mostrando la partición
+    montada después de intentar desmontarla, `mkfs.vfat` no se corre."""
+    _make_block_device(sys_block, "sdb", removable=True, size_sectors=1000)
+    # Sigue montado antes y después del umount simulado: nada crítico,
+    # pero montado al fin.
+    proc_mounts(["/dev/sdb1 /run/media/kendry/USB vfat rw 0 0"])
+    device = drives.BlockDevice(path=_dev("sdb"), model="X", size_bytes=1000 * 512)
+
+    comandos = []
+
+    def _fake_run(cmd, **_k):
+        comandos.append(cmd)
+        if cmd[0] == "umount":
+            return subprocess.CompletedProcess(cmd, 1, "", "umount: target is busy")
+        raise AssertionError(f"no debería llegar a ejecutar {cmd}")
+
+    with pytest.raises(drives.StillMountedError):
+        drives.format_fat32(device, run=_fake_run)
+    assert not any("mkfs.vfat" in c for c in comandos)
+
+
+def test_format_fat32_revisa_la_identidad_dos_veces(sys_block, proc_mounts):
+    """El blindaje más sutil, también acá: la identidad física se
+    consulta antes de desmontar y OTRA VEZ justo antes de `mkfs.vfat`. Si
+    en el medio el kernel recicló `/dev/sdb` para otro dispositivo del
+    mismo tamaño, no se formatea."""
+    _make_block_device(sys_block, "sdb", removable=True, size_sectors=1000)
+    proc_mounts([])
+
+    llamadas_udevadm = []
+
+    def _fake_run(cmd, **_k):
+        if cmd[0] == "umount":
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if cmd[:2] == ["udevadm", "info"]:
+            llamadas_udevadm.append(cmd)
+            serie = "SERIE-A" if len(llamadas_udevadm) == 1 else "SERIE-B"
+            return subprocess.CompletedProcess(cmd, 0, f"ID_SERIAL={serie}\n", "")
+        raise AssertionError(f"no debería llegar a ejecutar {cmd}")
+
+    device = drives.BlockDevice(path=_dev("sdb"), model="X",
+                                size_bytes=1000 * 512, identity="SERIE-A")
+    with pytest.raises(drives.DeviceIdentityMismatchError):
+        drives.format_fat32(device, run=_fake_run)
+
+    assert len(llamadas_udevadm) == 2
+
+
+def test_format_fat32_propaga_el_error_de_mkfs(sys_block, proc_mounts):
+    """Un disco demasiado grande para FAT32, o cualquier otro rechazo de
+    `mkfs.vfat`, llega tal cual a quien llama: es el mensaje que la
+    interfaz le muestra al usuario."""
+    _make_block_device(sys_block, "sdb", removable=True, size_sectors=1000)
+    proc_mounts([])
+
+    def _fake_run(cmd, **_k):
+        if cmd[0] == "umount":
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if "mkfs.vfat" in cmd:
+            return subprocess.CompletedProcess(
+                cmd, 1, "", "mkfs.vfat: Device is too big for FAT32")
+        raise AssertionError(f"no debería llegar a llamar a {cmd}")
+
+    device = drives.BlockDevice(path=_dev("sdb"), model="X", size_bytes=1000 * 512)
+    with pytest.raises(RuntimeError, match="too big"):
+        drives.format_fat32(device, run=_fake_run)
+
+
+# ------------------- candidate_for_mount_point: el puente a la lista blanca --
+@pytest.fixture
+def identidad_fija(monkeypatch):
+    """`device_identity` sin tocar udev de verdad.
+
+    Se parchea la función y no `subprocess.run` porque
+    `list_candidate_drives` la llama sin pasarle `run`, así que usa el
+    `subprocess.run` que quedó ligado como valor por defecto al importar
+    el módulo -parchear el módulo `subprocess` no lo alcanza."""
+    monkeypatch.setattr(drives, "device_identity",
+                        lambda _path, **_kwargs: "SERIE-USB")
+
+
+def test_candidate_for_mount_point_da_el_dispositivo_de_la_lista_blanca(
+        sys_block, sys_class_block, identidad_fija, monkeypatch):
+    """El puente que usa "Verificar Memoria" para pasar del punto de
+    montaje (donde trabaja f3) al disco entero (que es lo que se formatea).
+    El `BlockDevice` que devuelve tiene que ser el MISMO que devolvería el
+    desplegable de Modo Fábrica, con tamaño e identidad incluidos: son los
+    valores contra los que `verify_still_safe` compara después."""
+    _make_block_device(sys_block, "sdb", removable=True, size_sectors=1000)
+    sys_class_block("sdb", particiones=("sdb1",))
+    monkeypatch.setattr(drives.subprocess, "run",
+                        _fake_findmnt({"/run/media/usuario/MIUSB": "/dev/sdb1"}))
+
+    device = drives.candidate_for_mount_point("/run/media/usuario/MIUSB")
+
+    assert device is not None
+    assert device.path == _dev("sdb")
+    assert device.size_bytes == 1000 * 512
+    assert device.identity == "SERIE-USB"
+
+
+def test_candidate_for_mount_point_none_para_un_disco_no_removible(
+        sys_block, sys_class_block, monkeypatch):
+    """El caso que importa: un disco interno montado en algún lado NO
+    puede llegar a ofrecerse para formatear por este camino. La lista
+    blanca es la misma que la de Modo Fábrica y no se afloja porque el
+    formateo sea "simple"."""
+    _make_block_device(sys_block, "nvme0n1", removable=False, size_sectors=10**9)
+    sys_class_block("nvme0n1", particiones=("nvme0n1p1",))
+    monkeypatch.setattr(drives.subprocess, "run",
+                        _fake_findmnt({"/datos": "/dev/nvme0n1p1"}))
+
+    assert drives.candidate_for_mount_point("/datos") is None
+
+
+def test_candidate_for_mount_point_none_si_no_se_resuelve_el_disco(
+        sys_block, sys_class_block, monkeypatch):
+    """Sin poder determinar qué disco hay detrás del punto de montaje (un
+    filesystem de red, un findmnt que no lo reconoce) no hay nada que
+    formatear: se falla cerrado, no se adivina."""
+    _make_block_device(sys_block, "sdb", removable=True, size_sectors=1000)
+    sys_class_block("sdb", particiones=("sdb1",))
+    monkeypatch.setattr(drives.subprocess, "run", _fake_findmnt({}))
+
+    assert drives.candidate_for_mount_point("/no/es/un/montaje") is None

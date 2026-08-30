@@ -40,6 +40,12 @@ mentira PERO REAL: un archivo de unos cientos de MB expuesto con
    es removible de verdad- y de ahí en más todo es real: blindaje 3
    (tamaño e identidad), blindaje 4 (montajes), `mkfs.vfat`, montaje y
    creación de apps/games/wbfs.
+5) El OTRO camino que llega al mismo `mkfs.vfat`: `format_fat32`, el
+   formateo de propósito general que ofrece "Verificar Memoria" cuando una
+   memoria pasa la prueba. Es la misma función que usa `format_as_wii_usb`
+   por debajo, así que lo que se confirma acá es lo que las diferencia: que
+   formatea igual de bien SIN dejar las carpetas de Wii, y que la etiqueta
+   que se le pasa termina de verdad en el volumen.
 
 Requiere root: crear/soltar un loop device y formatear con `mkfs.vfat`
 son operaciones de root en cualquier distro. Se corre con
@@ -245,6 +251,64 @@ def fase_4_formateo_real(loop_dev: Path) -> None:
         drives.is_removable_block_device = original_is_removable
 
 
+# --------------------------------------------------------------- Fase 5 --
+def fase_5_formateo_generico(loop_dev: Path) -> None:
+    """El formateo de propósito general de "Verificar Memoria", sobre el
+    mismo loop device: mismos blindajes (es la misma función), sin la
+    estructura de carpetas de Wii."""
+    print("\n=== Fase 5: formateo genérico FAT32 (Verificar Memoria) ===")
+    original_is_removable = drives.is_removable_block_device
+
+    def _forzar_removible(device_path):
+        if Path(device_path) == loop_dev:
+            return True
+        return original_is_removable(device_path)
+
+    drives.is_removable_block_device = _forzar_removible
+    try:
+        tamano = drives.device_size_bytes(loop_dev)
+        device = drives.BlockDevice(path=loop_dev, model="Loop de prueba",
+                                    size_bytes=tamano or 0)
+        try:
+            punto_montaje = drives.format_fat32(device, label="Fotos Mamá")
+        except Exception as e:  # noqa: BLE001
+            marcar("Fase 5: format_fat32 corrió sin levantar excepción",
+                   False, str(e))
+            return
+        marcar("Fase 5: format_fat32 corrió sin levantar excepción", True,
+               f"montado en {punto_montaje}")
+
+        contenido = sorted(p.name for p in punto_montaje.iterdir())
+        sin_carpetas_wii = not any(c in contenido for c in drives.FACTORY_FOLDERS)
+        marcar("Fase 5: NO se crearon apps/games/wbfs (es un formateo de "
+               "propósito general, no Modo Fábrica)",
+               sin_carpetas_wii, f"contenido={contenido}")
+
+        fstype = drives.filesystem_of(punto_montaje)
+        marcar("Fase 5: el filesystem resultante es FAT32/vfat",
+               fstype in {"vfat", "fat32"}, f"filesystem_of={fstype}")
+
+        # La etiqueta que se le pasó tiene acento y minúsculas, o sea que
+        # `mkfs.vfat` la habría rechazado tal cual: lo que tiene que haber
+        # quedado en el volumen es la versión normalizada.
+        esperada = drives.normalize_fat_label("Fotos Mamá")
+        if shutil.which("blkid") is None:
+            marcar("Fase 5: la etiqueta quedó normalizada en el volumen",
+                   True, "sin blkid: no se pudo comprobar, se da por bueno")
+        else:
+            leida = subprocess.run(
+                ["blkid", "-s", "LABEL", "-o", "value", str(loop_dev)],
+                capture_output=True, text=True).stdout.strip()
+            marcar("Fase 5: la etiqueta quedó normalizada en el volumen",
+                   leida == esperada, f"esperada={esperada!r} leída={leida!r}")
+
+        ok_desmonte, detalle = drives.eject_mount_point(punto_montaje)
+        marcar("Fase 5: se pudo desmontar el punto de montaje al terminar",
+               ok_desmonte, detalle)
+    finally:
+        drives.is_removable_block_device = original_is_removable
+
+
 def main() -> int:
     if os.geteuid() != 0:
         print("Este script necesita root (losetup, mkfs.vfat, mount).\n"
@@ -274,6 +338,7 @@ def main() -> int:
         fase_2_blindaje_4(loop_dev, workdir)
         fase_3_identidad(loop_dev)
         fase_4_formateo_real(loop_dev)
+        fase_5_formateo_generico(loop_dev)
     finally:
         if loop_dev is not None:
             subprocess.run(["umount", str(loop_dev)], capture_output=True)

@@ -11,7 +11,7 @@ sea que esté en `/dev/sdX` en ese momento. Por eso las funciones de más
 abajo (`is_removable_block_device`, `mounted_critical_paths`,
 `verify_still_safe`, `check_no_critical_mounts`) no comparten NADA de
 estado entre sí ni cachean nada: cada una lee el estado real del kernel en
-el momento en que se la llama. `format_as_wii_usb` las vuelve a llamar a
+el momento en que se la llama. `format_fat32` las vuelve a llamar a
 todas justo antes de tocar el disco, sin confiar en un chequeo que se
 haya hecho antes (por ejemplo, al abrir el diálogo de confirmación en la
 interfaz) porque entre que se abre ese diálogo y que el usuario confirma
@@ -28,7 +28,7 @@ Los "blindajes" a los que se refieren los docstrings de acá son:
 - BLINDAJE 3 (`verify_still_safe`): re-chequeo, ya en el hilo de fondo,
   de que el dispositivo sigue siendo removible, pesa lo mismo y tiene la
   misma identidad física (serie/WWN vía udev) que cuando se armó el
-  diálogo. `format_as_wii_usb` lo corre DOS veces -antes de desmontar y
+  diálogo. `format_fat32` lo corre DOS veces -antes de desmontar y
   otra vez justo antes de `mkfs.vfat`- porque ahí en el medio hay una
   ventana real: el desmontaje puede tardar, y es el momento en que menos
   se está mirando el dispositivo.
@@ -36,6 +36,17 @@ Los "blindajes" a los que se refieren los docstrings de acá son:
   última línea de defensa. Se corre siempre, pase lo que pase con los
   blindajes anteriores: si alguna partición del disco está montada en
   una ruta del sistema operativo, se aborta.
+
+Formatear en FAT32 es UNA sola función -`format_fat32`- y los dos flujos
+que formatean pasan por ahí: Modo Fábrica (`format_as_wii_usb`, que no es
+más que `format_fat32` y encima la estructura apps/games/wbfs) y el
+formateo de propósito general que se ofrece al terminar de verificar una
+memoria. Los blindajes viven ADENTRO de `format_fat32`, no en cada
+llamador: así un flujo nuevo que quiera formatear no puede olvidarse de
+correr alguno, ni puede terminar con una copia propia -y desactualizada-
+de la lista blanca de removibles. Lo único que cambia entre un flujo y
+otro es lo que pasa DESPUÉS de montar (la estructura de carpetas de Wii,
+o nada) y qué tamaño de clúster se pide.
 
 Un blindaje más que no vive en las funciones de arriba sino en cómo se
 usa `OperationManager` (`operations.py`): Modo Fábrica registra el disco
@@ -54,6 +65,7 @@ import re
 import shutil
 import subprocess
 import time
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -251,30 +263,57 @@ CRITICAL_MOUNTPOINTS = frozenset({
 # recién preparado.
 FACTORY_FOLDERS = ("apps", "games", "wbfs")
 
+# Valores propios de Modo Fábrica, que NO valen para un formateo de
+# propósito general: la etiqueta con la que se reconoce una unidad
+# preparada por la app, y los 64 sectores por clúster (64 * 512 B = 32 KB)
+# que recomiendan USB Loader GX y Nintendont para discos grandes.
+#
+# En un formateo genérico el clúster se deja elegir a `mkfs.vfat`, que lo
+# ajusta al tamaño real del dispositivo. Fijar 32 KB en una memoria chica
+# no falla -`mkfs.vfat` 4.2 formatea igual, avisando "Number of clusters
+# for 32 bit FAT is less then suggested minimum"- pero deja un
+# filesystem por debajo del mínimo recomendado para FAT32 (que algún
+# lector puede no querer) y desperdicia 32 KB por cada archivo chico. Para
+# una memoria que va a llevar fotos o documentos eso es todo costo sin
+# ningún beneficio: el clúster grande es una optimización para los
+# archivos de varios GB de un USB de Wii.
+WII_USB_LABEL = "WII_USB"
+WII_USB_SECTORS_PER_CLUSTER = 64
+
+# Lo que una etiqueta de volumen FAT puede tener: 11 caracteres como
+# máximo, en mayúsculas, sin los caracteres que el propio `mkfs.vfat`
+# rechaza. Se normaliza acá en vez de dejar que falle el comando, porque
+# el usuario escribe la etiqueta a mano en la interfaz y no tiene por qué
+# conocer las reglas de un formato de 1996.
+FAT_LABEL_MAX_LEN = 11
+_FAT_LABEL_FORBIDDEN = set('*?.,;:/\\|+=<>[]"')
+
 # Discos que /sys/block puede listar pero que nunca son "un USB para
 # preparar": loopback, ramdisk, device-mapper, zram, lectores ópticos.
 _IGNORED_BLOCK_PREFIXES = ("loop", "ram", "dm-", "zram", "sr")
 
 
-class FactoryModeError(RuntimeError):
-    """Base de los errores que aborta el Modo Fábrica. Nunca se levanta
-    directo: siempre una de las subclases de abajo, para que quien
-    llame sepa CUÁL blindaje frenó la operación y se lo pueda decir al
-    usuario con precisión."""
+class FormatGuardError(RuntimeError):
+    """Base de los errores con los que un blindaje aborta un formateo:
+    los mismos para Modo Fábrica y para el formateo de propósito general,
+    porque los dos entran por `format_fat32`. Nunca se levanta directo:
+    siempre una de las subclases de abajo, para que quien llame sepa CUÁL
+    blindaje frenó la operación y se lo pueda decir al usuario con
+    precisión."""
 
 
-class UnsafeDeviceError(FactoryModeError):
+class UnsafeDeviceError(FormatGuardError):
     """BLINDAJE 1 / 3: el dispositivo no es removible (o dejó de serlo, o
     directamente ya no existe)."""
 
 
-class DeviceChangedError(FactoryModeError):
+class DeviceChangedError(FormatGuardError):
     """BLINDAJE 3: el dispositivo cambió de tamaño desde que se armó la
     confirmación. Es la señal de que puede ser un disco distinto -mismo
     nombre de dispositivo, otro USB- y no el que el usuario aprobó."""
 
 
-class DeviceIdentityMismatchError(FactoryModeError):
+class DeviceIdentityMismatchError(FormatGuardError):
     """BLINDAJE 3: la identidad física del dispositivo (serie/WWN vía
     udev) cambió desde que se armó la confirmación, aunque `/dev/sdX`,
     la removibilidad y hasta el tamaño coincidan.
@@ -287,12 +326,12 @@ class DeviceIdentityMismatchError(FactoryModeError):
     (tamaño) igual."""
 
 
-class CriticalMountError(FactoryModeError):
+class CriticalMountError(FormatGuardError):
     """BLINDAJE 4: alguna partición del dispositivo está montada en una
     ruta crítica del sistema operativo."""
 
 
-class StillMountedError(FactoryModeError):
+class StillMountedError(FormatGuardError):
     """BLINDAJE 5: después de intentar desmontar todo, `device_path` (o
     alguna de sus particiones) sigue apareciendo en /proc/mounts. Pasa,
     por ejemplo, si `umount` falla en silencio por permisos insuficientes:
@@ -438,6 +477,37 @@ def physical_disk_for_path(path) -> Path | None:
     if dispositivo is None:
         return None
     return _whole_disk_path(dispositivo)
+
+
+def candidate_for_mount_point(mount_point) -> "BlockDevice | None":
+    """El `BlockDevice` de la LISTA BLANCA que corresponde al disco físico
+    detrás de `mount_point`, o None si no hay ninguno.
+
+    Es el puente entre los dos mundos del módulo: los flujos que trabajan
+    sobre un punto de montaje (verificar una memoria con f3, transferir,
+    instalar homebrew) y los que necesitan el disco entero (formatear).
+    Sin esto, ofrecer "formatear esta unidad" después de verificarla
+    obligaría a fabricar un `BlockDevice` a mano a partir del punto de
+    montaje, que es exactamente la forma de saltearse el BLINDAJE 1 sin
+    darse cuenta.
+
+    Acá no hay atajo posible: el disco tiene que aparecer en
+    `list_candidate_drives()` -o sea, el kernel tiene que marcarlo
+    removable=1- o esta función devuelve None y no hay nada que formatear.
+    Un disco interno no puede llegar por este camino, igual que no puede
+    llegar por el desplegable de Modo Fábrica.
+
+    Se relista en el momento (no se cachea nada) para que el `size_bytes`
+    y la `identity` que quedan congelados en el `BlockDevice` sean los de
+    AHORA: son justo los valores contra los que `verify_still_safe` va a
+    comparar más tarde, cuando el usuario confirme."""
+    fisico = physical_disk_for_path(mount_point)
+    if fisico is None:
+        return None
+    for candidato in list_candidate_drives():
+        if candidato.path == fisico:
+            return candidato
+    return None
 
 
 def resources_for_mount_point(path) -> list[Path]:
@@ -608,7 +678,7 @@ def verify_still_safe(device: BlockDevice, *, run=subprocess.run) -> None:
     """BLINDAJE 3: re-chequeo, ya en el hilo de fondo, de que
     `device.path` sigue siendo removible, pesa lo mismo y tiene la misma
     identidad física que cuando se armó el diálogo de confirmación.
-    `format_as_wii_usb` la llama DOS veces: acá y otra vez justo antes de
+    `format_fat32` la llama DOS veces: acá y otra vez justo antes de
     `mkfs.vfat`, así que esta función no asume en qué momento del flujo
     está -siempre vuelve a preguntarle al kernel/udev, nunca confía en
     una llamada anterior, ni siquiera una hecha un segundo antes.
@@ -648,7 +718,7 @@ def verify_still_safe(device: BlockDevice, *, run=subprocess.run) -> None:
 
 def check_no_critical_mounts(device: BlockDevice) -> None:
     """BLINDAJE 4: la última línea de defensa. Se llama SIEMPRE desde
-    `format_as_wii_usb`, sin importar que los blindajes 1 y 3 ya hayan
+    `format_fat32`, sin importar que los blindajes 1 y 3 ya hayan
     dado OK -de hecho es la única razón de ser de esta función: no
     confiar en que nada anterior alcance."""
     criticos = mounted_critical_paths(device.path)
@@ -697,19 +767,85 @@ def _mount_after_format(device_path, *, run=subprocess.run,
         f"{device_path} se formateó pero no se pudo montar después.")
 
 
-def format_as_wii_usb(device: BlockDevice, *, run=subprocess.run,
-                       label: str = "WII_USB", cluster_size_kb: int = 64,
-                       mount_timeout: float = 15.0) -> Path:
-    """Ejecuta el Modo Fábrica de verdad sobre `device`: re-corre los
-    blindajes 3 y 4 (nunca se confía en un chequeo hecho en otro momento,
-    ni siquiera uno hecho un segundo antes por quien llama), desmonta lo
-    que haya montado, confirma con el Blindaje 5 que ese desmontaje surtió
-    efecto de verdad, formatea FAT32 vía `mkfs.vfat` y arma la estructura
-    de carpetas que esperan USB Loader GX / Nintendont.
+def normalize_fat_label(label: str | None) -> str:
+    """Deja `label` como una etiqueta de volumen FAT válida, o string
+    vacío si no queda nada usable.
+
+    FAT32 guarda la etiqueta en 11 bytes, en mayúsculas y sin varios
+    caracteres de puntuación; `mkfs.vfat` directamente falla si le pasan
+    algo que no cumple. Como la etiqueta la escribe el usuario a mano en
+    la interfaz, se normaliza acá -mayúsculas, afuera lo prohibido y lo
+    no imprimible, cortar a 11- en vez de devolverle un error de
+    `mkfs.vfat` por una coma de más.
+
+    Los acentos y la ñ se transliteran a ASCII ("Fotos Mamá" ->
+    "FOTOS MAMA") en vez de dejarlos pasar: FAT no guarda la etiqueta en
+    UTF-8 sino en una página de códigos, y `mkfs.vfat` mide el límite de
+    11 en BYTES, así que una etiqueta con acentos puede fallar o quedar
+    escrita con basura. Vale más una etiqueta sin tilde que un formateo
+    que se cae al final por el nombre.
+
+    String vacío significa "sin etiqueta": quien llama omite `-n` y el
+    volumen queda como NO NAME, que es exactamente lo que corresponde
+    cuando el campo de etiqueta se deja en blanco."""
+    if not label:
+        return ""
+    # NFKD separa "á" en "a" + tilde combinante; descartar las marcas
+    # combinantes (categoría Mn) deja el ASCII de abajo.
+    descompuesto = unicodedata.normalize("NFKD", label.strip().upper())
+    limpio = "".join(
+        c for c in descompuesto
+        if unicodedata.category(c) != "Mn"
+        and c.isascii() and c.isprintable()
+        and c not in _FAT_LABEL_FORBIDDEN
+    )
+    return limpio[:FAT_LABEL_MAX_LEN].strip()
+
+
+def format_fat32(device: BlockDevice, *, run=subprocess.run,
+                 label: str | None = None,
+                 sectors_per_cluster: int | None = None,
+                 mount_timeout: float = 15.0) -> Path:
+    """Formatea `device` entero como FAT32, con todos los blindajes
+    puestos, y devuelve el punto de montaje donde quedó.
+
+    Este es EL mecanismo de formateo de la app: no hay otro. Modo Fábrica
+    (`format_as_wii_usb`) y el formateo de propósito general que se ofrece
+    al terminar de verificar una memoria llaman los dos acá, así que los
+    blindajes se corren una sola vez en un solo lugar y ninguno de los dos
+    flujos puede quedarse con una versión propia -la lista blanca de
+    removibles vale igual para los dos, sin excepciones: un disco externo
+    grande pasa por ser removable=1, no por ser grande.
+
+    Lo que hace, en orden, sin confiar en ningún chequeo que haya hecho
+    quien llama (ni siquiera uno hecho un segundo antes):
+
+    1. Blindaje 3 (`verify_still_safe`) y blindaje 4
+       (`check_no_critical_mounts`).
+    2. Desmonta todo lo que tenga montado y confirma con el blindaje 5
+       que el desmontaje surtió efecto de verdad.
+    3. Blindaje 3 OTRA VEZ, ya con el disco desmontado: ahí en el medio
+       está la ventana real (desmontar puede tardar) entre "confirmamos
+       que era el dispositivo correcto" y "empezamos a escribir".
+    4. `mkfs.vfat -F 32` sobre el disco entero.
+    5. Lo monta de vuelta y devuelve dónde quedó.
+
+    `label` es opcional: se normaliza con `normalize_fat_label` y, si
+    queda vacío, no se le pasa `-n` a `mkfs.vfat` (el volumen queda como
+    NO NAME). `sectors_per_cluster` en None deja que `mkfs.vfat` elija el
+    tamaño de clúster según el tamaño real del dispositivo, que es lo
+    correcto para un formateo genérico; Modo Fábrica sí lo fija, porque
+    los USB Loaders esperan clústeres de 32 KB.
+
+    Formatea el DISCO ENTERO sin tabla de particiones (`mkfs.vfat` sobre
+    `/dev/sdX`, no sobre `/dev/sdX1`), igual que hace Modo Fábrica desde
+    siempre: es lo que leen sin quejarse tanto los USB Loaders como
+    Windows y Linux en un pendrive o una SD.
 
     Pensada para correr en un hilo de fondo: no toca GTK ni nada de la
-    interfaz -quien la llama es responsable de reportar progreso/resultado
-    con `GLib.idle_add`, igual que hace `queue_manager`.
+    interfaz -quien la llama es responsable de reportar
+    progreso/resultado con `GLib.idle_add`, igual que hace
+    `queue_manager`.
 
     `mkfs.vfat` se lanza vía `pkexec`, salvo que el proceso YA sea root
     (`os.geteuid() == 0`): eso es lo que pasa en el script de pruebas
@@ -719,9 +855,10 @@ def format_as_wii_usb(device: BlockDevice, *, run=subprocess.run,
     cambio, `pkexec` es el que muestra el diálogo de contraseña del
     sistema.
 
-    Devuelve el punto de montaje final. Levanta la subclase de
-    `FactoryModeError` que corresponda si algún blindaje no pasa, o
-    `RuntimeError` si `mkfs.vfat` (o el montaje posterior) fallan."""
+    Levanta la subclase de `FormatGuardError` que corresponda si algún
+    blindaje no pasa, o `RuntimeError` si `mkfs.vfat` (o el montaje
+    posterior) fallan -incluido el caso de un disco demasiado grande para
+    FAT32, que rechaza el propio `mkfs.vfat` con su mensaje."""
     verify_still_safe(device, run=run)
     check_no_critical_mounts(device)
 
@@ -743,17 +880,43 @@ def format_as_wii_usb(device: BlockDevice, *, run=subprocess.run,
     # antes de desmontar.
     verify_still_safe(device, run=run)
 
+    comando = ["mkfs.vfat", "-F", "32"]
+    if sectors_per_cluster is not None:
+        comando += ["-s", str(sectors_per_cluster)]
+    etiqueta = normalize_fat_label(label)
+    if etiqueta:
+        comando += ["-n", etiqueta]
+    comando.append(str(device.path))
+
     prefijo = [] if os.geteuid() == 0 else ["pkexec"]
-    resultado = run(
-        prefijo + ["mkfs.vfat", "-F", "32", "-s", str(cluster_size_kb),
-                   "-n", label, str(device.path)],
-        capture_output=True, text=True, timeout=300,
-    )
+    resultado = run(prefijo + comando, capture_output=True, text=True, timeout=300)
     if resultado.returncode != 0:
         raise RuntimeError(
             resultado.stderr.strip() or "mkfs.vfat terminó con error desconocido.")
 
-    punto_montaje = _mount_after_format(device.path, run=run, timeout=mount_timeout)
+    return _mount_after_format(device.path, run=run, timeout=mount_timeout)
+
+
+def format_as_wii_usb(device: BlockDevice, *, run=subprocess.run,
+                      label: str = WII_USB_LABEL,
+                      sectors_per_cluster: int = WII_USB_SECTORS_PER_CLUSTER,
+                      mount_timeout: float = 15.0) -> Path:
+    """Modo Fábrica: `format_fat32` (todos los blindajes + mkfs + montar)
+    y encima la estructura de carpetas que esperan USB Loader GX y
+    Nintendont.
+
+    Todo lo peligroso pasa en `format_fat32`; lo único propio de Modo
+    Fábrica que queda acá es lo específico de Wii: el clúster de 32 KB, la
+    etiqueta por defecto y crear apps/games/wbfs después de montar. Esa
+    parte NO se comparte con el formateo de propósito general -una memoria
+    que se formatea para llevar fotos no tiene por qué quedar con tres
+    carpetas de un loader de Wii adentro.
+
+    Devuelve el punto de montaje final. Levanta lo mismo que
+    `format_fat32`."""
+    punto_montaje = format_fat32(device, run=run, label=label,
+                                 sectors_per_cluster=sectors_per_cluster,
+                                 mount_timeout=mount_timeout)
     for carpeta in FACTORY_FOLDERS:
         (punto_montaje / carpeta).mkdir(parents=True, exist_ok=True)
 

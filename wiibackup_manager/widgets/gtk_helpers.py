@@ -6,8 +6,9 @@ from typing import Callable
 
 import gi
 
+gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gio  # noqa: E402
+from gi.repository import Adw, Gio, Gtk  # noqa: E402
 
 from ..i18n import _
 
@@ -80,3 +81,50 @@ def widget_is_alive(widget) -> bool:
         # El objeto de C ya no está: PyGObject puede levantar cualquier
         # cosa al tocarlo. Sea lo que sea, el widget no está vivo.
         return False
+
+
+# La palabra que hay que escribir para habilitar un formateo. Es una sola
+# constante -y se le pasa al cuerpo del diálogo con `.format()`- para que
+# el texto que se le pide al usuario y el que se compara no se puedan
+# separar nunca, ni siquiera al traducir el diálogo a otro idioma.
+FORMAT_CONFIRM_WORD = "FORMATEAR"
+
+
+def confirm_whole_disk_format(parent, *, heading: str, body: str,
+                              confirm_label: str,
+                              on_confirm: Callable[[], None]) -> None:
+    """BLINDAJE 2: el diálogo que hay que pasar antes de formatear un disco
+    entero, sea cual sea el flujo que lo pida.
+
+    Vive acá y no en la página de Modo Fábrica porque ya no hay un solo
+    flujo que formatee: también se ofrece formatear una memoria recién
+    verificada. Los blindajes de bajo nivel se comparten en
+    `drives.format_fat32`, y este -el único que vive en la interfaz- se
+    comparte acá, por el mismo motivo: que un flujo nuevo no pueda salir
+    con una confirmación más floja que la del resto.
+
+    `body` tiene que traer `{word}`, que se reemplaza por la palabra que
+    el usuario tiene que escribir. El botón destructivo arranca apagado y
+    solo se habilita cuando lo escribió exacto; `on_confirm` se llama
+    únicamente si eligió el botón de formatear.
+    """
+    dialog = Adw.AlertDialog(
+        heading=heading,
+        body=body.format(word=FORMAT_CONFIRM_WORD),
+    )
+    entry = Gtk.Entry(placeholder_text=FORMAT_CONFIRM_WORD)
+    dialog.set_extra_child(entry)
+    dialog.add_response("cancel", _("Cancelar"))
+    dialog.add_response("format", confirm_label)
+    dialog.set_response_appearance("format", Adw.ResponseAppearance.DESTRUCTIVE)
+    dialog.set_response_enabled("format", False)
+    dialog.set_default_response("cancel")
+    dialog.set_close_response("cancel")
+    entry.connect(
+        "changed",
+        lambda e: dialog.set_response_enabled(
+            "format", e.get_text().strip() == FORMAT_CONFIRM_WORD))
+    dialog.connect(
+        "response",
+        lambda _d, response: on_confirm() if response == "format" else None)
+    dialog.present(parent)

@@ -75,6 +75,27 @@ todo lo que hizo.
   capacidad usada/libre y formato), con el nombre del cliente y notas, para
   mandárselo por WhatsApp al entregar el equipo
 
+**Verificar memoria**
+
+- **Detecta pendrives y tarjetas SD truchos** (los que dicen 128 GB y
+  tienen 8): llena todo el espacio libre con datos de prueba y los vuelve
+  a leer uno por uno, con `f3` por debajo. Es la única forma de saberlo:
+  la capacidad la reporta el propio dispositivo, y un controlador que
+  miente le miente igual al sistema operativo
+- Progreso real de las dos pasadas (escribir y leer), con velocidad y
+  tiempo restante, y cancelación en el momento
+- Al terminar borra sus propios archivos de prueba y no toca nada de lo
+  que ya hubiera en la memoria
+- El veredicto queda en el historial: una memoria que no pasa se registra
+  como error, con cuántos GB no volvieron
+- **Formatear en FAT32** ahí mismo cuando la memoria pasa la prueba, con
+  etiqueta de volumen opcional. Es un formateo de propósito general (como
+  GUIFormat en Windows): no arma las carpetas de Wii —para eso está Modo
+  Fábrica—, y usa exactamente los mismos blindajes que este: solo discos
+  que el sistema marca como removibles, nunca uno con una partición del
+  sistema montada, y se vuelve a confirmar la identidad del dispositivo
+  justo antes de formatear
+
 **Seguridad de tus archivos**
 
 - Pregunta antes de reemplazar cualquier archivo que ya exista
@@ -93,6 +114,9 @@ todo lo que hizo.
 - **`wit` (Wiimms ISO Tools)** — opcional pero muy recomendado. Sin `wit`
   la app abre y lista ISOs planas, pero no puede identificar WBFS/CISO/WDF
   ni convertir ni verificar.
+- **`f3` (Fight Flash Fraud)** — opcional. Hace falta solo para "Verificar
+  Memoria"; sin él, esa página avisa que falta instalarlo y el resto de la
+  app funciona igual.
 
 ## Instalación paso a paso
 
@@ -103,15 +127,18 @@ todo lo que hizo.
 ### 1. Instalar las dependencias del sistema
 
 ```bash
-sudo dnf install python3-gobject gtk4 libadwaita python3-pip git
+sudo dnf install python3-gobject gtk4 libadwaita python3-pip git f3
 ```
 
 Te va a pedir tu contraseña (no se ve nada mientras la escribís, es
 normal). En Debian/Ubuntu el comando equivalente es:
 
 ```bash
-sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 python3-pip git
+sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 python3-pip git f3
 ```
+
+(`f3` es el que verifica que una memoria no sea trucha. Si no lo instalás,
+todo lo demás anda igual: solo esa página avisa que falta.)
 
 ### 2. Instalar `wit` (Wiimms ISO Tools)
 
@@ -403,8 +430,9 @@ wiibackup_manager/
 ├── library.py                    # Escaneo, modelo de datos y exportación
 ├── disc_header.py                # Parseo de header de ISO plana (sin dependencias)
 ├── wit_wrapper.py                # Llamadas a `wit` (conversión/verificación/cancelación)
+├── f3_wrapper.py                 # Llamadas a `f3` (verificar que una memoria sea real)
 ├── gametdb.py                    # Carátulas y metadata de GameTDB, con caché
-├── drives.py                     # Detección y expulsión de unidades USB/SD montadas
+├── drives.py                     # Unidades USB/SD: detección, expulsión y formateo blindado
 ├── operations.py                 # Coordina las operaciones largas (evita que se pisen)
 ├── oplog.py                      # Historial persistente de operaciones
 ├── ticket_service.py             # Ticket de entrega: qué contiene una unidad preparada
@@ -415,6 +443,7 @@ wiibackup_manager/
     ├── game_detail_dialog.py     # Panel de detalle del juego (carátula + datos GameTDB)
     ├── preferences_dialog.py     # Diálogo de Preferencias
     ├── transfer_view.py          # Pestaña Transferir: destinos y copia a WBFS
+    ├── memory_check_view.py      # Verificar Memoria: prueba con f3 + formateo FAT32
     ├── ticket_dialog.py          # Pide cliente y notas antes de generar el ticket
     ├── log_view.py               # Pestaña Log: historial de operaciones
     └── gtk_helpers.py            # Utilidades chicas compartidas por diálogos de GTK
