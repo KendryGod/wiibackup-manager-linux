@@ -347,6 +347,11 @@ Con eso, un sistema en francés abre la app en francés.
   (que corre `tools/update-translations.sh`) los valida.
 - Las entradas con `msgid_plural` llevan un `msgstr[N]` por cada forma
   plural del idioma; `msginit` deja la cantidad correcta según el locale.
+- El vocabulario ya fijado —qué términos no se traducen, cómo se llama
+  cada sección en inglés, y las trampas del dominio— está en
+  [docs/glosario-traduccion.md](docs/glosario-traduccion.md). Conviene
+  leerlo antes de empezar: evita que la misma idea salga traducida de dos
+  formas distintas en dos pantallas.
 
 **Al cambiar textos de la interfaz** (para quien toque el código): envolver
 la cadena nueva con `_()` —o `ngettext()` si depende de una cantidad—,
