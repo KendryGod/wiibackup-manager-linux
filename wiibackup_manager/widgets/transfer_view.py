@@ -11,7 +11,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gtk, GLib  # noqa: E402
+from gi.repository import Adw, Gio, Gtk, GLib  # noqa: E402
 
 from .. import config, drives, gametdb, library
 from ..library import Game
@@ -283,6 +283,19 @@ class TransferView(Gtk.Box):
         self.save_preset_btn.connect("clicked", self._on_save_preset)
         dest_buttons.append(self.save_preset_btn)
 
+        # El ticket va acá, al lado de "Expulsar", porque este es el
+        # momento en que existe: la unidad ya está preparada y el paso
+        # siguiente es desconectarla y entregarla. Es lo último que se
+        # hace antes de sacar el pendrive, así que es donde se busca.
+        self.ticket_button = Gtk.Button(label=_("Ticket de entrega"))
+        self.ticket_button.set_tooltip_text(
+            _("Generar un PDF con el contenido de la unidad para enviarle "
+              "al cliente.")
+        )
+        self.ticket_button.set_sensitive(False)
+        self.ticket_button.connect("clicked", self._on_ticket_clicked)
+        dest_buttons.append(self.ticket_button)
+
         self.eject_button = Gtk.Button(label=_("Expulsar unidad"))
         self.eject_button.set_tooltip_text(
             _("Desmontar de forma segura la unidad seleccionada antes de "
@@ -443,7 +456,7 @@ class TransferView(Gtk.Box):
         `OperationManager` avisa un cambio (reenviado con `GLib.idle_add`,
         porque ese aviso puede venir de cualquier hilo) y desde el callback
         de la cola."""
-        self._update_eject_button()
+        self._update_dest_buttons()
         return False
 
     # ------------------------------------------------------------ Destino --
@@ -521,7 +534,7 @@ class TransferView(Gtk.Box):
             self._dest_path = None
             self.dest_list.unselect_all()
             self._update_dest_space_label()
-            self._update_eject_button()
+            self._update_dest_buttons()
             self._show_toast(_("El destino elegido ya no está disponible y se quitó de la lista."))
 
     def _build_preset_row(self, preset: dict):
@@ -644,7 +657,7 @@ class TransferView(Gtk.Box):
     def _on_dest_row_selected(self, listbox, row):
         self._dest_path = getattr(row, "dest_path", None) if row else None
         self._update_dest_space_label()
-        self._update_eject_button()
+        self._update_dest_buttons()
 
     # Umbrales de la barra de uso de disco del destino. Debajo de WARN la
     # barra va verde, entre WARN y FULL amarilla, y de FULL para arriba
@@ -705,6 +718,120 @@ class TransferView(Gtk.Box):
             .format(free=free_gb, total=total_gb, percent=percent_text)
         )
         self._set_usage_bar(ratio)
+
+    def _update_dest_buttons(self):
+        """Refresca los botones que dependen del destino elegido. Los dos
+        se actualizan juntos porque miran lo mismo -qué hay seleccionado y
+        si está ocupado-, y separarlos hacía que cada lugar que cambia la
+        selección tuviera que acordarse de llamar a los dos."""
+        self._update_eject_button()
+        self._update_ticket_button()
+
+    def _update_ticket_button(self):
+        """El ticket se habilita con cualquier destino elegido que exista,
+        sea una unidad montada o una carpeta local: el resumen se arma
+        leyendo la estructura de carpetas, que es igual en los dos casos
+        (una carpeta de pruebas en el disco tiene el mismo `wbfs/` que un
+        pendrive).
+
+        A diferencia de expulsar, NO se apaga cuando la unidad está
+        ocupada: generar el ticket solo lee, así que no puede romper una
+        transferencia en curso. Lo peor que pasa es que cuente un juego de
+        menos si se lo pide antes de que la cola termine, y eso se
+        soluciona volviéndolo a generar."""
+        listo = self._dest_path is not None and self._dest_path.is_dir()
+        self.ticket_button.set_sensitive(listo)
+        if listo:
+            self.ticket_button.set_tooltip_text(
+                _("Generar un PDF con el contenido de la unidad para "
+                  "enviarle al cliente.")
+            )
+        else:
+            self.ticket_button.set_tooltip_text(
+                _("Elegí primero un destino para poder generar su ticket.")
+            )
+
+    def _on_ticket_clicked(self, *_args):
+        """Paso 1 de 3: pedirle a la persona el nombre del cliente y las
+        notas. Los otros dos pasos son elegir dónde guardar el PDF y
+        generarlo."""
+        if self._dest_path is None:
+            return
+        from .ticket_dialog import TicketDialog
+
+        dialog = TicketDialog(self._dest_path.name or str(self._dest_path),
+                              self._on_ticket_details)
+        dialog.present(self)
+
+    def _on_ticket_details(self, client_name: str, notes: str):
+        """Paso 2: dónde guardar el PDF. El nombre propuesto lo arma el
+        servicio (lleva cliente y fecha), así que la vista no decide cómo
+        se llama el archivo, solo lo ofrece."""
+        from .. import ticket_service
+
+        dialog = Gtk.FileDialog(title=_("Guardar el ticket de entrega"))
+        dialog.set_initial_name(ticket_service.suggested_filename(client_name))
+        dialog.set_initial_folder(gtk_helpers.safe_initial_folder())
+        dialog.save(self.get_root(), None,
+                    lambda d, r: self._on_ticket_file_chosen(d, r, client_name,
+                                                              notes))
+
+    def _on_ticket_file_chosen(self, dialog, result, client_name: str,
+                               notes: str):
+        try:
+            archivo = dialog.save_finish(result)
+        except Exception:
+            # El usuario canceló el selector: no es un error que valga un
+            # aviso, igual que en el resto de los selectores de la app.
+            return
+        if not archivo or self._dest_path is None:
+            return
+
+        destino = Path(archivo.get_path())
+        origen = self._dest_path
+        self.ticket_button.set_sensitive(False)
+
+        def worker():
+            """Paso 3, fuera del hilo de GTK: contar el contenido de la
+            unidad implica recorrer carpetas y preguntarle el filesystem a
+            `findmnt` (un subproceso con timeout), y las dos cosas pueden
+            tardar lo suficiente como para congelar la ventana."""
+            try:
+                from .. import pdf_export, ticket_service
+                datos = ticket_service.collect_ticket_data(
+                    origen, client_name=client_name, notes=notes)
+                pdf_export.render_ticket(datos, destino)
+                GLib.idle_add(self._on_ticket_done, destino, None)
+            except Exception as e:  # noqa: BLE001 - se le muestra al usuario
+                GLib.idle_add(self._on_ticket_done, destino, str(e))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_ticket_done(self, destino: Path, error: str | None):
+        self._update_ticket_button()
+        if error is not None:
+            self._show_toast(
+                _("No se pudo generar el ticket: {error}").format(error=error))
+            return False
+
+        # Abrirlo con el visor del sistema es el punto: el ticket existe
+        # para mandarlo por WhatsApp, y el paso siguiente es verlo y
+        # compartirlo. Si no hay visor de PDF instalado, el archivo igual
+        # quedó bien guardado y el aviso dice dónde.
+        launcher = Gtk.FileLauncher.new(Gio.File.new_for_path(str(destino)))
+        launcher.launch(self.get_root(), None,
+                        lambda l, r: self._on_ticket_opened(l, r, destino))
+        return False
+
+    def _on_ticket_opened(self, launcher, result, destino: Path):
+        try:
+            launcher.launch_finish(result)
+        except Exception:
+            self._show_toast(
+                _("Ticket guardado en {ruta} (no se pudo abrir el visor de "
+                  "PDF).").format(ruta=destino))
+            return
+        self._show_toast(_("Ticket guardado en {ruta}").format(ruta=destino))
 
     def _update_eject_button(self):
         if self._dest_path is not None and drives.is_mount_point(self._dest_path):
@@ -779,7 +906,7 @@ class TransferView(Gtk.Box):
                 self.dest_list.unselect_all()
             self._refresh_drives()
         else:
-            self._update_eject_button()
+            self._update_dest_buttons()
         return False
 
     def _on_add_folder(self, *_args):
@@ -973,7 +1100,7 @@ class TransferView(Gtk.Box):
         # liberar la unidad para expulsarla.
         if job.is_final:
             self._update_dest_space_label()
-        self._update_eject_button()
+        self._update_dest_buttons()
 
     def _on_job_cancel_requested(self, job: TransferJob):
         if not self.queue.cancel_job(job.id):
@@ -1000,7 +1127,7 @@ class TransferView(Gtk.Box):
             # libre y el botón de expulsar.
             return
         self._update_dest_space_label()
-        self._update_eject_button()
+        self._update_dest_buttons()
         self._update_queue_header()
 
         partes = [_("{n} copiados").format(n=summary.done)]

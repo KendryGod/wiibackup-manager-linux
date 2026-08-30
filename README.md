@@ -70,6 +70,10 @@ todo lo que hizo.
 - Expulsión segura de la unidad desde la app
 - Progreso real, tiempo estimado y cancelación de verdad (corta la copia en
   el momento, no cuando termina el archivo)
+- **Ticket de entrega**: genera un PDF de una página con el resumen de lo
+  que lleva la unidad (juegos de Wii, de GameCube, apps de homebrew,
+  capacidad usada/libre y formato), con el nombre del cliente y notas, para
+  mandárselo por WhatsApp al entregar el equipo
 
 **Seguridad de tus archivos**
 
@@ -403,12 +407,15 @@ wiibackup_manager/
 ├── drives.py                     # Detección y expulsión de unidades USB/SD montadas
 ├── operations.py                 # Coordina las operaciones largas (evita que se pisen)
 ├── oplog.py                      # Historial persistente de operaciones
+├── ticket_service.py             # Ticket de entrega: qué contiene una unidad preparada
+├── pdf_export.py                 # Dibuja el ticket en un PDF (vía cairo, sin dependencias nuevas)
 ├── styles.py                     # CSS propio y esquema de color (claro/oscuro)
 └── widgets/
     ├── game_row.py               # Fila de juego en la lista de la Biblioteca
     ├── game_detail_dialog.py     # Panel de detalle del juego (carátula + datos GameTDB)
     ├── preferences_dialog.py     # Diálogo de Preferencias
     ├── transfer_view.py          # Pestaña Transferir: destinos y copia a WBFS
+    ├── ticket_dialog.py          # Pide cliente y notas antes de generar el ticket
     ├── log_view.py               # Pestaña Log: historial de operaciones
     └── gtk_helpers.py            # Utilidades chicas compartidas por diálogos de GTK
 ```

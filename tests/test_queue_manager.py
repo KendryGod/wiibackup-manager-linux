@@ -330,7 +330,12 @@ class _VistaDeMentira:
     def _update_dest_space_label(self):
         self.refrescos += 1
 
-    def _update_eject_button(self):
+    # Antes se llamaba `_update_eject_button`. Pasó a ser
+    # `_update_dest_buttons` -que refresca el botón de expulsar Y el de
+    # generar el ticket de entrega- cuando se sumó el segundo botón que
+    # depende del destino elegido: los dos miran lo mismo y se actualizan
+    # juntos.
+    def _update_dest_buttons(self):
         self.refrescos += 1
 
     def _update_queue_header(self):
