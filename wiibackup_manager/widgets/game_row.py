@@ -8,7 +8,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk, GdkPixbuf, GLib, GObject  # noqa: E402
 
 from .. import gametdb
-from ..library import Game
+from ..game_model import Game
 from ..i18n import _
 from . import gtk_helpers
 

@@ -185,7 +185,7 @@ class CancellationToken:
 # Confirmado corriendo `wit HELP COPY` (wit v3.05a r8638): `-z --split` sin
 # tamaño explícito ya usa por defecto 4 GB **decimal** (4_000_000_000 bytes),
 # no 4 GiB como se asumía antes en este proyecto (ver comentario corregido
-# en library.py). Verificado además con una copia real: un WBFS real de
+# en library_ops.py). Verificado además con una copia real: un WBFS real de
 # 7.1GB copiado con `wit COPY --overwrite --split` contra un FAT32 real
 # (loop device formateado con `mkfs.vfat -F32`) dividió limpio en partes de
 # ~4.0GB + ~3.1GB, sin colgarse.
@@ -572,7 +572,7 @@ def convert(
     propósito: antes `--overwrite` iba SIEMPRE, de forma incondicional, y
     eso funcionaba solo porque todos los que llaman hoy se ocupan del
     destino existente por su cuenta (apartándolo con un
-    `library.DestinationGuard`, o directamente salteando el archivo). Era
+    `library_ops.DestinationGuard`, o directamente salteando el archivo). Era
     una trampa esperando a que alguien llamara a `convert()` sin ese
     cuidado y perdiera un juego sin enterarse; con el default en False, el
     que quiera pisar tiene que decirlo.

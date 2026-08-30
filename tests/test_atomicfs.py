@@ -331,7 +331,7 @@ def test_stream_sin_fsync_no_lo_llama(tmp_path, monkeypatch):
 
 
 def test_before_replace_corre_sobre_el_temporal_y_antes_del_intercambio(tmp_path):
-    """Es lo que necesita `library._copy_with_progress` para su
+    """Es lo que necesita `fileops._copy_with_progress` para su
     `copystat`: aplicar algo sobre el temporal -no sobre el destino- justo
     antes de que ocupe el lugar."""
     dest = tmp_path / "archivo.bin"

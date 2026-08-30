@@ -27,9 +27,9 @@ usuario está por desconectar sin ningún riesgo.
 Cómo se cuenta
 --------------
 Por la ESTRUCTURA de carpetas que la app ya construye al copiar
-(`library.wbfs_dest_path`, `library.gc_dest_path`,
+(`transfer_plan.wbfs_dest_path`, `transfer_plan.gc_dest_path`,
 `oscwii_installer`), y no abriendo cada archivo con `wit` como hace
-`library.scan_library`. Son dos trabajos distintos: el escaneo identifica
+`scanning.scan_library`. Son dos trabajos distintos: el escaneo identifica
 juego por juego -título, ID, formato- y para eso paga el precio de leer
 headers; el ticket solo necesita CUÁNTOS hay, y hacerlo por estructura es
 inmediato, no depende de que `wit` esté instalado, y funciona sobre una
@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import drives
-from .library import VALID_EXTENSIONS, sanitize_filename
+from .game_model import VALID_EXTENSIONS, sanitize_filename
 
 # Las tres carpetas de primer nivel que la app crea en una unidad
 # preparada. Los nombres son los que esperan los programas de la Wii, no
@@ -119,12 +119,12 @@ def count_wii_games(drive_root: Path) -> int:
     Se cuentan ARCHIVOS de juego y no carpetas, porque las dos
     disposiciones que se ven en la práctica tienen que dar lo mismo: la
     que arma esta app y esperan los USB Loaders
-    (`wbfs/<ID6>/<ID6>.wbfs`, ver `library.wbfs_dest_path`) y la plana
+    (`wbfs/<ID6>/<ID6>.wbfs`, ver `transfer_plan.wbfs_dest_path`) y la plana
     (`wbfs/<ID6>.wbfs`) que dejan otras herramientas. Contando archivos,
     las dos dan 1 por juego.
 
     Un WBFS dividido en partes (`.wbfs` + `.wbf1` + `.wbf2`, ver
-    `library.wbfs_group`) cuenta UNA vez sin necesidad de un caso
+    `transfer_plan.wbfs_group`) cuenta UNA vez sin necesidad de un caso
     especial: las partes tienen extensión `.wbf1`, `.wbf2`... que no está
     en `VALID_EXTENSIONS`, así que solo entra el `.wbfs` que las
     encabeza."""
@@ -149,7 +149,7 @@ def count_gamecube_games(drive_root: Path) -> int:
     Acá se cuentan CARPETAS y no archivos, al revés que en Wii, porque esa
     es la estructura de Nintendont: `games/<Título [ID6]>/game.iso`, y un
     juego de dos discos son dos archivos (`game.iso` y `disc2.iso`)
-    adentro de LA MISMA carpeta (ver `library.gc_dest_path`). Contando
+    adentro de LA MISMA carpeta (ver `transfer_plan.gc_dest_path`). Contando
     archivos, un juego multidisco se entregaría como si fueran dos juegos
     distintos.
 

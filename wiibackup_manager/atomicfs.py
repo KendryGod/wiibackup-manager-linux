@@ -6,10 +6,10 @@ había si algo falla"- sobre cosas distintas:
 
 - `gametdb`, `oscwii_client`, `golden_configs` y el extractor de ZIP de
   `oscwii_installer` reemplazan UN ARCHIVO chico que se escribe de una.
-- `library._copy_with_progress` reemplaza UN ARCHIVO grande que se copia
+- `fileops._copy_with_progress` reemplaza UN ARCHIVO grande que se copia
   de a bloques, con progreso, cancelación y `fsync`.
 - `oscwii_installer` reemplaza UNA CARPETA entera (la app de Homebrew),
-  y `library.DestinationGuard` aparta UN GRUPO de archivos (las partes de
+  y `library_ops.DestinationGuard` aparta UN GRUPO de archivos (las partes de
   un WBFS dividido) mientras `wit` escribe encima.
 
 Los tres terminaban reimplementando el mismo mecanismo: armar un nombre
@@ -30,7 +30,7 @@ llama decide qué significa.
 
 Por eso, por ejemplo, `SetAside.restore()` devuelve la lista de los que no
 pudo devolver en vez de levantar algo: `DestinationGuard` convierte eso en
-`library.RollbackFailedError` con su mensaje para el usuario, y podría
+`library_ops.RollbackFailedError` con su mensaje para el usuario, y podría
 convertirlo en otra cosa sin que este módulo se entere.
 """
 from __future__ import annotations
@@ -233,14 +233,14 @@ class SetAside:
     devolverlas si algo sale mal.
 
     Sirve tanto para archivos (las partes de un WBFS dividido, en
-    `library.DestinationGuard`) como para carpetas (la versión anterior de
+    `library_ops.DestinationGuard`) como para carpetas (la versión anterior de
     una app de Homebrew): apartar es un `os.replace` dentro de la misma
     carpeta, instantáneo y sin copiar datos, en los dos casos.
 
     Es mecanismo puro: `restore()` y `discard()` DEVUELVEN lo que no
     pudieron hacer en vez de levantar excepciones o escribir mensajes.
     Cada módulo decide qué significa eso -`DestinationGuard` levanta
-    `library.RollbackFailedError` con un mensaje para el usuario, el
+    `library_ops.RollbackFailedError` con un mensaje para el usuario, el
     instalador de Homebrew reporta los respaldos huérfanos en su
     `InstallResult`- y esta clase no tiene por qué saberlo."""
 
@@ -337,7 +337,7 @@ class SwapRollbackFailed(Exception):
 
     Es la excepción de la PRIMITIVA, sin mensajes para el usuario: trae
     los pares pendientes y el error que empezó todo para que quien llama
-    la traduzca a lo suyo (`library.RollbackFailedError`, en los dos
+    la traduzca a lo suyo (`library_ops.RollbackFailedError`, en los dos
     usuarios de hoy)."""
 
     def __init__(self, pending: list, original_error: BaseException) -> None:

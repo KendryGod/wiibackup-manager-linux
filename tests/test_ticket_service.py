@@ -75,7 +75,7 @@ def test_cuenta_igual_la_estructura_plana(tmp_path):
 
 def test_un_wbfs_dividido_cuenta_una_sola_vez(tmp_path):
     """`wit` parte los juegos grandes en `.wbfs` + `.wbf1` + `.wbf2` (ver
-    `library.wbfs_group`), y las tres piezas son UN juego. Contarlas por
+    `transfer_plan.wbfs_group`), y las tres piezas son UN juego. Contarlas por
     separado le diría al cliente que tiene el triple de juegos."""
     raiz = tmp_path / "usb"
     _archivo(raiz / "wbfs" / "SOUE41" / "SOUE41.wbfs")
@@ -111,7 +111,7 @@ def test_los_archivos_que_no_son_juegos_no_cuentan(tmp_path):
 # ============================================== Conteo: juegos GameCube --
 def test_un_juego_gamecube_de_dos_discos_cuenta_una_vez(unidad):
     """Nintendont guarda los dos discos en LA MISMA carpeta (`game.iso` y
-    `disc2.iso`, ver `library.gc_dest_path`). Por eso acá se cuentan
+    `disc2.iso`, ver `transfer_plan.gc_dest_path`). Por eso acá se cuentan
     carpetas y no archivos: contando archivos, un juego de dos discos se
     entregaría como dos juegos."""
     assert ticket_service.count_gamecube_games(unidad) == 1
@@ -293,7 +293,7 @@ def test_una_unidad_que_ya_no_existe_no_rompe(tmp_path):
 
 # ================================================== Nombre de archivo --
 def test_el_nombre_propuesto_lleva_cliente_y_fecha():
-    """Se compara en NFC porque `library.sanitize_filename` -el mismo que
+    """Se compara en NFC porque `game_model.sanitize_filename` -el mismo que
     la app usa para los nombres de juego- normaliza a NFKD, y ahí la "é"
     de "Pérez" queda como "e" + tilde combinante: se ve igual en pantalla
     pero no es la misma cadena. Lo que importa acá es que el nombre y la
@@ -312,7 +312,7 @@ def test_sin_cliente_el_nombre_propuesto_sigue_siendo_valido():
 def test_un_nombre_de_cliente_con_barras_no_arma_una_ruta():
     """El nombre lo escribe el usuario y termina siendo un nombre de
     archivo: una barra ahí adentro convertiría el "guardar como" en una
-    subcarpeta. Lo limpia `library.sanitize_filename`, el mismo que usa la
+    subcarpeta. Lo limpia `game_model.sanitize_filename`, el mismo que usa la
     app para los nombres de juego."""
     nombre = ticket_service.suggested_filename(
         "../../etc/passwd", datetime(2026, 8, 29))

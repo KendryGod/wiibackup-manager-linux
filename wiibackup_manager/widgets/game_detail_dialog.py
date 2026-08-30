@@ -15,7 +15,7 @@ from gi.repository import Adw, Gtk, GLib  # noqa: E402
 
 from .. import gametdb
 from ..i18n import _
-from ..library import Game
+from ..game_model import Game
 from . import gtk_helpers
 from .game_row import build_cover_widget
 

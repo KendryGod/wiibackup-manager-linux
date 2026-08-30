@@ -35,7 +35,7 @@ Todas comparten el formato de `atomicfs.hidden_sibling`
 (`.{nombre}.{marca}-{sufijo}`), y la marca es la que dice qué es y qué se
 puede hacer:
 
-- `respaldo` (`library.MARCA_RESPALDO`): lo que `DestinationGuard` apartó
+- `respaldo` (`library_ops.MARCA_RESPALDO`): lo que `DestinationGuard` apartó
   antes de dejar que `wit` escribiera encima. Es un archivo COMPLETO del
   usuario: se puede restaurar.
 - `wbm-respaldo` (`oscwii_installer.MARCA_RESPALDO`): la versión anterior
@@ -81,7 +81,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, Optional
 
-from . import atomicfs, drives, library, oscwii_installer
+from . import atomicfs, drives, library_ops, oscwii_installer
 from .fsutil import path_size
 from .i18n import _
 
@@ -93,9 +93,9 @@ class LeftoverKind(Enum):
     dejó: es la clave con la que se lo reconoce en el disco y por eso sale
     de la constante de cada módulo, no de un literal repetido acá."""
 
-    #: Respaldo de `library.DestinationGuard`: el archivo del usuario,
+    #: Respaldo de `library_ops.DestinationGuard`: el archivo del usuario,
     #: entero, apartado antes de que `wit` escribiera encima.
-    BACKUP = library.MARCA_RESPALDO
+    BACKUP = library_ops.MARCA_RESPALDO
     #: Respaldo del instalador de Homebrew: la versión anterior de la app.
     HOMEBREW_BACKUP = oscwii_installer.MARCA_RESPALDO
     #: Staging del instalador: la app nueva a medio armar.

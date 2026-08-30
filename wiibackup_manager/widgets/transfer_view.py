@@ -13,8 +13,8 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, Gtk, GLib  # noqa: E402
 
-from .. import config, drives, gametdb, library
-from ..library import Game
+from .. import config, drives, formatting, gametdb, transfer_plan
+from ..game_model import Game
 from ..queue_manager import JobStatus, TransferJob, TransferQueue
 from ..i18n import _
 from . import gtk_helpers
@@ -191,8 +191,8 @@ class JobRow(Adw.ActionRow):
         if job.status is JobStatus.DONE:
             return _("{status} · {size} en {elapsed}").format(
                 status=job.status.label,
-                size=library.format_size(job.output_bytes),
-                elapsed=library.format_eta(job.elapsed))
+                size=formatting.format_size(job.output_bytes),
+                elapsed=formatting.format_eta(job.elapsed))
         if job.status is JobStatus.RUNNING:
             partes = [job.status.label, f"{int(job.progress * 100)}%"]
             if job.speed_text:
@@ -983,7 +983,7 @@ class TransferView(Gtk.Box):
         # en el hilo de GTK sin que se note.
         if len(selected) == 1:
             try:
-                dest = library.game_dest_path(selected[0], dest_root)
+                dest = transfer_plan.game_dest_path(selected[0], dest_root)
             except ValueError:
                 dest = None
             if dest is not None and dest.exists():
@@ -1023,7 +1023,7 @@ class TransferView(Gtk.Box):
 
         def worker():
             # `plan_transfer_fast` y no `plan_transfer`: mide todos los
-            # juegos en paralelo (ver library.py). Lo que se gana acá es que
+            # juegos en paralelo (ver transfer_plan.py). Lo que se gana acá es que
             # las filas de la cola aparezcan casi en el acto en vez de
             # después de N invocaciones de `wit` encadenadas.
             #
@@ -1032,7 +1032,7 @@ class TransferView(Gtk.Box):
             # pierde la barra de progreso fina de esa tarea, no la
             # transferencia.
             try:
-                items = library.plan_transfer_fast(nuevos, wit_binary)
+                items = transfer_plan.plan_transfer_fast(nuevos, wit_binary)
             except Exception:
                 items = nuevos
             # `add_jobs` es thread-safe y las filas las crea el callback

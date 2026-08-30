@@ -3,7 +3,7 @@
 Acá vive lo que más de un módulo necesitaba y terminaba reescribiendo por
 su cuenta: medir lo que ocupa una ruta, la búsqueda de los datos
 instalados de la app, y la firma binaria de PNG. Nada de esto es lógica de
-negocio de ninguna parte en particular -por eso no vive en `library`,
+negocio de ninguna parte en particular -por eso no vive en `scanning`,
 `gametdb` ni `oscwii_client`- y tener una sola copia de cada cosa
 significa que el manejo de errores se lee, se revisa y se arregla en un
 solo lugar en vez de en cuatro.

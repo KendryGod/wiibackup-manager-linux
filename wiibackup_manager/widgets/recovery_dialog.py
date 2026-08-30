@@ -41,7 +41,7 @@ from gi.repository import Adw, Gtk  # noqa: E402
 
 from .. import recovery_service
 from ..i18n import _, ngettext
-from ..library import format_size
+from ..formatting import format_size
 
 # Cortes para decir la antigüedad en la unidad que se entiende de un
 # vistazo. No se muestran minutos y horas juntos: quien mira esto está

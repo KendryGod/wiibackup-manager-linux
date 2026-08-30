@@ -8,7 +8,7 @@ terminar con una mezcla de archivos de la versión vieja y la nueva -la
 app rota aunque ningún archivo suelto lo estuviera.
 
 `_stage_and_swap_unit` (ver su docstring en oscwii_installer.py) es el
-mismo patrón que `library.DestinationGuard` (Sesión 2) llevado de
+mismo patrón que `library_ops.DestinationGuard` (Sesión 2) llevado de
 archivos WBFS a una carpeta completa: extraer TODO a una carpeta de
 staging oculta y recién intercambiarla -con respaldo si había una
 versión anterior- cuando la extracción completa ya salió bien. Estas
@@ -24,7 +24,8 @@ from pathlib import Path
 
 import pytest
 
-from wiibackup_manager import atomicfs, library, oscwii_installer
+from wiibackup_manager import (atomicfs, formatting, library_ops,
+                               oscwii_installer)
 from wiibackup_manager.oscwii_client import HomebrewApp
 from wiibackup_manager.oscwii_installer import InstallStatus
 
@@ -201,7 +202,7 @@ def test_falla_en_el_intercambio_final_recupera_la_version_anterior(
 def test_falla_en_el_intercambio_y_tambien_falla_la_recuperacion(
         tmp_path, monkeypatch):
     """El caso catastrófico, mismo patrón que
-    `library.RollbackFailedError` en `DestinationGuard`: ni promover la
+    `library_ops.RollbackFailedError` en `DestinationGuard`: ni promover la
     staging ni devolver el respaldo funcionan. No se pierde nada -el
     respaldo con la versión vieja sigue existiendo en disco- pero tiene
     que reportarse con su propio status, distinguible de un error
@@ -323,7 +324,7 @@ def test_un_respaldo_que_no_se_puede_borrar_se_reporta(tmp_path, monkeypatch):
 
 def test_el_aviso_del_respaldo_huerfano_dice_cuanto_ocupa(tmp_path, monkeypatch):
     """El mensaje sale del mismo formateador que usa la conversión
-    (`library.format_orphaned_backups`), que para una carpeta suma el
+    (`formatting.format_orphaned_backups`), que para una carpeta suma el
     árbol entero -no informa 0 bytes por ser un directorio."""
     dest_root = tmp_path / "usb"
     app_dir = dest_root / "apps" / "TestApp"
@@ -335,7 +336,7 @@ def test_el_aviso_del_respaldo_huerfano_dice_cuanto_ocupa(tmp_path, monkeypatch)
     _fingir_rmtree_del_respaldo_que_falla(monkeypatch)
 
     result = oscwii_installer.install_app(_fake_app(), dest_root)
-    aviso = library.format_orphaned_backups(result.orphaned_backups)
+    aviso = formatting.format_orphaned_backups(result.orphaned_backups)
 
     assert "2.0 MB" in aviso
     assert str(result.orphaned_backups[0]) in aviso

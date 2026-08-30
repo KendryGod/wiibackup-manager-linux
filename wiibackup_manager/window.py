@@ -11,8 +11,9 @@ gi.require_version("Adw", "1")
 gi.require_version("Gdk", "4.0")
 from gi.repository import Adw, Gtk, GLib, Gio, Gdk  # noqa: E402
 
-from . import (__version__, config, drives, library, operations, oplog,
-               recovery_service, styles, trash, wit_wrapper)
+from . import (__version__, config, drives, fileops, formatting, game_model,
+               library_ops, operations, oplog, recovery_service, scanning,
+               styles, transfer_plan, trash, wit_wrapper)
 from .disc_header import UNKNOWN_GAME_ID
 from .i18n import _, ngettext
 from .operations import OperationBusy, OperationKind, OperationOutcome
@@ -43,7 +44,7 @@ SORT_OPTIONS = [
     (_("Fecha de agregado (más nuevo primero)"), _game_ctime, True),
     (_("Formato (A-Z)"), lambda g: (g.fmt, g.title.lower()), False),
 ]
-from .library import Game
+from .game_model import Game
 from .widgets.game_detail_dialog import GameDetailDialog
 from .widgets.game_row import GameRow
 from .widgets.homebrew_store_view import HomebrewStoreView
@@ -158,8 +159,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self._add_action("add-files", self._on_add_files)
         self._add_action("add-folder", self._on_add_folder)
         self._add_action("rename-all", self._on_rename_all)
-        self._add_action("export-csv", lambda: self._on_export(library.EXPORT_CSV))
-        self._add_action("export-text", lambda: self._on_export(library.EXPORT_TEXT))
+        self._add_action("export-csv", lambda: self._on_export(formatting.EXPORT_CSV))
+        self._add_action("export-text", lambda: self._on_export(formatting.EXPORT_TEXT))
 
         # Las páginas se construyen ANTES que el sidebar: seleccionar la
         # primera fila del sidebar dispara `_on_sidebar_row_selected`, que
@@ -770,7 +771,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         games = self._selected_games()
         count = len(games)
         if count:
-            total_size = library.format_size(sum(g.size_bytes for g in games))
+            total_size = formatting.format_size(sum(g.size_bytes for g in games))
             self._sel_count_label.set_label(
                 _("{count} seleccionado(s) · {size}").format(count=count,
                                                              size=total_size))
@@ -1084,7 +1085,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             return
         dest_root = Path(folder.get_path())
         # GameCube nunca pasa por `wit` (se copia tal cual, ver
-        # `library.send_to_wbfs_drive`): la falta de `wit` solo bloquea a
+        # `library_ops.send_to_wbfs_drive`): la falta de `wit` solo bloquea a
         # los juegos de Wii que no sean ya WBFS.
         if any(g.fmt.upper() != "WBFS" and g.console != "gc" for g in games) and \
                 not wit_wrapper.is_available(self.settings.wit_binary):
@@ -1100,7 +1101,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         # informa aparte en el resumen final.
         if len(games) == 1:
             try:
-                dest = library.game_dest_path(games[0], dest_root)
+                dest = transfer_plan.game_dest_path(games[0], dest_root)
             except ValueError:
                 dest = None
             if dest is not None and dest.exists():
@@ -1128,7 +1129,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             op = self.ops.start(
                 OperationKind.TRANSFERRING,
                 read=[g.path for g in games],
-                write=library.wbfs_dest_paths(games, dest_root),
+                write=transfer_plan.wbfs_dest_paths(games, dest_root),
                 resources=[dest_root],
             )
         except OperationBusy as e:
@@ -1146,15 +1147,15 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             # acá y no en el hilo de GTK: implica preguntarle a `wit` por
             # cada juego y con un lote grande congelaría la ventana.
             GLib.idle_add(self.progress_bar.set_text, "Calculando espacio necesario…")
-            plan = library.plan_transfer(games, wit_binary)
+            plan = transfer_plan.plan_transfer(games, wit_binary)
             total_bytes = sum(item.output_bytes for item in plan)
-            libres_ahora = library.free_space(dest_root)
+            libres_ahora = transfer_plan.free_space(dest_root)
             if libres_ahora is not None and total_bytes > libres_ahora:
                 GLib.idle_add(
                     self._on_send_done, 0,
                     [f"No entra en el destino: se necesitan "
-                     f"{library.format_size(total_bytes)} y hay "
-                     f"{library.format_size(libres_ahora)} libres"],
+                     f"{formatting.format_size(total_bytes)} y hay "
+                     f"{formatting.format_size(libres_ahora)} libres"],
                     False, [], op, self._describe_target(games))
                 return
 
@@ -1192,18 +1193,18 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 # Igual que en la pestaña Transferir: el espacio libre se
                 # revisa antes de cada juego, no una sola vez al principio.
                 necesario = item.output_bytes
-                libres = library.free_space(dest_root)
+                libres = transfer_plan.free_space(dest_root)
                 if libres is not None and necesario > libres:
                     errors.append(
                         f"{game.title}: no entra en el destino "
-                        f"(necesita {library.format_size(necesario)}, "
-                        f"quedan {library.format_size(libres)})"
+                        f"(necesita {formatting.format_size(necesario)}, "
+                        f"quedan {formatting.format_size(libres)})"
                     )
                     bytes_failed += item.output_bytes
                     continue
 
                 try:
-                    library.send_to_wbfs_drive(game, dest_root, wit_binary,
+                    library_ops.send_to_wbfs_drive(game, dest_root, wit_binary,
                                                 bytes_progress_cb=on_game_progress,
                                                 overwrite=overwrite, cancel=cancel)
                     ok += 1
@@ -1213,7 +1214,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                     # se sigue con los que faltaban.
                     cancelled = True
                     break
-                except library.DestinationExistsError:
+                except library_ops.DestinationExistsError:
                     # El juego ya está en la unidad: no es un error ni un
                     # éxito, se informa aparte en el resumen final.
                     skipped.append(game.title)
@@ -1253,7 +1254,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             speed = bytes_written / elapsed
             remaining = max(total_bytes - bytes_done, 0)
             eta_text = (_(" · ~{eta} restantes")
-                        .format(eta=library.format_eta(remaining / speed))
+                        .format(eta=formatting.format_eta(remaining / speed))
                         if speed > 0 else "")
         elif total > 1:
             eta_text = _(" · calculando tiempo restante…")
@@ -1348,7 +1349,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             # transferencia.
             GLib.idle_add(self.progress_bar.set_text, _("Calculando…"))
             salidas = {
-                id(g): library.estimate_output_size(
+                id(g): transfer_plan.estimate_output_size(
                     g, ".wbfs" if g.fmt.upper() != "WBFS" else ".iso", wit_binary)
                 for g in games
             }
@@ -1438,14 +1439,14 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         # Los que ya están con el nombre estándar no se tocan: no hay nada
         # que hacerles y meterlos en el lote solo alarga la lista de la
         # confirmación.
-        pendientes = [g for g in games if library.needs_rename(g)]
+        pendientes = [g for g in games if game_model.needs_rename(g)]
         if not pendientes:
             self._show_toast("Todos esos juegos ya tienen el nombre estándar ✓")
             return
 
         if self._reject_if_busy(OperationKind.RENAMING,
                                  write=[g.path for g in pendientes]
-                                       + [g.path.with_name(library.standard_filename(g))
+                                       + [g.path.with_name(game_model.standard_filename(g))
                                           for g in pendientes],
                                  uses_progress_bar=True):
             return
@@ -1453,7 +1454,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         # Se muestran algunos ejemplos concretos: "renombrar 47 archivos"
         # no dice nada si el usuario no ve cómo van a quedar.
         ejemplos = "\n".join(
-            f"{g.path.name}  →  {library.standard_filename(g)}"
+            f"{g.path.name}  →  {game_model.standard_filename(g)}"
             for g in pendientes[:6]
         )
         if len(pendientes) > 6:
@@ -1479,7 +1480,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         # Revalidar después del diálogo, igual que en borrar y convertir.
         if self._reject_if_busy(OperationKind.RENAMING,
                                  write=[g.path for g in games]
-                                       + [g.path.with_name(library.standard_filename(g))
+                                       + [g.path.with_name(game_model.standard_filename(g))
                                           for g in games],
                                  uses_progress_bar=True):
             return
@@ -1488,8 +1489,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             # `on_collision="suffix"`: en lote no se puede frenar a
             # preguntar por cada choque, y pisar el archivo que ya está
             # sería perder un juego.
-            esperado = library.standard_filename(g)
-            nuevo = library.rename_to_standard(g, on_collision="suffix")
+            esperado = game_model.standard_filename(g)
+            nuevo = library_ops.rename_to_standard(g, on_collision="suffix")
             if nuevo.name != esperado:
                 # Se renombró igual (cuenta como hecho) pero con otro
                 # nombre. Se DEVUELVE como nota para que entre en el
@@ -1738,7 +1739,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             skipped: list = []
             error = None
             try:
-                games = library.scan_library(root, self.settings.wit_binary, progress,
+                games = scanning.scan_library(root, self.settings.wit_binary, progress,
                                               skipped_dirs=skipped)
             except Exception as e:
                 # `games = []` acá era una mentira peligrosa: "el escaneo
@@ -1810,7 +1811,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
     def _update_library_status_bar(self):
         count = len(self._games)
-        total_size = library.format_size(sum(g.size_bytes for g in self._games))
+        total_size = formatting.format_size(sum(g.size_bytes for g in self._games))
         self.library_status_label.set_label(
             ngettext("{count} juego · {size}", "{count} juegos · {size}", count)
             .format(count=count, size=total_size))
@@ -1936,13 +1937,13 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             self._show_toast(_("No hay juegos para exportar."))
             return
 
-        extension = "csv" if fmt == library.EXPORT_CSV else "txt"
+        extension = "csv" if fmt == formatting.EXPORT_CSV else "txt"
         dialog = Gtk.FileDialog(title=_("Guardar la lista de juegos"))
         dialog.set_initial_name(
             f"biblioteca-wii-{time.strftime('%Y-%m-%d')}.{extension}")
         dialog.set_initial_folder(gtk_helpers.safe_initial_folder())
         filtro = Gtk.FileFilter()
-        if fmt == library.EXPORT_CSV:
+        if fmt == formatting.EXPORT_CSV:
             filtro.set_name(_("Planilla CSV (*.csv)"))
             filtro.add_pattern("*.csv")
         else:
@@ -1977,12 +1978,12 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self._write_export(destino, juegos, fmt)
 
     def _write_export(self, destino: Path, juegos: list[Game], fmt: str):
-        contenido = library.export_games(juegos, fmt)
+        contenido = formatting.export_games(juegos, fmt)
         # utf-8-sig en el CSV: sin el BOM, Excel en Windows abre los
         # acentos rotos, y estas listas terminan en la computadora de un
         # cliente. El texto plano va en utf-8 pelado, que es lo que espera
         # cualquier chat o editor.
-        codificacion = "utf-8-sig" if fmt == library.EXPORT_CSV else "utf-8"
+        codificacion = "utf-8-sig" if fmt == formatting.EXPORT_CSV else "utf-8"
         try:
             # Misma escritura atómica que config.json y el historial: si el
             # proceso se corta a mitad, el usuario se queda con el archivo
@@ -2046,7 +2047,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
         root = Path(folder.get_path())
         skipped: list = []
-        paths = library.find_game_files(root, skipped)
+        paths = scanning.find_game_files(root, skipped)
         if skipped:
             # Acá sí se avisa siempre: el usuario acaba de elegir esa
             # carpeta a propósito y tiene que saber que parte no se leyó.
@@ -2070,8 +2071,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 continue
             p = Path(raw_path)
             if p.is_dir():
-                paths.extend(library.find_game_files(p, skipped))
-            elif p.is_file() and p.suffix.lower() in library.VALID_EXTENSIONS:
+                paths.extend(scanning.find_game_files(p, skipped))
+            elif p.is_file() and p.suffix.lower() in game_model.VALID_EXTENSIONS:
                 paths.append(p)
 
         if skipped:
@@ -2214,7 +2215,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 así que ahí sí se reemplaza — pero con `copy_atomic`, que
                 no deja el destino a medio escribir si la copia se corta."""
                 if overwrite:
-                    library.copy_atomic(src, dest)
+                    fileops.copy_atomic(src, dest)
                     return dest
                 # El destino alternativo no está declarado en la
                 # operación (el plan no lo preveía), así que el detector de
@@ -2224,7 +2225,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 destino = dest
                 for _intento in range(_MAX_COLISIONES_IMPORT):
                     try:
-                        library.copy_no_replace(src, destino)
+                        fileops.copy_no_replace(src, destino)
                     except FileExistsError:
                         # Se lo ganaron en el medio: se busca la próxima
                         # variante libre y se reintenta.
@@ -2239,7 +2240,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 GLib.idle_add(self.progress_bar.set_fraction, i / max(total, 1))
 
                 try:
-                    game = library.identify_file(src, self.settings.wit_binary)
+                    game = scanning.identify_file(src, self.settings.wit_binary)
                 except Exception as e:
                     errors.append(f"{src.name}: no se pudo leer ({e})")
                     continue
@@ -2354,14 +2355,14 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         if self._reject_if_busy(
                 OperationKind.RENAMING,
                 write=[row.game.path,
-                       row.game.path.with_name(library.standard_filename(row.game))]):
+                       row.game.path.with_name(game_model.standard_filename(row.game))]):
             return
         # Renombrar y eliminar un juego suelto son las dos únicas acciones
         # de usuario que no se registran en el OperationManager (son
         # instantáneas: no hay un worker ni una barra de progreso que
         # coordinar), así que se anotan derecho en el historial.
         try:
-            new_path = library.rename_to_standard(row.game)
+            new_path = library_ops.rename_to_standard(row.game)
         except FileExistsError as e:
             self._show_toast(str(e))
             self.op_log.record(OperationKind.RENAMING.value, row.game.title,
@@ -2438,14 +2439,14 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         def worker():
             nonlocal ok, cancelled, total_bytes
             total_bytes = max(
-                library.estimate_output_size(game, target_ext, self.settings.wit_binary), 1)
+                transfer_plan.estimate_output_size(game, target_ext, self.settings.wit_binary), 1)
             detail = ""
             try:
                 # El destino puede existir (el usuario confirmó pisarlo):
                 # se lo aparta y se lo devuelve si la conversión no
-                # termina bien. Ver library.DestinationGuard.
-                with library.DestinationGuard(
-                        dest, enabled=bool(library.wbfs_group(dest))) as guard:
+                # termina bien. Ver library_ops.DestinationGuard.
+                with library_ops.DestinationGuard(
+                        dest, enabled=bool(transfer_plan.wbfs_group(dest))) as guard:
                     # `overwrite=True` explícito: el usuario ya confirmó
                     # pisar el destino y el guard de arriba tiene el
                     # respaldo apartado para devolverlo si esto sale mal.
@@ -2465,7 +2466,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 # historial, en vez de perderse (ver
                 # `DestinationGuard._discard`).
                 if guard.orphaned_backups:
-                    aviso = library.format_orphaned_backups(guard.orphaned_backups)
+                    aviso = formatting.format_orphaned_backups(guard.orphaned_backups)
                     msg = f"{msg}. {aviso}"
                     detail = f"{detail} · {aviso}" if detail else aviso
                     GLib.idle_add(oplog.record_orphaned_backup,
@@ -2477,10 +2478,10 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 cancelled = True
                 detail = "cancelada por el usuario"
                 msg = f"Conversión de '{game.title}' cancelada."
-            except library.RollbackFailedError as e:
+            except library_ops.RollbackFailedError as e:
                 # Caso grave: además de fallar la conversión, no se pudo
                 # devolver el original a su lugar (ver
-                # `library.RollbackFailedError`). `user_message` nombra
+                # `library_ops.RollbackFailedError`). `user_message` nombra
                 # los dos problemas -no alcanza con "error al convertir"
                 # cuando el archivo puede haber quedado inservible.
                 ok = False

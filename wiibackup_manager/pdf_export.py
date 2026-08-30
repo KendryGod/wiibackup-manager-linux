@@ -38,7 +38,7 @@ from gi.repository import Pango, PangoCairo  # noqa: E402
 
 from . import atomicfs  # noqa: E402
 from .i18n import _  # noqa: E402
-from .library import format_size  # noqa: E402
+from .formatting import format_size  # noqa: E402
 from .ticket_service import TicketData  # noqa: E402
 
 # A4 en puntos PostScript (72 por pulgada), que es la unidad en la que

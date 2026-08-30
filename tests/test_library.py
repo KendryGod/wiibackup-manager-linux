@@ -2,6 +2,14 @@
 
 El foco está en lo que puede perder datos: renombrar sin pisar un archivo
 ajeno y armar la ruta de destino de una unidad WBFS.
+
+Cubre el área completa que antes vivía en `library.py` y hoy está repartida
+entre `game_model`, `scanning`, `fileops`, `transfer_plan`, `library_ops` y
+`formatting`. Se mantiene en un solo archivo a propósito: las pruebas están
+agrupadas por lo que le puede pasar a un juego -renombrarlo, copiarlo,
+mandarlo a una unidad- y varias cruzan más de un módulo (mandar un juego
+usa `transfer_plan` para la ruta y `library_ops` para escribirla), así que
+partirlas por módulo las separaría de su propio contexto.
 """
 from __future__ import annotations
 
@@ -12,7 +20,8 @@ from pathlib import Path
 
 import pytest
 
-from wiibackup_manager import library
+from wiibackup_manager import (atomicfs, fileops, formatting, game_model,
+                               library_ops, scanning, transfer_plan)
 
 
 # --------------------------------------------------------------- Formato --
@@ -23,7 +32,7 @@ from wiibackup_manager import library
     (int(4.7 * 1024 ** 3), "4.7 GB"),
 ])
 def test_format_size(n, esperado):
-    assert library.format_size(n) == esperado
+    assert formatting.format_size(n) == esperado
 
 
 @pytest.mark.parametrize("segundos,esperado", [
@@ -32,7 +41,7 @@ def test_format_size(n, esperado):
     (-10, "0s"),   # un ETA negativo (reloj corrido) se muestra como 0
 ])
 def test_format_eta(segundos, esperado):
-    assert library.format_eta(segundos) == esperado
+    assert formatting.format_eta(segundos) == esperado
 
 
 # ------------------------------------------------------------- Nombres --
@@ -44,43 +53,43 @@ def test_format_eta(segundos, esperado):
     ("puntos...", "puntos"),
 ])
 def test_sanitize_filename(crudo, esperado):
-    assert library.sanitize_filename(crudo) == esperado
+    assert game_model.sanitize_filename(crudo) == esperado
 
 
 def test_sanitize_filename_nunca_devuelve_vacio():
     """Un título que queda vacío tras limpiarlo no puede dar un nombre de
     archivo vacío: el renombrado lo usaría como nombre real."""
-    assert library.sanitize_filename("///") == "untitled"
-    assert library.sanitize_filename("") == "untitled"
+    assert game_model.sanitize_filename("///") == "untitled"
+    assert game_model.sanitize_filename("") == "untitled"
 
 
 def test_standard_filename(make_game):
     juego = make_game(name="cualquier-cosa.wbfs", title="Mario Kart Wii",
                       game_id="RMCP01")
-    assert library.standard_filename(juego) == "Mario Kart Wii [RMCP01].wbfs"
+    assert game_model.standard_filename(juego) == "Mario Kart Wii [RMCP01].wbfs"
 
 
 def test_standard_filename_omite_el_id_si_no_es_valido(make_game):
     """Sin ID válido se omite el sufijo en vez de escribir '??????' en el
     nombre: esos caracteres no son válidos en FAT32."""
     juego = make_game(name="x.iso", title="Desconocido", game_id="??????")
-    assert library.standard_filename(juego) == "Desconocido.iso"
+    assert game_model.standard_filename(juego) == "Desconocido.iso"
 
 
 def test_needs_rename(make_game):
     ya_esta = make_game(name="Mario Kart Wii [RMCP01].iso", title="Mario Kart Wii")
     falta = make_game(name="mkwii.iso", title="Mario Kart Wii")
-    assert not library.needs_rename(ya_esta)
-    assert library.needs_rename(falta)
+    assert not game_model.needs_rename(ya_esta)
+    assert game_model.needs_rename(falta)
 
 
 def test_free_variant_va_encontrando_huecos(tmp_path):
     base = tmp_path / "Juego.wbfs"
-    assert library.free_variant(base) == base       # libre: se usa tal cual
+    assert fileops.free_variant(base) == base       # libre: se usa tal cual
     base.write_bytes(b"x")
-    assert library.free_variant(base) == tmp_path / "Juego (2).wbfs"
+    assert fileops.free_variant(base) == tmp_path / "Juego (2).wbfs"
     (tmp_path / "Juego (2).wbfs").write_bytes(b"x")
-    assert library.free_variant(base) == tmp_path / "Juego (3).wbfs"
+    assert fileops.free_variant(base) == tmp_path / "Juego (3).wbfs"
 
 
 # ------------------------------------------------- Renombrar sin pisar --
@@ -88,7 +97,7 @@ def test_rename_no_replace_mueve_el_archivo(tmp_path):
     src = tmp_path / "a.iso"
     src.write_bytes(b"contenido")
     dest = tmp_path / "b.iso"
-    library.rename_no_replace(src, dest)
+    fileops.rename_no_replace(src, dest)
     assert not src.exists()
     assert dest.read_bytes() == b"contenido"
 
@@ -102,7 +111,7 @@ def test_rename_no_replace_no_pisa_un_archivo_ajeno(tmp_path):
     dest.write_bytes(b"OTRO JUEGO QUE NO SE PUEDE PERDER")
 
     with pytest.raises(FileExistsError):
-        library.rename_no_replace(src, dest)
+        fileops.rename_no_replace(src, dest)
 
     assert dest.read_bytes() == b"OTRO JUEGO QUE NO SE PUEDE PERDER"
     assert src.exists()      # el origen tampoco se perdió
@@ -110,7 +119,7 @@ def test_rename_no_replace_no_pisa_un_archivo_ajeno(tmp_path):
 
 def test_rename_to_standard(make_game):
     juego = make_game(name="mkwii.iso", title="Mario Kart Wii", game_id="RMCP01")
-    nuevo = library.rename_to_standard(juego)
+    nuevo = library_ops.rename_to_standard(juego)
     assert nuevo.name == "Mario Kart Wii [RMCP01].iso"
     assert nuevo.exists()
     assert juego.path == nuevo          # el Game queda apuntando al archivo real
@@ -119,7 +128,7 @@ def test_rename_to_standard(make_game):
 def test_rename_to_standard_dry_run_no_toca_el_disco(make_game):
     juego = make_game(name="mkwii.iso", title="Mario Kart Wii", game_id="RMCP01")
     original = juego.path
-    propuesto = library.rename_to_standard(juego, dry_run=True)
+    propuesto = library_ops.rename_to_standard(juego, dry_run=True)
     assert propuesto.name == "Mario Kart Wii [RMCP01].iso"
     assert original.exists()            # sigue con el nombre viejo
     assert not propuesto.exists()
@@ -130,7 +139,7 @@ def test_rename_to_standard_con_colision_usa_sufijo(make_game, tmp_path):
     ocupado = tmp_path / "Mario Kart Wii [RMCP01].iso"
     ocupado.write_bytes(b"OTRO ARCHIVO")
 
-    nuevo = library.rename_to_standard(juego, on_collision="suffix")
+    nuevo = library_ops.rename_to_standard(juego, on_collision="suffix")
 
     assert nuevo.name == "Mario Kart Wii [RMCP01] (2).iso"
     assert ocupado.read_bytes() == b"OTRO ARCHIVO"     # intacto
@@ -142,7 +151,7 @@ def test_rename_to_standard_sin_sufijo_levanta_y_no_pisa(make_game, tmp_path):
     ocupado.write_bytes(b"OTRO ARCHIVO")
 
     with pytest.raises(FileExistsError):
-        library.rename_to_standard(juego, on_collision="error")
+        library_ops.rename_to_standard(juego, on_collision="error")
 
     assert ocupado.read_bytes() == b"OTRO ARCHIVO"
 
@@ -150,7 +159,7 @@ def test_rename_to_standard_sin_sufijo_levanta_y_no_pisa(make_game, tmp_path):
 # ------------------------------------------------------ Destino WBFS --
 def test_wbfs_dest_path(make_game, tmp_path):
     juego = make_game(game_id="RMCP01")
-    destino = library.wbfs_dest_path(juego, tmp_path)
+    destino = transfer_plan.wbfs_dest_path(juego, tmp_path)
     assert destino == tmp_path / "wbfs" / "RMCP01" / "RMCP01.wbfs"
 
 
@@ -159,21 +168,21 @@ def test_wbfs_dest_path_rechaza_un_id_que_se_escaparia_de_la_carpeta(make_game, 
     fuera de la carpeta wbfs/ del pendrive."""
     juego = make_game(game_id="../../x")
     with pytest.raises(ValueError):
-        library.wbfs_dest_path(juego, tmp_path)
+        transfer_plan.wbfs_dest_path(juego, tmp_path)
 
 
 # --------------------------------------------------------- GameCube --
 def test_gc_dest_path_usa_la_estructura_de_nintendont(make_game, tmp_path):
     juego = make_game(name="juego.iso", game_id="GZ2E01",
                       title="Twilight Princess", console="gc")
-    destino = library.gc_dest_path(juego, tmp_path)
+    destino = transfer_plan.gc_dest_path(juego, tmp_path)
     assert destino == tmp_path / "games" / "Twilight Princess [GZ2E01]" / "game.iso"
 
 
 def test_gc_dest_path_conserva_la_extension_ciso(make_game, tmp_path):
     juego = make_game(name="juego.ciso", game_id="GZ2E01",
                       title="Twilight Princess", console="gc")
-    destino = library.gc_dest_path(juego, tmp_path)
+    destino = transfer_plan.gc_dest_path(juego, tmp_path)
     assert destino.name == "game.ciso"
 
 
@@ -182,8 +191,8 @@ def test_gc_dest_path_disco_2_va_a_la_misma_carpeta_como_disc2(make_game, tmp_pa
                        console="gc", disc_number=0)
     disco2 = make_game(name="d2.iso", game_id="GZ2E01", title="RE4",
                        console="gc", disc_number=1)
-    dest1 = library.gc_dest_path(disco1, tmp_path)
-    dest2 = library.gc_dest_path(disco2, tmp_path)
+    dest1 = transfer_plan.gc_dest_path(disco1, tmp_path)
+    dest2 = transfer_plan.gc_dest_path(disco2, tmp_path)
     assert dest1.parent == dest2.parent
     assert dest1.name == "game.iso"
     assert dest2.name == "disc2.iso"
@@ -192,14 +201,14 @@ def test_gc_dest_path_disco_2_va_a_la_misma_carpeta_como_disc2(make_game, tmp_pa
 def test_gc_dest_path_rechaza_un_id_invalido(make_game, tmp_path):
     juego = make_game(game_id="../../x", console="gc")
     with pytest.raises(ValueError):
-        library.gc_dest_path(juego, tmp_path)
+        transfer_plan.gc_dest_path(juego, tmp_path)
 
 
 def test_game_dest_path_enruta_segun_consola(make_game, tmp_path):
     wii = make_game(game_id="RMCP01", console="wii")
     gc = make_game(name="gc.iso", game_id="GZ2E01", console="gc")
-    assert library.game_dest_path(wii, tmp_path) == library.wbfs_dest_path(wii, tmp_path)
-    assert library.game_dest_path(gc, tmp_path) == library.gc_dest_path(gc, tmp_path)
+    assert transfer_plan.game_dest_path(wii, tmp_path) == transfer_plan.wbfs_dest_path(wii, tmp_path)
+    assert transfer_plan.game_dest_path(gc, tmp_path) == transfer_plan.gc_dest_path(gc, tmp_path)
 
 
 def test_estimate_transfer_size_gc_es_el_tamano_de_origen(make_game):
@@ -207,7 +216,7 @@ def test_estimate_transfer_size_gc_es_el_tamano_de_origen(make_game):
     que no corresponde el margen de conversión a WBFS ni preguntarle a
     `wit`: lo que se escribe es exactamente lo que pesa el archivo."""
     juego = make_game(game_id="GZ2E01", console="gc", size=12345)
-    assert library.estimate_transfer_size(juego) == juego.size_bytes
+    assert transfer_plan.estimate_transfer_size(juego) == juego.size_bytes
 
 
 def test_send_to_wbfs_drive_gc_no_evalua_needs_wbfs_split(make_game, tmp_path, monkeypatch):
@@ -218,14 +227,14 @@ def test_send_to_wbfs_drive_gc_no_evalua_needs_wbfs_split(make_game, tmp_path, m
     def _no_deberia_llamarse(*_a, **_k):
         raise AssertionError(
             "needs_wbfs_split no debería evaluarse para un juego de GameCube")
-    monkeypatch.setattr(library.drives, "needs_wbfs_split", _no_deberia_llamarse)
+    monkeypatch.setattr(library_ops.drives, "needs_wbfs_split", _no_deberia_llamarse)
 
     juego = make_game(name="juego.iso", game_id="GZ2E01", title="Twilight Princess",
                       console="gc", contenido=b"contenido de prueba gc")
 
-    destino = library.send_to_wbfs_drive(juego, tmp_path)
+    destino = library_ops.send_to_wbfs_drive(juego, tmp_path)
 
-    assert destino == library.gc_dest_path(juego, tmp_path)
+    assert destino == transfer_plan.gc_dest_path(juego, tmp_path)
     assert destino.read_bytes() == b"contenido de prueba gc"
 
 
@@ -235,12 +244,12 @@ def test_send_to_wbfs_drive_gc_nunca_divide_el_archivo(make_game, tmp_path, monk
     `wit` ni `--split-size` de por medio, es una copia de archivo tal
     cual. `needs_wbfs_split` se fuerza a True para simular el peor caso
     (FAT32 real) y confirmar que igual no divide nada."""
-    monkeypatch.setattr(library.drives, "needs_wbfs_split", lambda path: True)
+    monkeypatch.setattr(library_ops.drives, "needs_wbfs_split", lambda path: True)
 
     juego = make_game(name="juego.iso", game_id="GZ2E01", title="Twilight Princess",
                       console="gc", contenido=b"contenido de prueba gc")
 
-    destino = library.send_to_wbfs_drive(juego, tmp_path)
+    destino = library_ops.send_to_wbfs_drive(juego, tmp_path)
 
     assert destino.read_bytes() == b"contenido de prueba gc"
     assert not destino.with_suffix(".wbf1").exists()
@@ -259,18 +268,18 @@ def test_send_to_wbfs_drive_wbfs_multi_juego_no_copia_directo(make_game, tmp_pat
         DiscInfo(game_id="RMCP01", title="Mario Kart Wii", source="wit"),
         DiscInfo(game_id="RSBE01", title="Super Smash Bros. Brawl", source="wit"),
     ]
-    monkeypatch.setattr(library.wit_wrapper, "is_available", lambda _binary: True)
-    monkeypatch.setattr(library.wit_wrapper, "list_wbfs_container",
+    monkeypatch.setattr(library_ops.wit_wrapper, "is_available", lambda _binary: True)
+    monkeypatch.setattr(library_ops.wit_wrapper, "list_wbfs_container",
                         lambda _path, _binary: contenido)
 
     juego = make_game(name="contenedor.wbfs", game_id="RMCP01",
                       title="Mario Kart Wii", fmt="WBFS",
                       contenido=b"contenedor multi-juego")
 
-    with pytest.raises(library.MultiGameContainerError):
-        library.send_to_wbfs_drive(juego, tmp_path)
+    with pytest.raises(library_ops.MultiGameContainerError):
+        library_ops.send_to_wbfs_drive(juego, tmp_path)
 
-    assert not library.wbfs_dest_path(juego, tmp_path).exists()
+    assert not transfer_plan.wbfs_dest_path(juego, tmp_path).exists()
 
 
 def test_send_to_wbfs_drive_wbfs_un_solo_juego_copia_directo(make_game, tmp_path, monkeypatch):
@@ -279,14 +288,14 @@ def test_send_to_wbfs_drive_wbfs_un_solo_juego_copia_directo(make_game, tmp_path
     from wiibackup_manager.disc_header import DiscInfo
 
     contenido = [DiscInfo(game_id="RMCP01", title="Mario Kart Wii", source="wit")]
-    monkeypatch.setattr(library.wit_wrapper, "is_available", lambda _binary: True)
-    monkeypatch.setattr(library.wit_wrapper, "list_wbfs_container",
+    monkeypatch.setattr(library_ops.wit_wrapper, "is_available", lambda _binary: True)
+    monkeypatch.setattr(library_ops.wit_wrapper, "list_wbfs_container",
                         lambda _path, _binary: contenido)
 
     juego = make_game(name="juego.wbfs", game_id="RMCP01", title="Mario Kart Wii",
                       fmt="WBFS", contenido=b"contenido de prueba wbfs")
 
-    destino = library.send_to_wbfs_drive(juego, tmp_path)
+    destino = library_ops.send_to_wbfs_drive(juego, tmp_path)
 
     assert destino.read_bytes() == b"contenido de prueba wbfs"
 
@@ -301,13 +310,13 @@ def test_find_game_files_encuentra_por_extension(tmp_path):
     (tmp_path / "sub").mkdir()
     (tmp_path / "sub" / "e.iso").write_bytes(b"x")
 
-    encontrados = {p.name for p in library.find_game_files(tmp_path)}
+    encontrados = {p.name for p in scanning.find_game_files(tmp_path)}
     assert encontrados == {"a.iso", "b.wbfs", "c.ciso", "d.wdf", "e.iso"}
 
 
 def test_find_game_files_ignora_mayusculas_de_la_extension(tmp_path):
     (tmp_path / "GRITADO.ISO").write_bytes(b"x")
-    assert [p.name for p in library.find_game_files(tmp_path)] == ["GRITADO.ISO"]
+    assert [p.name for p in scanning.find_game_files(tmp_path)] == ["GRITADO.ISO"]
 
 
 def test_find_game_files_reporta_las_carpetas_sin_permiso(tmp_path):
@@ -320,7 +329,7 @@ def test_find_game_files_reporta_las_carpetas_sin_permiso(tmp_path):
     prohibida.chmod(0o000)
     try:
         saltadas: list = []
-        encontrados = library.find_game_files(tmp_path, saltadas)
+        encontrados = scanning.find_game_files(tmp_path, saltadas)
         assert [p.name for p in encontrados] == ["visible.iso"]
         assert saltadas, "la carpeta ilegible tiene que quedar anotada"
     finally:
@@ -330,7 +339,7 @@ def test_find_game_files_reporta_las_carpetas_sin_permiso(tmp_path):
 def test_identify_file_por_header(tmp_path, iso_bytes):
     iso = tmp_path / "sin-nombre.iso"
     iso.write_bytes(iso_bytes())
-    juego = library.identify_file(iso)
+    juego = scanning.identify_file(iso)
     assert juego is not None
     assert juego.game_id == "RMCP01"
     assert juego.title == "MARIO KART WII"
@@ -341,14 +350,14 @@ def test_identify_file_por_header(tmp_path, iso_bytes):
 def test_identify_file_ignora_extensiones_ajenas(tmp_path):
     otro = tmp_path / "notas.txt"
     otro.write_bytes(b"x")
-    assert library.identify_file(otro) is None
+    assert scanning.identify_file(otro) is None
 
 
 def test_identify_file_detecta_gamecube_por_header(tmp_path, iso_bytes):
     iso = tmp_path / "sin-nombre.iso"
     iso.write_bytes(iso_bytes(game_id=b"GZ2E01", title=b"TWILIGHT PRINCESS",
                               console="gc"))
-    juego = library.identify_file(iso)
+    juego = scanning.identify_file(iso)
     assert juego is not None
     assert juego.game_id == "GZ2E01"
     assert juego.console == "gc"
@@ -358,7 +367,7 @@ def test_identify_file_detecta_gamecube_por_header(tmp_path, iso_bytes):
 def test_identify_file_propaga_el_numero_de_disco_de_gamecube(tmp_path, iso_bytes):
     iso = tmp_path / "disco2.iso"
     iso.write_bytes(iso_bytes(game_id=b"GZ2E01", console="gc", disc_number=1))
-    juego = library.identify_file(iso)
+    juego = scanning.identify_file(iso)
     assert juego.disc_number == 1
 
 
@@ -366,20 +375,20 @@ def test_identify_file_propaga_el_numero_de_disco_de_gamecube(tmp_path, iso_byte
 def test_export_text(make_game):
     juegos = [make_game(name="a.iso", title="Juego A", size=2 * 1024 ** 3),
               make_game(name="b.iso", title="Juego B", size=1024 ** 3)]
-    texto = library.export_games(juegos, library.EXPORT_TEXT)
+    texto = formatting.export_games(juegos, formatting.EXPORT_TEXT)
     assert "Juego A — 2.0 GB" in texto
     assert "Juego B — 1.0 GB" in texto
     assert "2 juegos · 3.0 GB" in texto
 
 
 def test_export_text_en_singular(make_game):
-    texto = library.export_games([make_game(title="Solo")], library.EXPORT_TEXT)
+    texto = formatting.export_games([make_game(title="Solo")], formatting.EXPORT_TEXT)
     assert "1 juego · " in texto
 
 
 def test_export_csv_lleva_encabezado_y_una_fila_por_juego(make_game):
     juegos = [make_game(name="a.iso", title="Zelda: Skyward Sword", game_id="RVLE01")]
-    csv_texto = library.export_games(juegos, library.EXPORT_CSV)
+    csv_texto = formatting.export_games(juegos, formatting.EXPORT_CSV)
     lineas = csv_texto.strip().splitlines()
     assert lineas[0].startswith("Título,ID,Formato")
     assert "RVLE01" in lineas[1]
@@ -395,7 +404,7 @@ def test_export_csv_neutraliza_formulas(make_game):
     """Un título que arranca con '=' lo interpretaría Excel/LibreOffice
     como fórmula al abrir la lista exportada."""
     juegos = [make_game(title="=1+1")]
-    csv_texto = library.export_games(juegos, library.EXPORT_CSV)
+    csv_texto = formatting.export_games(juegos, formatting.EXPORT_CSV)
     assert "\n=1+1" not in csv_texto
     assert ",=1+1" not in csv_texto
 
@@ -412,7 +421,7 @@ def test_destination_guard_restaura_todo_si_la_operacion_falla(tmp_path):
     b.write_bytes(b"original-b")
 
     with pytest.raises(RuntimeError, match="la conversión falló"):
-        with library.DestinationGuard(a) as guard:
+        with library_ops.DestinationGuard(a) as guard:
             # Simula lo que deja `wit` a mitad de una conversión que
             # después falla: los nombres finales ya tienen contenido
             # nuevo (parcial, corrupto, lo que sea).
@@ -430,7 +439,7 @@ def test_destination_guard_restore_exitoso_no_deja_respaldos_sueltos(tmp_path):
     a.write_bytes(b"original-a")
 
     with pytest.raises(RuntimeError):
-        with library.DestinationGuard(a) as guard:
+        with library_ops.DestinationGuard(a) as guard:
             respaldo = guard._saved[0][1]
             assert respaldo.exists()  # apartado, listo para restaurar
             raise RuntimeError("falló")
@@ -459,10 +468,10 @@ def test_destination_guard_restore_con_una_parte_que_falla_levanta_rollback_fail
             raise OSError("simulado: no se pudo restaurar juego.wbf1")
         return real_replace(origen, destino)
 
-    monkeypatch.setattr(library.os, "replace", _replace_que_falla_para_b)
+    monkeypatch.setattr(atomicfs.os, "replace", _replace_que_falla_para_b)
 
-    with pytest.raises(library.RollbackFailedError) as exc_info:
-        with library.DestinationGuard(a) as guard:
+    with pytest.raises(library_ops.RollbackFailedError) as exc_info:
+        with library_ops.DestinationGuard(a) as guard:
             a.write_bytes(b"nuevo-a")
             b.write_bytes(b"nuevo-b")
             raise RuntimeError("la conversión falló")
@@ -518,10 +527,10 @@ def test_rollback_failed_error_encadena_el_error_original(tmp_path, monkeypatch)
             raise OSError("no se pudo restaurar")
         return real_replace(origen, destino)
 
-    monkeypatch.setattr(library.os, "replace", _falla_solo_al_restaurar)
+    monkeypatch.setattr(atomicfs.os, "replace", _falla_solo_al_restaurar)
 
-    with pytest.raises(library.RollbackFailedError) as exc_info:
-        with library.DestinationGuard(a):
+    with pytest.raises(library_ops.RollbackFailedError) as exc_info:
+        with library_ops.DestinationGuard(a):
             raise RuntimeError("la conversión falló feo")
 
     error = exc_info.value
@@ -534,7 +543,7 @@ def test_rollback_failed_error_encadena_el_error_original(tmp_path, monkeypatch)
 
 
 def test_rollback_failed_error_sin_original_error_usa_el_mensaje_base():
-    error = library.RollbackFailedError(
+    error = library_ops.RollbackFailedError(
         [(Path("/a/juego.wbfs"), Path("/a/.juego.wbfs.respaldo-1"))])
     assert error.original_error is None
     assert error.user_message() == str(error)
@@ -585,7 +594,7 @@ def _consultas_hasta_el_final(tamaño: int) -> int:
     """Cuántas veces se consulta `.cancelled` hasta que el origen se
     agota: una por bloque más la que se encuentra con el archivo
     terminado."""
-    bloques, resto = divmod(tamaño, library._COPY_CHUNK_BYTES)
+    bloques, resto = divmod(tamaño, fileops._COPY_CHUNK_BYTES)
     return bloques + (1 if resto else 0) + 1
 
 
@@ -595,7 +604,7 @@ def test_copia_exitosa_deja_el_contenido_y_ningun_temporal(tmp_path):
     dest = tmp_path / "destino" / "Juego.iso"
     dest.parent.mkdir()
 
-    library.copy_atomic(src, dest)
+    fileops.copy_atomic(src, dest)
 
     assert dest.read_bytes() == b"A" * 4096
     assert [p.name for p in dest.parent.iterdir()] == ["Juego.iso"]
@@ -616,7 +625,7 @@ def test_dos_copias_concurrentes_al_mismo_destino_no_se_pisan(tmp_path):
     consulta de `.cancelled`, con el origen ya agotado) y todavía no
     hayan hecho el intercambio; ahí el hilo principal inspecciona la
     carpeta; recién entonces `seguir` los suelta."""
-    chunk = library._COPY_CHUNK_BYTES
+    chunk = fileops._COPY_CHUNK_BYTES
     origenes = {}
     for clave, byte in (("A", b"A"), ("B", b"B")):
         src = tmp_path / f"origen-{clave}.iso"
@@ -638,7 +647,7 @@ def test_dos_copias_concurrentes_al_mismo_destino_no_se_pisan(tmp_path):
         try:
             token = _EnElChunk(_consultas_hasta_el_final(2 * chunk),
                                accion=esperar_al_otro)
-            library._copy_with_progress(origenes[clave], dest,
+            fileops._copy_with_progress(origenes[clave], dest,
                                         lambda _n: None, cancel=token)
         except BaseException as e:  # noqa: BLE001 - se revisa abajo
             errores.append(e)
@@ -682,7 +691,7 @@ def test_los_permisos_del_destino_los_da_el_origen(tmp_path):
     os.chmod(src, 0o640)
     dest = tmp_path / "Juego-copia.iso"
 
-    library.copy_atomic(src, dest)
+    fileops.copy_atomic(src, dest)
 
     assert stat.S_IMODE(dest.stat().st_mode) == 0o640
 
@@ -692,15 +701,15 @@ def test_el_temporal_es_oculto_y_hermano_del_destino(tmp_path):
     el usuario en la unidad), y hermano del destino porque el
     `os.replace` final solo es atómico dentro del mismo filesystem."""
     src = tmp_path / "Juego.iso"
-    src.write_bytes(b"x" * library._COPY_CHUNK_BYTES)
+    src.write_bytes(b"x" * fileops._COPY_CHUNK_BYTES)
     dest = tmp_path / "destino" / "Juego.iso"
     dest.parent.mkdir()
 
     visto: list = []
-    token = _EnElChunk(_consultas_hasta_el_final(library._COPY_CHUNK_BYTES),
+    token = _EnElChunk(_consultas_hasta_el_final(fileops._COPY_CHUNK_BYTES),
                        accion=lambda: visto.extend(
                            p for p in dest.parent.iterdir()))
-    library._copy_with_progress(src, dest, lambda _n: None, cancel=token)
+    fileops._copy_with_progress(src, dest, lambda _n: None, cancel=token)
 
     assert len(visto) == 1
     assert visto[0].name.startswith(".Juego.iso.parcial-")
@@ -717,7 +726,7 @@ def test_un_origen_vacio_produce_un_destino_vacio(tmp_path):
     src.write_bytes(b"")
     dest = tmp_path / "destino.iso"
 
-    library.copy_atomic(src, dest)
+    fileops.copy_atomic(src, dest)
 
     assert dest.exists()
     assert dest.read_bytes() == b""
@@ -727,14 +736,14 @@ def test_la_cancelacion_corta_y_no_deja_rastro(tmp_path):
     """La cancelación se revisa entre bloques y sigue funcionando igual:
     corta en el momento, no crea el destino y no deja el temporal."""
     src = tmp_path / "Juego.iso"
-    src.write_bytes(b"x" * (3 * library._COPY_CHUNK_BYTES))
+    src.write_bytes(b"x" * (3 * fileops._COPY_CHUNK_BYTES))
     dest = tmp_path / "destino" / "Juego.iso"
     dest.parent.mkdir()
 
     token = _EnElChunk(0, cancelar_en=2)  # cancela con la copia empezada
 
-    with pytest.raises(library.wit_wrapper.OperationCancelled):
-        library._copy_with_progress(src, dest, lambda _n: None, cancel=token)
+    with pytest.raises(library_ops.wit_wrapper.OperationCancelled):
+        fileops._copy_with_progress(src, dest, lambda _n: None, cancel=token)
 
     assert not dest.exists()
     assert list(dest.parent.iterdir()) == []
@@ -753,7 +762,7 @@ def test_el_destino_viejo_queda_intacto_si_la_copia_falla(tmp_path):
 
     token = _EnElChunk(1, accion=lambda: _falla(0))
     with pytest.raises(OSError):
-        library._copy_with_progress(src, dest, lambda _n: None, cancel=token)
+        fileops._copy_with_progress(src, dest, lambda _n: None, cancel=token)
 
     assert dest.read_bytes() == b"el respaldo bueno"
     assert sorted(p.name for p in tmp_path.iterdir()) == ["Juego.iso",
@@ -770,7 +779,7 @@ def test_baja_a_disco_antes_de_intercambiar(tmp_path, monkeypatch):
     dest = tmp_path / "destino.iso"
 
     orden: list = []
-    fsync_real, replace_real = library.os.fsync, library.os.replace
+    fsync_real, replace_real = atomicfs.os.fsync, atomicfs.os.replace
 
     def fsync_espia(fd):
         orden.append("fsync")
@@ -780,10 +789,10 @@ def test_baja_a_disco_antes_de_intercambiar(tmp_path, monkeypatch):
         orden.append("replace")
         return replace_real(a, b)
 
-    monkeypatch.setattr(library.os, "fsync", fsync_espia)
-    monkeypatch.setattr(library.os, "replace", replace_espia)
+    monkeypatch.setattr(atomicfs.os, "fsync", fsync_espia)
+    monkeypatch.setattr(atomicfs.os, "replace", replace_espia)
 
-    library.copy_atomic(src, dest)
+    fileops.copy_atomic(src, dest)
 
     assert orden == ["fsync", "replace"]
 
@@ -799,7 +808,7 @@ def test_un_commit_normal_no_deja_respaldos_huerfanos(tmp_path):
     dest = tmp_path / "juego.wbfs"
     dest.write_bytes(b"lo que ya estaba")
 
-    with library.DestinationGuard(dest) as guard:
+    with library_ops.DestinationGuard(dest) as guard:
         dest.write_bytes(b"lo nuevo")
         guard.commit()
 
@@ -819,7 +828,7 @@ def test_un_respaldo_que_no_se_puede_borrar_queda_registrado(tmp_path, monkeypat
         raise OSError("unidad de solo lectura")
     monkeypatch.setattr(Path, "unlink", _unlink_que_falla)
 
-    with library.DestinationGuard(dest) as guard:
+    with library_ops.DestinationGuard(dest) as guard:
         dest.write_bytes(b"lo nuevo")
         guard.commit()
 
@@ -840,7 +849,7 @@ def test_un_wbfs_dividido_reporta_todos_los_respaldos(tmp_path, monkeypatch):
                         lambda self, *a, **kw: (_ for _ in ()).throw(
                             OSError("unidad de solo lectura")))
 
-    with library.DestinationGuard(tmp_path / "juego.wbfs") as guard:
+    with library_ops.DestinationGuard(tmp_path / "juego.wbfs") as guard:
         guard.commit()
 
     assert len(guard.orphaned_backups) == 3
@@ -853,7 +862,7 @@ def test_el_aviso_de_respaldo_huerfano_dice_cuanto_y_donde(tmp_path):
     respaldo = tmp_path / ".juego.wbfs.respaldo-123"
     respaldo.write_bytes(b"x" * (3 * 1024 * 1024))
 
-    aviso = library.format_orphaned_backups([respaldo])
+    aviso = formatting.format_orphaned_backups([respaldo])
 
     assert str(respaldo) in aviso
     assert "3.0 MB" in aviso
@@ -866,7 +875,7 @@ def test_el_aviso_con_varios_respaldos_suma_el_total(tmp_path):
         r.write_bytes(b"x" * (1024 * 1024))
         rutas.append(r)
 
-    aviso = library.format_orphaned_backups(rutas)
+    aviso = formatting.format_orphaned_backups(rutas)
 
     assert "3" in aviso
     assert "3.0 MB" in aviso
@@ -875,4 +884,4 @@ def test_el_aviso_con_varios_respaldos_suma_el_total(tmp_path):
 
 
 def test_sin_respaldos_huerfanos_no_hay_aviso():
-    assert library.format_orphaned_backups([]) == ""
+    assert formatting.format_orphaned_backups([]) == ""

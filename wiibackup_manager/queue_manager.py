@@ -27,7 +27,7 @@ más lento que en serie, porque el cabezal (o el controlador de la SD) se
 pasa el tiempo saltando entre dos archivos que crecen en zonas distintas,
 y encima deja los dos archivos fragmentados. La paralelización de esta
 refactorización está donde sí paga -medir tamaños, que es leer headers y
-esperar I/O: ver `library.plan_transfer_fast`- y no donde perjudica.
+esperar I/O: ver `transfer_plan.plan_transfer_fast`- y no donde perjudica.
 
 Por qué todo sale por `GLib.idle_add`
 -------------------------------------
@@ -51,9 +51,11 @@ from typing import Callable, Optional
 
 from gi.repository import GLib
 
-from . import drives, library, oplog, wit_wrapper
+from . import (drives, formatting, library_ops, oplog, transfer_plan,
+               wit_wrapper)
 from .i18n import _
-from .library import Game, TransferItem
+from .game_model import Game
+from .transfer_plan import TransferItem
 from .operations import OperationBusy, OperationKind, OperationOutcome
 
 
@@ -128,7 +130,7 @@ class TransferJob:
     # reglas a una tarea que ya está copiando.
     scrub_update: bool = True
     # Cuánto se espera que ocupe en el destino. Si viene de
-    # `library.plan_transfer_fast` ya está medido; si no, lo mide la cola
+    # `transfer_plan.plan_transfer_fast` ya está medido; si no, lo mide la cola
     # justo antes de copiar (ver `_ensure_output_bytes`).
     output_bytes: int = 0
     bytes_done: int = 0
@@ -189,7 +191,7 @@ _BUSY_RETRY_SECONDS = 0.5
 def _format_speed(bytes_per_second: float) -> str:
     """Velocidad legible.
 
-    No se usa `library.format_size` para esto: esa función corta en MB (por
+    No se usa `formatting.format_size` para esto: esa función corta en MB (por
     debajo de 1 GB muestra megas), y una copia lenta de verdad -una SD vieja
     o un USB 1.1 a 60 KB/s- se vería como "0.0 MB/s", que se lee igual que
     "no está avanzando". Justo ahí es donde el usuario más necesita ver que
@@ -278,7 +280,7 @@ class TransferQueue:
                  overwrite: bool = False, scrub_update: bool = True) -> list[TransferJob]:
         """Encola juegos hacia `dest_root` y devuelve las tareas creadas.
 
-        `items` puede ser una lista de `Game` o de `library.TransferItem`.
+        `items` puede ser una lista de `Game` o de `transfer_plan.TransferItem`.
         Lo segundo es lo que conviene: el `TransferItem` ya trae medido
         cuánto va a ocupar el juego en el destino (lo calculó
         `plan_transfer_fast` en paralelo), así que la cola no tiene que
@@ -550,9 +552,9 @@ class TransferQueue:
         # plantear (y `game_dest_path` lo rechaza justamente para que ese
         # ID no termine siendo un componente de ruta). `game_dest_path`
         # elige sola la estructura que corresponda (WBFS de Wii o carpeta
-        # de Nintendont para GameCube, ver library.py).
+        # de Nintendont para GameCube, ver transfer_plan.py).
         try:
-            dest = library.game_dest_path(job.game, job.dest_root)
+            dest = transfer_plan.game_dest_path(job.game, job.dest_root)
         except ValueError as e:
             self._finish_job(job, JobStatus.ERROR, str(e), oplog.STATUS_ERROR)
             return
@@ -623,13 +625,13 @@ class TransferQueue:
         # El espacio libre se mira ACÁ y no al encolar: entre que el usuario
         # armó la cola y le toca el turno a esta tarea se escribieron todas
         # las anteriores, así que el número de hace un minuto no sirve.
-        libres = library.free_space(job.dest_root)
+        libres = transfer_plan.free_space(job.dest_root)
         if libres is not None and job.output_bytes > libres:
             self._finish_job(
                 job, JobStatus.ERROR,
                 _("No entra en el destino: necesita {need} y quedan {free}.")
-                .format(need=library.format_size(job.output_bytes),
-                        free=library.format_size(libres)),
+                .format(need=formatting.format_size(job.output_bytes),
+                        free=formatting.format_size(libres)),
                 oplog.STATUS_ERROR)
             return
 
@@ -643,7 +645,7 @@ class TransferQueue:
             self._report_progress(job, escritos, ahora)
 
         try:
-            library.send_to_wbfs_drive(
+            library_ops.send_to_wbfs_drive(
                 job.game, job.dest_root, job.wit_binary,
                 bytes_progress_cb=on_bytes,
                 overwrite=job.overwrite,
@@ -654,7 +656,7 @@ class TransferQueue:
             self._finish_job(job, JobStatus.CANCELLED, "", oplog.STATUS_CANCELLED,
                              op=op)
             return
-        except library.DestinationExistsError:
+        except library_ops.DestinationExistsError:
             # Ni éxito ni error: el juego ya está en la unidad y no se pidió
             # pisarlo. Tiene su propio estado porque contarlo como error
             # haría que una cola de 40 juegos ya copiados se viera roja
@@ -669,7 +671,7 @@ class TransferQueue:
                   "ruta en Preferencias.").format(binary=job.wit_binary),
                 oplog.STATUS_ERROR, op=op)
             return
-        except library.RollbackFailedError as e:
+        except library_ops.RollbackFailedError as e:
             # Caso grave: la conversión falló Y ADEMÁS no se pudo devolver
             # el original a su lugar (típico en un WBFS dividido si falla
             # justo una de las partes). `user_message` distingue esto de
@@ -698,14 +700,14 @@ class TransferQueue:
         Si la tarea vino de un `TransferItem` ya está medido y esto no
         cuesta nada. Si vino de un `Game` pelado hay que preguntarle a
         `wit`, que es rápido pero puede fallar; el respaldo es el mismo que
-        usa `library.plan_transfer_fast`, el tamaño del archivo de origen.
+        usa `transfer_plan.plan_transfer_fast`, el tamaño del archivo de origen.
         Nunca cero: es el denominador de la barra de progreso.
 
         Devuelve False si la tarea se canceló mientras se medía."""
         if job.output_bytes <= 0:
             self._update(job, speed_text=_("Calculando tamaño…"))
             try:
-                medido = library.estimate_transfer_size(job.game, job.wit_binary)
+                medido = transfer_plan.estimate_transfer_size(job.game, job.wit_binary)
             except Exception:
                 medido = 0
             job.output_bytes = medido or job.game.size_bytes
@@ -727,7 +729,7 @@ class TransferQueue:
             if velocidad > 0:
                 faltan = max(total - escritos, 0)
                 texto += _(" · ~{eta} restantes").format(
-                    eta=library.format_eta(faltan / velocidad))
+                    eta=formatting.format_eta(faltan / velocidad))
         self._update(job, progress=fraccion, bytes_done=escritos,
                      speed_text=texto)
 

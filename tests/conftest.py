@@ -22,7 +22,7 @@ os.environ["LANGUAGE"] = "es"
 
 import pytest  # noqa: E402
 
-from wiibackup_manager.library import Game  # noqa: E402
+from wiibackup_manager.game_model import Game  # noqa: E402
 
 
 @pytest.fixture

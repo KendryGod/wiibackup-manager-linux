@@ -16,7 +16,7 @@ import threading
 import time
 from pathlib import Path
 
-from wiibackup_manager import library
+from wiibackup_manager import atomicfs, library_ops, transfer_plan
 from wiibackup_manager.operations import OperationManager
 from wiibackup_manager.queue_manager import JobStatus, QueueSummary, TransferQueue
 
@@ -41,7 +41,7 @@ def test_copy_marca_error_sin_espacio_gc(make_game, tmp_path, monkeypatch):
     """El chequeo de espacio libre de `_copy` corre igual para GameCube que
     para Wii: si no entra, la tarea termina en Error y no llega a escribir
     nada en el destino."""
-    monkeypatch.setattr(library, "free_space", lambda path: 100)
+    monkeypatch.setattr(transfer_plan, "free_space", lambda path: 100)
 
     juego = make_game(name="juego.iso", game_id="GZ2E01", title="Twilight Princess",
                       console="gc", contenido=b"x" * 4096)
@@ -54,13 +54,13 @@ def test_copy_marca_error_sin_espacio_gc(make_game, tmp_path, monkeypatch):
     cola.shutdown(wait=5)
 
     assert job.status is JobStatus.ERROR, job.error_msg
-    assert not library.gc_dest_path(juego, dest_root).exists()
+    assert not transfer_plan.gc_dest_path(juego, dest_root).exists()
 
 
 def test_copy_gc_con_espacio_suficiente_copia(make_game, tmp_path, monkeypatch):
     """Con espacio de sobra, un juego de GameCube se copia entero a la
     estructura de Nintendont y la tarea llega a Completado."""
-    monkeypatch.setattr(library, "free_space", lambda path: 10 ** 12)
+    monkeypatch.setattr(transfer_plan, "free_space", lambda path: 10 ** 12)
 
     contenido = b"contenido de prueba gc" * 100
     juego = make_game(name="juego.iso", game_id="GZ2E01", title="Twilight Princess",
@@ -74,7 +74,7 @@ def test_copy_gc_con_espacio_suficiente_copia(make_game, tmp_path, monkeypatch):
     cola.shutdown(wait=5)
 
     assert job.status is JobStatus.DONE, job.error_msg
-    destino = library.gc_dest_path(juego, dest_root)
+    destino = transfer_plan.gc_dest_path(juego, dest_root)
     assert destino.read_bytes() == contenido
 
 
@@ -85,7 +85,7 @@ def test_send_to_wbfs_drive_gc_no_llama_needs_wbfs_split(make_game, tmp_path, mo
     def _no_deberia_llamarse(*_a, **_k):
         raise AssertionError(
             "needs_wbfs_split no debería evaluarse para un juego de GameCube")
-    monkeypatch.setattr(library.drives, "needs_wbfs_split", _no_deberia_llamarse)
+    monkeypatch.setattr(library_ops.drives, "needs_wbfs_split", _no_deberia_llamarse)
 
     juego = make_game(name="juego.iso", game_id="GZ2E01", title="Twilight Princess",
                       console="gc", contenido=b"contenido de prueba gc")
@@ -105,7 +105,7 @@ def test_send_to_wbfs_drive_gc_no_divide_aunque_el_destino_lo_pida(make_game, tm
     """Aunque el destino "pida" dividir (FAT32 real o detectado como tal),
     una tarea de GameCube copia el archivo entero: a diferencia de Wii acá
     no hay `wit --split` de por medio, es una copia tal cual."""
-    monkeypatch.setattr(library.drives, "needs_wbfs_split", lambda path: True)
+    monkeypatch.setattr(library_ops.drives, "needs_wbfs_split", lambda path: True)
 
     contenido = b"contenido de prueba gc"
     juego = make_game(name="juego.iso", game_id="GZ2E01", title="Twilight Princess",
@@ -119,7 +119,7 @@ def test_send_to_wbfs_drive_gc_no_divide_aunque_el_destino_lo_pida(make_game, tm
     cola.shutdown(wait=5)
 
     assert job.status is JobStatus.DONE, job.error_msg
-    destino = library.gc_dest_path(juego, dest_root)
+    destino = transfer_plan.gc_dest_path(juego, dest_root)
     assert destino.read_bytes() == contenido
     assert not destino.with_suffix(".wbf1").exists()
 
@@ -133,8 +133,8 @@ def test_copy_con_rollback_fallido_distingue_los_dos_problemas_en_error_msg(
     que llega a `job.error_msg` -lo que ve el usuario en la fila de la
     cola- tiene que nombrar los dos problemas, no solo "la conversión
     falló" como si el original se hubiera recuperado sin drama."""
-    monkeypatch.setattr(library, "free_space", lambda path: 10 ** 12)
-    monkeypatch.setattr(library.wit_wrapper, "is_available", lambda _binary: True)
+    monkeypatch.setattr(transfer_plan, "free_space", lambda path: 10 ** 12)
+    monkeypatch.setattr(library_ops.wit_wrapper, "is_available", lambda _binary: True)
 
     def _fake_convert(src, dest, target_format, binary, **kwargs):
         # Simula lo que deja `wit` cuando falla a mitad de camino: los
@@ -144,7 +144,7 @@ def test_copy_con_rollback_fallido_distingue_los_dos_problemas_en_error_msg(
         return subprocess.CompletedProcess(
             args=[], returncode=1, stdout="", stderr="wit: fallo simulado")
 
-    monkeypatch.setattr(library.wit_wrapper, "convert", _fake_convert)
+    monkeypatch.setattr(library_ops.wit_wrapper, "convert", _fake_convert)
 
     real_replace = os.replace
 
@@ -153,7 +153,7 @@ def test_copy_con_rollback_fallido_distingue_los_dos_problemas_en_error_msg(
             raise OSError("no se pudo restaurar (simulado)")
         return real_replace(origen, destino)
 
-    monkeypatch.setattr(library.os, "replace", _falla_solo_al_restaurar)
+    monkeypatch.setattr(atomicfs.os, "replace", _falla_solo_al_restaurar)
 
     # `fmt="ISO"` fuerza el camino de `wit` (una copia WBFS directa no
     # pasa por DestinationGuard ni por wit_wrapper.convert).
@@ -165,7 +165,7 @@ def test_copy_con_rollback_fallido_distingue_los_dos_problemas_en_error_msg(
     # El destino ya tiene un WBFS dividido de una transferencia anterior:
     # es lo que hace que `DestinationGuard` se active (`enabled=True`) y
     # tenga algo que apartar/restaurar.
-    destino = library.game_dest_path(juego, dest_root)
+    destino = transfer_plan.game_dest_path(juego, dest_root)
     destino.parent.mkdir(parents=True)
     destino.write_bytes(b"original-wbfs")
     destino.with_suffix(".wbf1").write_bytes(b"original-wbf1")

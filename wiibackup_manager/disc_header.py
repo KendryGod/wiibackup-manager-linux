@@ -48,7 +48,7 @@ GAME_ID_LEN = 6
 # `str.isalnum()`- importa por seguridad, no solo por prolijidad: el
 # game_id se lee del header del archivo (contenido que la app no controla)
 # y después se usa para armar rutas del filesystem, p. ej.
-# `wbfs/<ID6>/<ID6>.wbfs` en `library.send_to_wbfs_drive`. Un header
+# `wbfs/<ID6>/<ID6>.wbfs` en `library_ops.send_to_wbfs_drive`. Un header
 # manipulado con "../../" o cualquier cosa con "/" podría escaparse de la
 # carpeta wbfs/ prevista y escribir en otro lado. `isprintable()` dejaba
 # pasar "/", "\\" y "."; `isalnum()` deja pasar dígitos y letras Unicode
@@ -92,7 +92,7 @@ class DiscInfo:
 
 # Número de disco: 0 = disco 1, 1 = disco 2, y NADA MÁS. Nintendo nunca
 # publicó un juego de más de dos discos -ni en GameCube, que es donde la
-# app usa este dato (`library.gc_dest_path` arma "disc2.iso" para el
+# app usa este dato (`transfer_plan.gc_dest_path` arma "disc2.iso" para el
 # segundo), ni en Wii-, así que cualquier otro valor en el offset 0x06 es
 # un header corrupto o un archivo que no es lo que dice ser.
 #
@@ -142,7 +142,7 @@ def read_plain_iso_header(path: Path) -> Optional[DiscInfo]:
     except UnicodeDecodeError:
         return None
     # Si el ID no tiene la forma de un ID6 real, este archivo no se
-    # considera identificado (lo maneja `library.identify_file`, que cae
+    # considera identificado (lo maneja `scanning.identify_file`, que cae
     # a `wit` y después a "no identificado"): nunca se devuelve un
     # game_id que después terminaría formando parte de una ruta.
     if not is_valid_game_id(game_id):
@@ -177,7 +177,7 @@ def read_plain_iso_header(path: Path) -> Optional[DiscInfo]:
 # formato documentado.
 #
 # Esto se usa solo para el número de disco (multidisco de GameCube, ver
-# `library.gc_dest_path`): identificar el juego sigue yendo por `wit`
+# `transfer_plan.gc_dest_path`): identificar el juego sigue yendo por `wit`
 # (`wit_wrapper.identify`), que sabe leer CISO de punta a punta y ya es el
 # camino probado para eso.
 CISO_MAGIC = b"CISO"

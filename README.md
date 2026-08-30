@@ -439,7 +439,12 @@ wiibackup_manager/
 ├── app.py                        # Adw.Application
 ├── window.py                     # Ventana principal: pestaña Biblioteca y lógica de UI
 ├── config.py                     # Preferencias persistidas (XDG), escritura atómica
-├── library.py                    # Escaneo, modelo de datos y exportación
+├── game_model.py                 # El modelo `Game` y el nombre estándar de su archivo
+├── scanning.py                   # Recorre la biblioteca e identifica cada juego
+├── fileops.py                    # Mover y copiar archivos sin pisar lo que no es nuestro
+├── transfer_plan.py              # Dónde va a caer cada juego y cuánto va a ocupar
+├── library_ops.py                # Renombrar y mandar a la unidad (lo que escribe)
+├── formatting.py                 # Tamaños, tiempos y la lista exportada, como texto
 ├── disc_header.py                # Parseo de header de ISO plana (sin dependencias)
 ├── wit_wrapper.py                # Llamadas a `wit` (conversión/verificación/cancelación)
 ├── f3_wrapper.py                 # Llamadas a `f3` (verificar que una memoria sea real)

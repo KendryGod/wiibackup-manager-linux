@@ -60,7 +60,7 @@ Flujo de `install_app`, en orden, y por qué:
       actualización que fallaba a mitad de camino podía dejar una
       mezcla de archivos de la versión vieja y la nueva -cada archivo
       individual escrito de forma válida, pero la app entera rota-;
-      mismo patrón que `library.DestinationGuard` (Sesión 2), llevado
+      mismo patrón que `library_ops.DestinationGuard` (Sesión 2), llevado
       de archivos WBFS individuales a una carpeta completa. Ver
       `_stage_and_swap_unit`.
 
@@ -91,7 +91,7 @@ from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
 
-from . import atomicfs, drives, library
+from . import atomicfs, drives, formatting, library_ops, transfer_plan
 from .atomicfs import atomic_write_target
 from .oscwii_client import (HomebrewApp, UnsafeDownloadURL,
                             open_allowlisted, url_rejection_reason)
@@ -139,7 +139,7 @@ class InstallStatus(Enum):
     CANCELLED = "cancelled"
     # La instalación falló Y ADEMÁS `_stage_and_swap_unit` no pudo
     # devolver la versión anterior a su lugar (ver
-    # `library.RollbackFailedError`): distinto de `IO_ERROR` porque acá
+    # `library_ops.RollbackFailedError`): distinto de `IO_ERROR` porque acá
     # la app puede haber quedado directamente inexistente, no solo con
     # la instalación nueva sin aplicar.
     ROLLBACK_FAILED = "rollback_failed"
@@ -509,7 +509,7 @@ def _group_members(members: list) -> tuple[dict, list]:
 # `.<NombreDeLaApp>.wbm-respaldo-<pid>`. El prefijo "wbm-" los distingue
 # de cualquier cosa que deje otro programa en la misma SD/USB.
 #
-# Públicas por el mismo motivo que `library.MARCA_RESPALDO`: `recovery_service`
+# Públicas por el mismo motivo que `library_ops.MARCA_RESPALDO`: `recovery_service`
 # reconoce con ellas los restos de una instalación que se cortó a mitad, y
 # tiene que leer exactamente la misma marca que escribió el instalador.
 MARCA_STAGING = "wbm-staging"
@@ -531,7 +531,7 @@ def _stage_and_swap_unit(zf: zipfile.ZipFile, unit_members: list,
     instalar una app: qué se escribe en la staging (los miembros del ZIP
     de esta unidad, sin sus dos primeros componentes de ruta), dónde se
     revisa la cancelación, y qué significa un fallo de restauración para
-    el usuario -`library.RollbackFailedError`, la misma excepción que usa
+    el usuario -`library_ops.RollbackFailedError`, la misma excepción que usa
     `DestinationGuard` para el caso equivalente con archivos WBFS.
 
     Devuelve (rutas finales escritas, respaldos que no se pudieron
@@ -540,7 +540,7 @@ def _stage_and_swap_unit(zf: zipfile.ZipFile, unit_members: list,
     Si ESE borrado falla, la app quedó instalada correctamente pero su
     versión anterior sigue ocupando lugar en una carpeta oculta que el
     usuario no va a encontrar solo, así que se reporta en vez de
-    ignorarse (mismo criterio que `library.DestinationGuard._discard`)."""
+    ignorarse (mismo criterio que `library_ops.DestinationGuard._discard`)."""
     relativos: list[PurePosixPath] = []
     try:
         with atomicfs.staged_directory(final_dir,
@@ -558,11 +558,11 @@ def _stage_and_swap_unit(zf: zipfile.ZipFile, unit_members: list,
     except atomicfs.SwapRollbackFailed as e:
         # La primitiva reporta QUE no se pudo restaurar; qué significa eso
         # para el usuario lo decide este módulo, y acá significa lo mismo
-        # que en `library.DestinationGuard`: la estructura es distinta -un
+        # que en `library_ops.DestinationGuard`: la estructura es distinta -un
         # solo par carpeta-original/carpeta-respaldo contra varios pares
         # de archivos WBFS- pero el problema es el mismo, y vale la misma
         # excepción. `from e.original_error` conserva la cadena original.
-        raise library.RollbackFailedError(
+        raise library_ops.RollbackFailedError(
             e.pending, original_error=e.original_error) from e.original_error
 
     return ([final_dir / Path(*r.parts) for r in relativos],
@@ -645,12 +645,12 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
                 members = [i for i in zf.infolist() if not i.is_dir()]
 
                 needed = sum(i.file_size for i in members)
-                free = library.free_space(dest_root)
+                free = transfer_plan.free_space(dest_root)
                 if free is not None and needed > free:
                     return InstallResult(
                         InstallStatus.NO_SPACE, app.slug,
-                        f"necesita {library.format_size(needed)} y quedan "
-                        f"{library.format_size(free)} en el destino")
+                        f"necesita {formatting.format_size(needed)} y quedan "
+                        f"{formatting.format_size(free)} en el destino")
 
                 unidades, sueltos = _group_members(members)
                 total = len(members)
@@ -691,7 +691,7 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
         # tocó, pero el motivo no es un fallo de red común y se reporta
         # distinto.
         return InstallResult(InstallStatus.UNSAFE_URL, app.slug, str(e))
-    except library.RollbackFailedError as e:
+    except library_ops.RollbackFailedError as e:
         # Caso grave: la instalación falló Y ADEMÁS no se pudo devolver
         # la versión anterior a su lugar (ver `_stage_and_swap_unit`).
         # `user_message` distingue esto de un `IO_ERROR` común -acá la

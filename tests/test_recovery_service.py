@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from wiibackup_manager import atomicfs, library, oscwii_installer
+from wiibackup_manager import atomicfs, library_ops, oscwii_installer
 from wiibackup_manager import recovery_service as rs
 from wiibackup_manager.operations import OperationKind, OperationManager
 
@@ -116,7 +116,7 @@ def test_las_marcas_salen_de_quien_las_escribe():
     usa el módulo que deja el resto. Si alguien renombra una marca allá y
     acá quedara una copia, el Recovery Manager dejaría de encontrarlos sin
     que nada falle."""
-    assert rs.LeftoverKind.BACKUP.value == library.MARCA_RESPALDO
+    assert rs.LeftoverKind.BACKUP.value == library_ops.MARCA_RESPALDO
     assert rs.LeftoverKind.HOMEBREW_BACKUP.value == oscwii_installer.MARCA_RESPALDO
     assert rs.LeftoverKind.HOMEBREW_STAGING.value == oscwii_installer.MARCA_STAGING
     assert rs.LeftoverKind.PARTIAL.value == atomicfs.MARCA_PARCIAL
@@ -128,7 +128,7 @@ def test_los_nombres_que_escribe_atomicfs_se_leen_de_vuelta(tmp_path):
     engancha el formato de escritura con el de lectura sin que ninguno de
     los dos lo asuma."""
     destino = tmp_path / "RMCP01.wbfs"
-    oculto = _archivo(atomicfs.hidden_sibling(destino, library.MARCA_RESPALDO))
+    oculto = _archivo(atomicfs.hidden_sibling(destino, library_ops.MARCA_RESPALDO))
     lo = rs.classify(oculto)
     assert lo.kind is rs.LeftoverKind.BACKUP
     assert lo.original == destino

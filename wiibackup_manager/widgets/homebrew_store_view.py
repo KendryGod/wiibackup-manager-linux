@@ -22,7 +22,8 @@ gi.require_version("Adw", "1")
 gi.require_version("Pango", "1.0")
 from gi.repository import Adw, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
 
-from .. import drives, golden_configs, library, oplog, oscwii_client, oscwii_installer
+from .. import (drives, formatting, golden_configs, oplog, oscwii_client,
+                oscwii_installer)
 from ..i18n import _
 from ..oscwii_client import HomebrewApp
 from ..oscwii_installer import InstallStatus
@@ -608,7 +609,7 @@ class HomebrewStoreView(Gtk.Box):
             # encontrar solo. Se avisa y se anota en el historial en vez
             # de dejarlo pasar (ver `oscwii_installer._stage_and_swap_unit`).
             if result.orphaned_backups:
-                aviso = library.format_orphaned_backups(result.orphaned_backups)
+                aviso = formatting.format_orphaned_backups(result.orphaned_backups)
                 self._show_toast(
                     _("'{name}' se instaló. {detail}")
                     .format(name=app.name, detail=aviso))
