@@ -1,6 +1,6 @@
 # Manual del taller — WiiBackup Manager
 
-Guía rápida para preparar USBs/SD de clientes sin sorpresas. Basado en revisión de seguridad de ChatGPT (30 de agosto, 2026).
+Guía rápida para preparar USBs/SD de clientes sin sorpresas. Basado en revisión de seguridad de ChatGPT (30 de agosto, 2026), actualizado para la 0.2.0.
 
 ## Flujo recomendado para preparar una USB de cliente
 
