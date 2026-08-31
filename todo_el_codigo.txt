@@ -5041,6 +5041,25 @@ _SHARED_PROGRESS_KINDS = frozenset(
 )
 
 
+# Tipos que SOLO LEEN. No crean ni tocan ningún archivo, así que su
+# presencia no vuelve peligroso mirar otra cosa en el mismo lugar.
+#
+# Importa para el Recovery Manager: el escaneo de restos y el escaneo de la
+# biblioteca arrancan JUNTOS al abrir la ventana, y el segundo declara la
+# carpeta entera como recurso. Con esa declaración tomada al pie de la
+# letra, TODO resto que viva en la biblioteca quedaba escondido mientras
+# durara el escaneo -y el escaneo de restos corre una sola vez, así que no
+# había segunda oportunidad: el usuario no veía ningún aviso, y eso se leía
+# igual que "no hay nada que recuperar". Un escaneo no escribe nada; que
+# esté corriendo no es motivo para esconder un resto.
+#
+# `VERIFYING` está por lo mismo: `wit VERIFY` abre el archivo y lo lee, y
+# nada más.
+READ_ONLY_KINDS = frozenset(
+    {OperationKind.SCANNING, OperationKind.VERIFYING}
+)
+
+
 # Tipos que NO se pueden cortar de golpe sin dejar algo a medias en el
 # disco de un cliente. Es lo que hace que cerrar la ventana pida
 # confirmación en vez de irse y confiar en que el cleanup de fondo salga
@@ -5232,13 +5251,20 @@ class OperationManager:
             return [op for op in self._active.values()
                     if op.kind in INTERRUPT_UNSAFE_KINDS]
 
-    def is_path_busy(self, path) -> bool:
-        """True si ese archivo está tomado por alguna operación."""
+    def is_path_busy(self, path, *, skip_read_only: bool = False) -> bool:
+        """True si ese archivo está tomado por alguna operación.
+
+        Con `skip_read_only` no cuentan las que solo leen (ver
+        `READ_ONLY_KINDS`). El default es el de siempre -cuentan todas-,
+        así que quien no lo pida no cambia de comportamiento."""
         target = _normalize([path])
         with self._lock:
-            return any(op.paths & target for op in self._active.values())
+            return any(op.paths & target
+                       for op in self._active.values()
+                       if not (skip_read_only and op.kind in READ_ONLY_KINDS))
 
-    def is_resource_busy(self, path) -> Optional[Operation]:
+    def is_resource_busy(self, path, *,
+                        skip_read_only: bool = False) -> Optional[Operation]:
         """La operación que está ocupando ese lugar, o None.
 
         Un lugar está ocupado si alguna operación lo declaró como recurso
@@ -5246,10 +5272,17 @@ class OperationManager:
         escribiendo un archivo ahí adentro. Con esto el botón "Expulsar
         unidad" puede negarse mientras se le está copiando algo a ese
         pendrive, que era la forma más fácil de corromper el disco de un
-        cliente."""
+        cliente.
+
+        `skip_read_only` deja afuera las operaciones que solo leen (ver
+        `READ_ONLY_KINDS`). Lo usa el escaneo de restos y nadie más: para
+        expulsar una unidad, en cambio, un escaneo en curso SÍ tiene que
+        frenar -sacar el disco mientras se lo recorre rompe el escaneo."""
         target = _normalize([path])
         with self._lock:
             for op in self._active.values():
+                if skip_read_only and op.kind in READ_ONLY_KINDS:
+                    continue
                 if _resources_overlap(target, op.resources) is not None:
                     return op
                 if _touching(op.write_paths, target) is not None:
@@ -8571,12 +8604,14 @@ def _esta_abandonado(leftover: Leftover, *, now: float,
         # se deja en paz: puede ser una copia escribiendo en este momento.
         return False
 
-    if ops is not None and is_locked_by_operation(ops, leftover):
+    if ops is not None and is_locked_by_operation(ops, leftover,
+                                                 ignore_read_only=True):
         return False
     return True
 
 
-def is_locked_by_operation(ops, leftover: Leftover) -> bool:
+def is_locked_by_operation(ops, leftover: Leftover, *,
+                           ignore_read_only: bool = False) -> bool:
     """Si alguna operación registrada en `ops` ocupa el lugar del resto.
 
     Se pregunta por el resto Y por su original: una conversión declara como
@@ -8590,11 +8625,29 @@ def is_locked_by_operation(ops, leftover: Leftover) -> bool:
     listar lo que está en uso, y otra vez justo antes de tocar el disco.
     Entre las dos cosas hay un diálogo abierto y una persona leyéndolo, y
     en ese rato pudo arrancar una transferencia sobre esa misma unidad
-    -es el mismo motivo por el que existe `OperationManager.check`."""
+    -es el mismo motivo por el que existe `OperationManager.check`.
+
+    Y las dos veces no piden lo mismo, que es para lo que está
+    `ignore_read_only`:
+
+    - LISTAR un resto mientras algo lo lee no hace daño, y esconderlo sí:
+      el escaneo de la biblioteca declara la carpeta entera como recurso y
+      arranca junto con el de restos, así que sin esta puerta todo resto
+      que viviera en la biblioteca desaparecía del aviso -y el escaneo de
+      restos corre una sola vez, no hay segunda oportunidad. Por eso el
+      escaneo pasa `ignore_read_only=True`.
+    - TOCAR el disco es otra cosa, y ahí se queda como estaba: conservador,
+      contando también lo que solo lee. Si entre el listado y el click
+      apareció algo, el diálogo lo dice y no hace nada.
+
+    Puede pasar entonces que el diálogo muestre un resto sobre el que
+    después se niegue a actuar. Es la lectura honesta -"ahora hay algo
+    usando esa ubicación"- y es mucho mejor que la anterior, que era no
+    mostrar nada y dejar creer que no había restos."""
     for ruta in (leftover.path, leftover.original):
-        if ops.is_resource_busy(ruta) is not None:
+        if ops.is_resource_busy(ruta, skip_read_only=ignore_read_only) is not None:
             return True
-        if ops.is_path_busy(ruta):
+        if ops.is_path_busy(ruta, skip_read_only=ignore_read_only):
             return True
     return False
 
@@ -26897,6 +26950,74 @@ def test_la_antiguedad_se_dice_en_la_unidad_que_se_entiende(segundos, esperado):
     assert format_age(segundos) == esperado
 
 
+# ------------------- Lo que está corriendo no tiene que esconder restos --
+#
+# Al abrir la ventana arrancan JUNTOS el escaneo de la biblioteca y el de
+# restos. El primero declara la carpeta entera como recurso ocupado, y el
+# segundo descarta todo resto que esté en un lugar ocupado -para no listar
+# lo que otra operación está usando. Con esas dos reglas juntas, TODO resto
+# que viviera en la biblioteca desaparecía del aviso mientras durara el
+# escaneo, que es justo el momento en que se lo busca. Y el escaneo de
+# restos corre UNA sola vez al arrancar: no hay segunda oportunidad.
+#
+# El usuario veía la app abrirse sin ningún aviso, que es exactamente lo
+# que se ve cuando no hay nada que recuperar.
+
+
+def _resto_en(carpeta: Path, pid_muerto: int) -> Path:
+    ruta = carpeta / f".Juego.wbfs.respaldo-{pid_muerto}"
+    _archivo(ruta)
+    return ruta
+
+
+@pytest.mark.parametrize("kind", [OperationKind.SCANNING, OperationKind.VERIFYING])
+def test_una_operacion_que_solo_lee_no_esconde_los_restos(unidad, pid_muerto, kind):
+    """Un escaneo no escribe nada: que esté corriendo no vuelve peligroso
+    ni siquiera MIRAR un resto, y mucho menos es motivo para ocultarlo."""
+    _resto_en(unidad, pid_muerto)
+    ops = OperationManager()
+    ops.start(kind, resources=[unidad])
+
+    assert len(rs.scan([unidad], ops=ops)) == 1, (
+        f"{kind.name} escondió un resto sin llegar a escribir nada")
+
+
+@pytest.mark.parametrize("kind", [
+    OperationKind.TRANSFERRING, OperationKind.CONVERTING,
+    OperationKind.FORMATTING, OperationKind.INSTALLING_HOMEBREW,
+])
+def test_una_operacion_que_escribe_si_esconde_los_restos(unidad, pid_muerto, kind):
+    """La otra mitad, que es la que no hay que romper arreglando la
+    primera: mientras algo escribe en ese lugar, lo que parece un resto
+    puede ser el archivo que esa operación está creando en este momento."""
+    _resto_en(unidad, pid_muerto)
+    ops = OperationManager()
+    ops.start(kind, resources=[unidad])
+
+    assert rs.scan([unidad], ops=ops) == [], (
+        f"{kind.name} está escribiendo ahí y aun así se listó el resto")
+
+
+def test_tocar_el_disco_sigue_siendo_conservador(unidad, pid_muerto):
+    """Listar y ACTUAR no piden lo mismo.
+
+    El diálogo revalida con `is_locked_by_operation` antes de mover o
+    borrar nada, y ahí se queda estricto: cuenta también lo que solo lee.
+    Puede entonces mostrar un resto sobre el que después se niegue a
+    actuar -"ahora hay una operación usando esa ubicación"-, que es una
+    respuesta honesta, y mucho mejor que la anterior, que era no mostrar
+    nada."""
+    ruta = _resto_en(unidad, pid_muerto)
+    ops = OperationManager()
+    ops.start(OperationKind.SCANNING, resources=[unidad])
+
+    leftover = rs.classify(ruta)
+    # Al listar, el escaneo lo deja pasar...
+    assert rs.is_locked_by_operation(ops, leftover, ignore_read_only=True) is False
+    # ...pero justo antes de tocarlo, no.
+    assert rs.is_locked_by_operation(ops, leftover) is True
+
+
 # ------------------------- Cuando el escaneo del arranque se cae solo --
 #
 # El escaneo automático corre en un hilo y atrapa TODO: nada de lo que le
@@ -27334,13 +27455,25 @@ def test_el_aviso_de_restos_aparece_con_lo_que_encuentra_el_escaneo(
             load_css()
             win = WiiBackupWindow(self)
             win.present()
-            GLib.timeout_add(2500, self._revisar, win)
+            self._vueltas = 0
+            GLib.timeout_add(100, self._revisar, win)
 
         def _revisar(self, win):
+            # Se ESPERA a que el escaneo llegue, en vez de apostar a que
+            # 2500 ms alcanzan. El escaneo corre en un hilo y compite con
+            # el de la biblioteca, así que en una máquina cargada ese plazo
+            # fijo se cumplía antes que el escaneo y el test fallaba con
+            # "0 restos" -que es lo mismo que se ve si el escaneo terminó y
+            # no encontró nada, o sea que el fallo ni siquiera decía cuál
+            # de los dos había pasado.
+            self._vueltas += 1
+            if not win._recovery_leftovers and self._vueltas < 200:
+                return True  # todavía no llegó: seguir esperando
             try:
                 resultado["revelado"] = win._recovery_banner.get_revealed()
                 resultado["titulo"] = win._recovery_banner.get_title()
                 resultado["restos"] = len(win._recovery_leftovers)
+                resultado["espera_s"] = self._vueltas * 0.1
                 # Resolver el único resto tiene que hacer desaparecer el
                 # aviso, sin esperar a otro escaneo.
                 win._on_recovery_resolved(win._recovery_leftovers[0])
@@ -27354,7 +27487,9 @@ def test_el_aviso_de_restos_aparece_con_lo_que_encuentra_el_escaneo(
     App().run([])
 
     assert not resultado.get("colgada"), "la app no terminó de arrancar"
-    assert resultado.get("restos") == 1
+    assert resultado.get("restos") == 1, (
+        "el escaneo de restos no encontró el respaldo huérfano después de "
+        f"{resultado.get('espera_s')} s")
     assert resultado.get("revelado") is True
     assert "1 resto" in resultado.get("titulo", "")
     assert resultado.get("revelado_despues") is False

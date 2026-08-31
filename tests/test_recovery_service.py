@@ -633,6 +633,74 @@ def test_la_antiguedad_se_dice_en_la_unidad_que_se_entiende(segundos, esperado):
     assert format_age(segundos) == esperado
 
 
+# ------------------- Lo que está corriendo no tiene que esconder restos --
+#
+# Al abrir la ventana arrancan JUNTOS el escaneo de la biblioteca y el de
+# restos. El primero declara la carpeta entera como recurso ocupado, y el
+# segundo descarta todo resto que esté en un lugar ocupado -para no listar
+# lo que otra operación está usando. Con esas dos reglas juntas, TODO resto
+# que viviera en la biblioteca desaparecía del aviso mientras durara el
+# escaneo, que es justo el momento en que se lo busca. Y el escaneo de
+# restos corre UNA sola vez al arrancar: no hay segunda oportunidad.
+#
+# El usuario veía la app abrirse sin ningún aviso, que es exactamente lo
+# que se ve cuando no hay nada que recuperar.
+
+
+def _resto_en(carpeta: Path, pid_muerto: int) -> Path:
+    ruta = carpeta / f".Juego.wbfs.respaldo-{pid_muerto}"
+    _archivo(ruta)
+    return ruta
+
+
+@pytest.mark.parametrize("kind", [OperationKind.SCANNING, OperationKind.VERIFYING])
+def test_una_operacion_que_solo_lee_no_esconde_los_restos(unidad, pid_muerto, kind):
+    """Un escaneo no escribe nada: que esté corriendo no vuelve peligroso
+    ni siquiera MIRAR un resto, y mucho menos es motivo para ocultarlo."""
+    _resto_en(unidad, pid_muerto)
+    ops = OperationManager()
+    ops.start(kind, resources=[unidad])
+
+    assert len(rs.scan([unidad], ops=ops)) == 1, (
+        f"{kind.name} escondió un resto sin llegar a escribir nada")
+
+
+@pytest.mark.parametrize("kind", [
+    OperationKind.TRANSFERRING, OperationKind.CONVERTING,
+    OperationKind.FORMATTING, OperationKind.INSTALLING_HOMEBREW,
+])
+def test_una_operacion_que_escribe_si_esconde_los_restos(unidad, pid_muerto, kind):
+    """La otra mitad, que es la que no hay que romper arreglando la
+    primera: mientras algo escribe en ese lugar, lo que parece un resto
+    puede ser el archivo que esa operación está creando en este momento."""
+    _resto_en(unidad, pid_muerto)
+    ops = OperationManager()
+    ops.start(kind, resources=[unidad])
+
+    assert rs.scan([unidad], ops=ops) == [], (
+        f"{kind.name} está escribiendo ahí y aun así se listó el resto")
+
+
+def test_tocar_el_disco_sigue_siendo_conservador(unidad, pid_muerto):
+    """Listar y ACTUAR no piden lo mismo.
+
+    El diálogo revalida con `is_locked_by_operation` antes de mover o
+    borrar nada, y ahí se queda estricto: cuenta también lo que solo lee.
+    Puede entonces mostrar un resto sobre el que después se niegue a
+    actuar -"ahora hay una operación usando esa ubicación"-, que es una
+    respuesta honesta, y mucho mejor que la anterior, que era no mostrar
+    nada."""
+    ruta = _resto_en(unidad, pid_muerto)
+    ops = OperationManager()
+    ops.start(OperationKind.SCANNING, resources=[unidad])
+
+    leftover = rs.classify(ruta)
+    # Al listar, el escaneo lo deja pasar...
+    assert rs.is_locked_by_operation(ops, leftover, ignore_read_only=True) is False
+    # ...pero justo antes de tocarlo, no.
+    assert rs.is_locked_by_operation(ops, leftover) is True
+
+
 # ------------------------- Cuando el escaneo del arranque se cae solo --
 #
 # El escaneo automático corre en un hilo y atrapa TODO: nada de lo que le

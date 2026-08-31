@@ -339,12 +339,14 @@ def _esta_abandonado(leftover: Leftover, *, now: float,
         # se deja en paz: puede ser una copia escribiendo en este momento.
         return False
 
-    if ops is not None and is_locked_by_operation(ops, leftover):
+    if ops is not None and is_locked_by_operation(ops, leftover,
+                                                 ignore_read_only=True):
         return False
     return True
 
 
-def is_locked_by_operation(ops, leftover: Leftover) -> bool:
+def is_locked_by_operation(ops, leftover: Leftover, *,
+                           ignore_read_only: bool = False) -> bool:
     """Si alguna operación registrada en `ops` ocupa el lugar del resto.
 
     Se pregunta por el resto Y por su original: una conversión declara como
@@ -358,11 +360,29 @@ def is_locked_by_operation(ops, leftover: Leftover) -> bool:
     listar lo que está en uso, y otra vez justo antes de tocar el disco.
     Entre las dos cosas hay un diálogo abierto y una persona leyéndolo, y
     en ese rato pudo arrancar una transferencia sobre esa misma unidad
-    -es el mismo motivo por el que existe `OperationManager.check`."""
+    -es el mismo motivo por el que existe `OperationManager.check`.
+
+    Y las dos veces no piden lo mismo, que es para lo que está
+    `ignore_read_only`:
+
+    - LISTAR un resto mientras algo lo lee no hace daño, y esconderlo sí:
+      el escaneo de la biblioteca declara la carpeta entera como recurso y
+      arranca junto con el de restos, así que sin esta puerta todo resto
+      que viviera en la biblioteca desaparecía del aviso -y el escaneo de
+      restos corre una sola vez, no hay segunda oportunidad. Por eso el
+      escaneo pasa `ignore_read_only=True`.
+    - TOCAR el disco es otra cosa, y ahí se queda como estaba: conservador,
+      contando también lo que solo lee. Si entre el listado y el click
+      apareció algo, el diálogo lo dice y no hace nada.
+
+    Puede pasar entonces que el diálogo muestre un resto sobre el que
+    después se niegue a actuar. Es la lectura honesta -"ahora hay algo
+    usando esa ubicación"- y es mucho mejor que la anterior, que era no
+    mostrar nada y dejar creer que no había restos."""
     for ruta in (leftover.path, leftover.original):
-        if ops.is_resource_busy(ruta) is not None:
+        if ops.is_resource_busy(ruta, skip_read_only=ignore_read_only) is not None:
             return True
-        if ops.is_path_busy(ruta):
+        if ops.is_path_busy(ruta, skip_read_only=ignore_read_only):
             return True
     return False
 

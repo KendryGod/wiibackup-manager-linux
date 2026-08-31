@@ -301,13 +301,25 @@ def test_el_aviso_de_restos_aparece_con_lo_que_encuentra_el_escaneo(
             load_css()
             win = WiiBackupWindow(self)
             win.present()
-            GLib.timeout_add(2500, self._revisar, win)
+            self._vueltas = 0
+            GLib.timeout_add(100, self._revisar, win)
 
         def _revisar(self, win):
+            # Se ESPERA a que el escaneo llegue, en vez de apostar a que
+            # 2500 ms alcanzan. El escaneo corre en un hilo y compite con
+            # el de la biblioteca, así que en una máquina cargada ese plazo
+            # fijo se cumplía antes que el escaneo y el test fallaba con
+            # "0 restos" -que es lo mismo que se ve si el escaneo terminó y
+            # no encontró nada, o sea que el fallo ni siquiera decía cuál
+            # de los dos había pasado.
+            self._vueltas += 1
+            if not win._recovery_leftovers and self._vueltas < 200:
+                return True  # todavía no llegó: seguir esperando
             try:
                 resultado["revelado"] = win._recovery_banner.get_revealed()
                 resultado["titulo"] = win._recovery_banner.get_title()
                 resultado["restos"] = len(win._recovery_leftovers)
+                resultado["espera_s"] = self._vueltas * 0.1
                 # Resolver el único resto tiene que hacer desaparecer el
                 # aviso, sin esperar a otro escaneo.
                 win._on_recovery_resolved(win._recovery_leftovers[0])
@@ -321,7 +333,9 @@ def test_el_aviso_de_restos_aparece_con_lo_que_encuentra_el_escaneo(
     App().run([])
 
     assert not resultado.get("colgada"), "la app no terminó de arrancar"
-    assert resultado.get("restos") == 1
+    assert resultado.get("restos") == 1, (
+        "el escaneo de restos no encontró el respaldo huérfano después de "
+        f"{resultado.get('espera_s')} s")
     assert resultado.get("revelado") is True
     assert "1 resto" in resultado.get("titulo", "")
     assert resultado.get("revelado_despues") is False

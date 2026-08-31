@@ -130,6 +130,25 @@ _SHARED_PROGRESS_KINDS = frozenset(
 )
 
 
+# Tipos que SOLO LEEN. No crean ni tocan ningún archivo, así que su
+# presencia no vuelve peligroso mirar otra cosa en el mismo lugar.
+#
+# Importa para el Recovery Manager: el escaneo de restos y el escaneo de la
+# biblioteca arrancan JUNTOS al abrir la ventana, y el segundo declara la
+# carpeta entera como recurso. Con esa declaración tomada al pie de la
+# letra, TODO resto que viva en la biblioteca quedaba escondido mientras
+# durara el escaneo -y el escaneo de restos corre una sola vez, así que no
+# había segunda oportunidad: el usuario no veía ningún aviso, y eso se leía
+# igual que "no hay nada que recuperar". Un escaneo no escribe nada; que
+# esté corriendo no es motivo para esconder un resto.
+#
+# `VERIFYING` está por lo mismo: `wit VERIFY` abre el archivo y lo lee, y
+# nada más.
+READ_ONLY_KINDS = frozenset(
+    {OperationKind.SCANNING, OperationKind.VERIFYING}
+)
+
+
 # Tipos que NO se pueden cortar de golpe sin dejar algo a medias en el
 # disco de un cliente. Es lo que hace que cerrar la ventana pida
 # confirmación en vez de irse y confiar en que el cleanup de fondo salga
@@ -321,13 +340,20 @@ class OperationManager:
             return [op for op in self._active.values()
                     if op.kind in INTERRUPT_UNSAFE_KINDS]
 
-    def is_path_busy(self, path) -> bool:
-        """True si ese archivo está tomado por alguna operación."""
+    def is_path_busy(self, path, *, skip_read_only: bool = False) -> bool:
+        """True si ese archivo está tomado por alguna operación.
+
+        Con `skip_read_only` no cuentan las que solo leen (ver
+        `READ_ONLY_KINDS`). El default es el de siempre -cuentan todas-,
+        así que quien no lo pida no cambia de comportamiento."""
         target = _normalize([path])
         with self._lock:
-            return any(op.paths & target for op in self._active.values())
+            return any(op.paths & target
+                       for op in self._active.values()
+                       if not (skip_read_only and op.kind in READ_ONLY_KINDS))
 
-    def is_resource_busy(self, path) -> Optional[Operation]:
+    def is_resource_busy(self, path, *,
+                        skip_read_only: bool = False) -> Optional[Operation]:
         """La operación que está ocupando ese lugar, o None.
 
         Un lugar está ocupado si alguna operación lo declaró como recurso
@@ -335,10 +361,17 @@ class OperationManager:
         escribiendo un archivo ahí adentro. Con esto el botón "Expulsar
         unidad" puede negarse mientras se le está copiando algo a ese
         pendrive, que era la forma más fácil de corromper el disco de un
-        cliente."""
+        cliente.
+
+        `skip_read_only` deja afuera las operaciones que solo leen (ver
+        `READ_ONLY_KINDS`). Lo usa el escaneo de restos y nadie más: para
+        expulsar una unidad, en cambio, un escaneo en curso SÍ tiene que
+        frenar -sacar el disco mientras se lo recorre rompe el escaneo."""
         target = _normalize([path])
         with self._lock:
             for op in self._active.values():
+                if skip_read_only and op.kind in READ_ONLY_KINDS:
+                    continue
                 if _resources_overlap(target, op.resources) is not None:
                     return op
                 if _touching(op.write_paths, target) is not None:
