@@ -16,7 +16,7 @@ from gi.repository import Adw, Gio, Gtk, GLib  # noqa: E402
 from .. import config, drives, formatting, gametdb, transfer_plan
 from ..game_model import Game
 from ..queue_manager import JobStatus, TransferJob, TransferQueue
-from ..i18n import _
+from ..i18n import _, ngettext
 from . import gtk_helpers
 from .game_row import build_cover_widget
 
@@ -94,13 +94,18 @@ class TransferGameRow(Adw.ActionRow):
 _JOB_APPEARANCE = {
     JobStatus.PENDING: ("content-loading-symbolic", "dim-label"),
     JobStatus.RUNNING: ("folder-download-symbolic", None),
+    JobStatus.VERIFYING: ("view-refresh-symbolic", None),
     JobStatus.DONE: ("emblem-ok-symbolic", "success"),
     JobStatus.SKIPPED: ("object-select-symbolic", "dim-label"),
     JobStatus.ERROR: ("dialog-error-symbolic", "error"),
+    # Amarillo y no rojo, y con un ícono propio: el archivo está en la
+    # unidad -no es un error de copia- pero no sirve. Que se distinga de
+    # un vistazo del rojo de ERROR es justamente el punto.
+    JobStatus.CORRUPT: ("dialog-warning-symbolic", "warning"),
     JobStatus.CANCELLED: ("process-stop-symbolic", "dim-label"),
 }
 
-_JOB_CSS_CLASSES = ("success", "error", "dim-label")
+_JOB_CSS_CLASSES = ("success", "error", "warning", "dim-label")
 
 
 class JobRow(Adw.ActionRow):
@@ -172,7 +177,8 @@ class JobRow(Adw.ActionRow):
         # La barra solo tiene sentido mientras hay algo que medir. En una
         # tarea que falló o se canceló, una barra a medio llenar es ruido:
         # lo que hay que leer ahí es el motivo, no cuánto había avanzado.
-        en_curso = job.status in (JobStatus.PENDING, JobStatus.RUNNING)
+        en_curso = job.status in (JobStatus.PENDING, JobStatus.RUNNING,
+                                  JobStatus.VERIFYING)
         self.progress.set_visible(en_curso or job.status is JobStatus.DONE)
         self.progress.set_fraction(1.0 if job.status is JobStatus.DONE
                                     else job.progress)
@@ -188,11 +194,21 @@ class JobRow(Adw.ActionRow):
             # texto importa más que el resto de la fila.
             return _("Error: {detail}").format(
                 detail=job.error_msg or _("falló la copia"))
+        if job.status is JobStatus.CORRUPT:
+            # Mismo trato que ERROR -el motivo primero y entero- porque
+            # acá también lo único que importa es qué pasó.
+            return job.error_msg or job.status.label
         if job.status is JobStatus.DONE:
-            return _("{status} · {size} en {elapsed}").format(
+            texto = _("{status} · {size} en {elapsed}").format(
                 status=job.status.label,
                 size=formatting.format_size(job.output_bytes),
                 elapsed=formatting.format_eta(job.elapsed))
+            # La nota de verificación va al final y solo si la hay: sin
+            # el switch prendido la fila se ve exactamente como antes.
+            return f"{texto} · {job.verify_note}" if job.verify_note else texto
+        if job.status is JobStatus.VERIFYING:
+            return " · ".join([job.status.label, job.speed_text]) \
+                if job.speed_text else job.status.label
         if job.status is JobStatus.RUNNING:
             partes = [job.status.label, f"{int(job.progress * 100)}%"]
             if job.speed_text:
@@ -1040,7 +1056,8 @@ class TransferView(Gtk.Box):
             # derecho desde acá.
             self.queue.add_jobs(items, dest_root, wit_binary=wit_binary,
                                 overwrite=overwrite,
-                                scrub_update=self.settings.scrub_update)
+                                scrub_update=self.settings.scrub_update,
+                                verify_after_copy=self.settings.verify_after_copy)
 
         threading.Thread(target=worker, daemon=True,
                          name="transfer-plan").start()
@@ -1135,11 +1152,16 @@ class TransferView(Gtk.Box):
             partes.append(_("{n} ya estaban en el destino").format(n=summary.skipped))
         if summary.errors:
             partes.append(_("{n} con error").format(n=summary.errors))
+        if summary.corrupt:
+            partes.append(ngettext("{n} no pasó la verificación",
+                                   "{n} no pasaron la verificación",
+                                   summary.corrupt).format(n=summary.corrupt))
         if summary.cancelled:
             partes.append(_("{n} cancelados").format(n=summary.cancelled))
         # El detalle de CADA error queda en su fila (y en el historial): acá
         # va la cuenta, y "revisá la cola" para saber dónde mirar.
-        cola = _(" · revisá la cola para ver el detalle") if summary.errors else ""
+        cola = (_(" · revisá la cola para ver el detalle")
+                if (summary.errors or summary.corrupt) else "")
         self._show_toast(_("Cola terminada: {detail}.{tail}").format(
             detail=", ".join(partes), tail=cola))
 

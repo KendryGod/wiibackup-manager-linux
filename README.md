@@ -74,6 +74,16 @@ todo lo que hizo.
   que lleva la unidad (juegos de Wii, de GameCube, apps de homebrew,
   capacidad usada/libre y formato), con el nombre del cliente y notas, para
   mandárselo por WhatsApp al entregar el equipo
+- **Verificación después de copiar** (opcional, apagada por defecto): al
+  terminar cada juego lo vuelve a leer de la unidad con `wit VERIFY` para
+  confirmar que lo que quedó escrito está bien, y no solo que la copia
+  terminó sin dar error -que es lo que se ve cuando el pendrive falla en
+  silencio. Un juego que se copia entero pero no pasa la verificación
+  queda marcado aparte de un error de copia: son dos problemas distintos,
+  y este deja un archivo que ocupa lugar y no anda en la consola. Se
+  prende en Ajustes; cuesta tiempo real (relee todo lo que acaba de
+  escribir) y solo aplica a juegos de Wii, porque `wit VERIFY` no acepta
+  imágenes de GameCube
 
 **Verificar memoria**
 

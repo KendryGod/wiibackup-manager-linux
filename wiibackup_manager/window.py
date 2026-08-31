@@ -701,6 +701,25 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         )
         self._scrub_switch_row.connect("notify::active", self._on_scrub_switch_toggled)
         group.add(self._scrub_switch_row)
+
+        # Apagado por defecto, al revés que el scrubbing: ver el comentario
+        # de `config.Settings.verify_after_copy`. El subtítulo dice el costo
+        # ANTES de que lo prendan, no después de que la primera tanda tarde
+        # el doble.
+        self._verify_switch_row = Adw.SwitchRow(
+            title=_("Verificar después de copiar"),
+            subtitle=_(
+                "Al terminar cada juego, lo vuelve a leer de la unidad con "
+                "`wit` para confirmar que lo que quedó escrito está bien, y "
+                "no solo que la copia terminó sin dar error. Encuentra el "
+                "pendrive que falla en silencio, pero relee todo lo que "
+                "acaba de escribir: la tanda puede tardar más del doble. "
+                "Solo aplica a juegos de Wii."),
+            active=self.settings.verify_after_copy,
+        )
+        self._verify_switch_row.connect("notify::active",
+                                        self._on_verify_switch_toggled)
+        group.add(self._verify_switch_row)
         general_page.add(group)
         self._ajustes_stack.add_titled_with_icon(
             general_page, "general", _("General"), "preferences-system-symbolic")
@@ -714,6 +733,14 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
     def _on_scrub_switch_toggled(self, row, _pspec):
         self.settings.scrub_update = row.get_active()
+        error = config.try_save(self.settings)
+        if error:
+            self._show_toast(
+                _("No se pudo guardar la configuración: {error}. El cambio "
+                  "vale para esta sesión.").format(error=error))
+
+    def _on_verify_switch_toggled(self, row, _pspec):
+        self.settings.verify_after_copy = row.get_active()
         error = config.try_save(self.settings)
         if error:
             self._show_toast(

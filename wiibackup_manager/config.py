@@ -88,6 +88,15 @@ class Settings:
     # no pueda actualizarse desde el propio disco. Activado por defecto
     # porque es lo que casi todo el mundo quiere en un USB Loader.
     scrub_update: bool = True
+    # Si después de copiar un juego a la unidad se lo relee con
+    # `wit VERIFY` para confirmar que lo que quedó escrito está bien, y no
+    # solo que la copia terminó sin dar error. DESACTIVADO por defecto, al
+    # revés que `scrub_update`: verificar vuelve a leer TODO lo que se
+    # acaba de escribir, así que puede más que duplicar lo que tarda una
+    # tanda. Eso tiene que ser una decisión de quien la corre, no una
+    # sorpresa -alguien que copia 40 juegos y de golpe tarda el doble sin
+    # haberlo pedido va a pensar que la app se colgó.
+    verify_after_copy: bool = False
 
     @classmethod
     def load(cls) -> "Settings":

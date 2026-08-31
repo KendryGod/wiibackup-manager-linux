@@ -53,7 +53,7 @@ from gi.repository import GLib
 
 from . import (drives, formatting, library_ops, oplog, transfer_plan,
                wit_wrapper)
-from .i18n import _
+from .i18n import _, ngettext
 from .game_model import Game
 from .transfer_plan import TransferItem
 from .operations import OperationBusy, OperationKind, OperationOutcome
@@ -68,9 +68,21 @@ class JobStatus(Enum):
 
     PENDING = "Pendiente"
     RUNNING = "Copiando"
+    # Releyendo lo que se acabó de escribir (ver `Settings.verify_after_copy`).
+    # No es final: la copia ya terminó, pero la tarea todavía no tiene
+    # veredicto.
+    VERIFYING = "Verificando"
     DONE = "Completado"
     SKIPPED = "Ya estaba en el destino"
     ERROR = "Error"
+    # El archivo se copió entero, pero al releerlo `wit` dijo que lo que
+    # quedó en la unidad está mal. Es un estado propio y no un ERROR a
+    # secas porque son dos problemas distintos y se arreglan distinto: un
+    # ERROR quiere decir que en el destino no hay nada (o quedó lo de
+    # antes), y acá hay un archivo que ocupa lugar, parece un juego y no
+    # va a andar en la consola. Contarlos juntos escondería justamente el
+    # caso que esta verificación existe para encontrar.
+    CORRUPT = "Copiado, pero no verificó"
     CANCELLED = "Cancelado"
 
     @property
@@ -86,7 +98,8 @@ class JobStatus(Enum):
 
 
 _FINAL_STATUSES = frozenset(
-    {JobStatus.DONE, JobStatus.SKIPPED, JobStatus.ERROR, JobStatus.CANCELLED}
+    {JobStatus.DONE, JobStatus.SKIPPED, JobStatus.ERROR, JobStatus.CORRUPT,
+     JobStatus.CANCELLED}
 )
 
 
@@ -129,6 +142,16 @@ class TransferJob:
     # para que cambiar el switch a mitad de una tanda no le cambie las
     # reglas a una tarea que ya está copiando.
     scrub_update: bool = True
+    # "Verificar después de copiar" de Ajustes -ver
+    # `config.Settings.verify_after_copy`-, congelado al encolar por el
+    # mismo motivo que `scrub_update`: apagar el switch a mitad de una
+    # tanda no le cambia las reglas a lo que ya está en la fila.
+    verify_after_copy: bool = False
+    # Qué pasó con la verificación, en una frase, cuando NO hubo veredicto
+    # malo: que salió bien, que no aplica, o por qué no se pudo hacer. Va
+    # aparte de `error_msg` a propósito -esto no es un error y no tiene que
+    # pintar la fila de rojo- y termina en el subtítulo y en el historial.
+    verify_note: str = ""
     # Cuánto se espera que ocupe en el destino. Si viene de
     # `transfer_plan.plan_transfer_fast` ya está medido; si no, lo mide la cola
     # justo antes de copiar (ver `_ensure_output_bytes`).
@@ -162,6 +185,11 @@ class QueueSummary:
     done: int = 0
     skipped: int = 0
     errors: int = 0
+    # Copiados enteros pero que no pasaron la verificación. Cuenta aparte
+    # de `errors` porque son el hallazgo que justifica prender el switch:
+    # sumarlos a los errores los volvería invisibles en una tanda que ya
+    # tenía fallos de copia.
+    corrupt: int = 0
     cancelled: int = 0
     # Generación de la tanda que este resumen cierra (ver
     # `TransferQueue.batch_id`). La interfaz lo compara contra el número
@@ -171,7 +199,8 @@ class QueueSummary:
 
     @property
     def total(self) -> int:
-        return self.done + self.skipped + self.errors + self.cancelled
+        return (self.done + self.skipped + self.errors + self.corrupt
+                + self.cancelled)
 
 
 # Cada cuánto, como mucho, se le avisa a la interfaz del avance de la
@@ -199,6 +228,29 @@ def _format_speed(bytes_per_second: float) -> str:
     if bytes_per_second < 1024 ** 2:
         return f"{bytes_per_second / 1024:.0f} KB/s"
     return f"{bytes_per_second / 1024 ** 2:.1f} MB/s"
+
+
+# Cuánto de la salida de `wit` se muestra cuando la verificación falla.
+# Suficiente para que se lea el motivo real, poco para que entre en el
+# subtítulo de una fila y en una línea del historial.
+_WIT_ERROR_MAX = 300
+
+
+def _wit_error_resumido(output: str) -> str:
+    """La parte útil de lo que escribió `wit` cuando VERIFY falló.
+
+    `wit` mezcla un banner de versión, la línea del archivo procesado y
+    -si hubo problema- líneas que empiezan con '!'. Esas últimas son las
+    que dicen qué pasó, así que se prefieren; si no hay ninguna (un
+    returncode distinto de cero sin explicación), se cae al final de la
+    salida, que es donde `wit` deja el resumen."""
+    lineas = [l.strip() for l in (output or "").splitlines() if l.strip()]
+    marcadas = [l for l in lineas if l.startswith("!")]
+    elegidas = marcadas or lineas[-2:]
+    texto = " ".join(elegidas).strip()
+    if not texto:
+        return _("`wit` no dio detalle")
+    return texto[:_WIT_ERROR_MAX]
 
 
 def _glib_dispatch(func: Callable, *args) -> None:
@@ -264,7 +316,8 @@ class TransferQueue:
         self._ids = itertools.count(1)
         self._worker: Optional[threading.Thread] = None
         self._stopping = False
-        self._tally = {"done": 0, "skipped": 0, "errors": 0, "cancelled": 0}
+        self._tally = {"done": 0, "skipped": 0, "errors": 0, "corrupt": 0,
+                       "cancelled": 0}
         # Número de tanda. Sube cada vez que la cola pasa de vacía a
         # activa (ver `add_jobs`), y viaja adentro del `QueueSummary` para
         # que la interfaz pueda descartar un aviso de "cola terminada"
@@ -277,7 +330,8 @@ class TransferQueue:
 
     # ------------------------------------------------------------ Encolar --
     def add_jobs(self, items, dest_root, wit_binary: str = "wit",
-                 overwrite: bool = False, scrub_update: bool = True) -> list[TransferJob]:
+                 overwrite: bool = False, scrub_update: bool = True,
+                 verify_after_copy: bool = False) -> list[TransferJob]:
         """Encola juegos hacia `dest_root` y devuelve las tareas creadas.
 
         `items` puede ser una lista de `Game` o de `transfer_plan.TransferItem`.
@@ -302,6 +356,7 @@ class TransferQueue:
                 id=next(self._ids), game=game, dest_root=dest_root,
                 wit_binary=wit_binary, overwrite=overwrite,
                 output_bytes=output_bytes, scrub_update=scrub_update,
+                verify_after_copy=verify_after_copy,
             )
             nuevos.append(job)
 
@@ -536,6 +591,7 @@ class TransferQueue:
         resumen = QueueSummary(done=self._tally["done"],
                                skipped=self._tally["skipped"],
                                errors=self._tally["errors"],
+                               corrupt=self._tally["corrupt"],
                                cancelled=self._tally["cancelled"],
                                batch_id=self._batch_id)
         for clave in self._tally:
@@ -645,7 +701,7 @@ class TransferQueue:
             self._report_progress(job, escritos, ahora)
 
         try:
-            library_ops.send_to_wbfs_drive(
+            dest = library_ops.send_to_wbfs_drive(
                 job.game, job.dest_root, job.wit_binary,
                 bytes_progress_cb=on_bytes,
                 overwrite=job.overwrite,
@@ -692,6 +748,95 @@ class TransferQueue:
                                  oplog.STATUS_ERROR, op=op)
             return
 
+        if not job.verify_after_copy:
+            self._finish_job(job, JobStatus.DONE, "", oplog.STATUS_OK, op=op)
+            return
+        self._verify_copy(job, dest, op)
+
+    def _verify_copy(self, job: TransferJob, dest: Path, op) -> None:
+        """Relee lo que se acabó de escribir y cierra la tarea con lo que
+        diga `wit`.
+
+        Corre DENTRO de la operación de transferencia que ya está
+        declarada (`op`), no como una operación nueva: es el último paso
+        de copiar este juego, no otra cosa que le pase a la unidad. Si
+        fuera una operación aparte tendría que soltar y volver a pedir la
+        unidad, y en ese hueco otra tarea podría meterse a escribir sobre
+        el archivo que estamos por revisar.
+
+        Sale SIEMPRE por `_finish_job`: acá ya hay un archivo escrito en
+        la unidad del cliente, así que ninguna rama puede terminar sin
+        dejar dicho qué se sabe de él."""
+        if job.game.console == "gc":
+            # Comprobado contra `wit` v3.05a: VERIFY contesta
+            # `WRONG FILE TYPE ... Wii ISO image expected` y sale con 4
+            # ante una imagen de GameCube. Correrlo igual marcaría como
+            # corrupto TODO juego de GameCube copiado, que es peor que no
+            # verificar: la única lectura honesta es decir que acá no hay
+            # nada que verificar.
+            job.verify_note = _("sin verificar: `wit VERIFY` solo acepta "
+                                "imágenes de Wii")
+            self._finish_job(job, JobStatus.DONE, "", oplog.STATUS_OK, op=op)
+            return
+
+        partes = len(transfer_plan.wbfs_group(dest)) or 1
+        self._update(job, status=JobStatus.VERIFYING, progress=0.99,
+                     speed_text=_("Releyendo lo copiado…"))
+        try:
+            # Se le pasa `dest`, la PRIMERA parte, y no cada `.wbfN` por
+            # separado: `wit` sigue solo la cadena de continuación, y las
+            # partes sueltas no son imágenes válidas (pasarlas daría un
+            # WRONG FILE TYPE por cada una). Ver `wit_wrapper.verify_result`,
+            # donde está comprobado que si falta una parte NO da un falso
+            # positivo sino un error de lectura.
+            #
+            # Timeout: el general de `wit` (30 min), que es el que
+            # corresponde a VERIFY -releer un dual-layer entero tarda de
+            # verdad, y no hay progreso que medir para poder usar un
+            # límite por inactividad.
+            resultado = wit_wrapper.verify_result(
+                dest, job.wit_binary, cancel=job.cancel_token)
+        except wit_wrapper.OperationCancelled:
+            # La copia YA había terminado bien cuando se canceló. Marcar
+            # la tarea como cancelada sería mentir sobre el archivo, que
+            # está entero en la unidad; lo que se canceló es la relectura.
+            job.verify_note = _("verificación cancelada")
+            self._finish_job(job, JobStatus.DONE, "", oplog.STATUS_PARTIAL, op=op)
+            return
+        except wit_wrapper.WitNotFoundError:
+            job.verify_note = _("no se pudo verificar: no se encontró `wit`")
+            self._finish_job(job, JobStatus.DONE, "", oplog.STATUS_PARTIAL, op=op)
+            return
+        except Exception as e:  # noqa: BLE001
+            # Cualquier cosa que salga mal RELEYENDO no convierte en
+            # inservible al archivo que ya se escribió. Se anota y se
+            # sigue: "no sé" no es "está mal".
+            job.verify_note = _("no se pudo verificar: {detail}").format(detail=e)
+            self._finish_job(job, JobStatus.DONE, "", oplog.STATUS_PARTIAL, op=op)
+            return
+
+        if resultado.timed_out:
+            job.verify_note = _("la verificación no terminó a tiempo: el "
+                                "archivo quedó sin comprobar")
+            self._finish_job(job, JobStatus.DONE, "", oplog.STATUS_PARTIAL, op=op)
+            return
+
+        if not resultado.ok:
+            self._finish_job(
+                job, JobStatus.CORRUPT,
+                _("Se copió entero, pero al releerlo no pasó la "
+                  "verificación: {detail}").format(
+                      detail=_wit_error_resumido(resultado.output)),
+                oplog.STATUS_PARTIAL, op=op)
+            return
+
+        # Cuántos archivos se releyeron, dicho explícitamente: en un WBFS
+        # dividido es la única forma de que quien lee el historial sepa
+        # que se comprobó el conjunto y no solo la primera parte.
+        job.verify_note = (
+            ngettext("verificado ({n} archivo)", "verificado ({n} archivos)",
+                     partes).format(n=partes)
+            if partes > 1 else _("verificado"))
         self._finish_job(job, JobStatus.DONE, "", oplog.STATUS_OK, op=op)
 
     def _ensure_output_bytes(self, job: TransferJob, op=None) -> bool:
@@ -739,9 +884,15 @@ class TransferQueue:
         y avisa. Un solo camino de salida para que ninguna rama se olvide
         de cerrar la operación o de contar el resultado."""
         if op is not None and log_status is not None:
+            detalle = error_msg or status.value
+            # La nota de verificación se suma al detalle en vez de
+            # reemplazarlo: en el historial hay que poder leer las dos
+            # cosas, qué pasó con la copia y qué pasó con la relectura.
+            if job.verify_note:
+                detalle = f"{detalle} · {job.verify_note}"
             self.ops.finish(op, OperationOutcome(
                 status=log_status, target=job.game.title,
-                detail=(error_msg or status.value)))
+                detail=detalle))
         elif op is not None:
             self.ops.finish(op)
 
@@ -752,6 +903,8 @@ class TransferQueue:
                 self._tally["skipped"] += 1
             elif status is JobStatus.ERROR:
                 self._tally["errors"] += 1
+            elif status is JobStatus.CORRUPT:
+                self._tally["corrupt"] += 1
             elif status is JobStatus.CANCELLED:
                 self._tally["cancelled"] += 1
 

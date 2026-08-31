@@ -207,6 +207,14 @@ _SPLIT_SIZE_ARG = f"{FAT32_SPLIT_SIZE_BYTES}c"
 # absoluto, generoso, como única red de seguridad.
 DEFAULT_WIT_TIMEOUT = 1800.0
 
+# Con qué returncode vuelve una corrida que se pasó del timeout. No es un
+# código que devuelva `wit`: lo pone `_timeout_result` para que quien
+# llama pueda distinguir "no terminó a tiempo" de "terminó y dijo que
+# está mal", que son dos cosas muy distintas cuando lo que se está
+# preguntando es si un archivo quedó bien copiado. El 124 es el que usa
+# `timeout(1)` para lo mismo.
+TIMEOUT_RETURNCODE = 124
+
 # Para copiar/convertir sí podemos medir el progreso real (cuánto creció
 # el archivo temporal, ver `estimate_bytes_written`), así que el límite es
 # POR INACTIVIDAD, no absoluto: se reinicia cada vez que el destino crece.
@@ -275,7 +283,7 @@ def _timeout_result(
     excepciones alrededor de la llamada."""
     return subprocess.CompletedProcess(
         args=args,
-        returncode=1,
+        returncode=TIMEOUT_RETURNCODE,
         stdout=exc.stdout or "",
         stderr=(exc.stderr or "")
         + "\n" + _("`wit` no respondió en {seconds:.0f}s: se lo dio por colgado "
@@ -699,11 +707,42 @@ def _run_cancellable(
     )
 
 
-def verify(
+@dataclass(frozen=True)
+class VerifyResult:
+    """Cómo salió un `wit VERIFY`, con el detalle que hace falta para
+    decidir qué decirle al usuario.
+
+    `ok` a secas no alcanza cuando lo que se está preguntando es si un
+    archivo recién copiado quedó bien: "`wit` dice que la imagen está
+    mal" y "`wit` no llegó a terminar de mirarla" son dos respuestas
+    distintas, y tratarlas igual sería acusar de corrupto a un archivo
+    que quizás está perfecto. Por eso `timed_out` viene aparte y no
+    escondido adentro de `ok=False`."""
+
+    ok: bool
+    timed_out: bool
+    output: str
+
+
+def verify_result(
     path: Path, binary: str = "wit", timeout: Optional[float] = DEFAULT_WIT_TIMEOUT,
     cancel: Optional[CancellationToken] = None,
-) -> tuple[bool, str]:
+) -> VerifyResult:
     """Verifica la integridad de una imagen con `wit VERIFY`.
+
+    OJO -comprobado contra `wit` v3.05a, no deducido-: **VERIFY es solo
+    para imágenes de Wii**. Con una de GameCube contesta
+    `ERROR #30 [WRONG FILE TYPE] ... Wii ISO image expected` y sale con
+    returncode 4, o sea que se vería igual que "este archivo está
+    corrupto". Quien llame tiene que filtrar GameCube ANTES; acá no se
+    adivina la consola a partir de la ruta.
+
+    Para un WBFS dividido alcanza con pasar la PRIMERA parte (`.wbfs`):
+    `wit` sigue solo la cadena `.wbf1`, `.wbf2`… Comprobado partiendo un
+    WBFS válido a mano: con la continuación al lado da returncode 0, y
+    con el mismo contenido pero sin ella sale con returncode 47
+    (`READ FILE FAILED`). O sea que verificar la primera parte NO es un
+    falso positivo: si falta una pieza, se entera.
 
     `cancel`, si se pasa, permite matar el `wit` en curso desde el hilo de
     GTK: en ese caso levanta `OperationCancelled` en vez de devolver un
@@ -712,9 +751,24 @@ def verify(
         raise WitNotFoundError(binary)
     result = _run_cancellable(binary, "VERIFY", "--long", str(path),
                                timeout=timeout, cancel=cancel)
-    ok = result.returncode == 0
-    output = (result.stdout + result.stderr).strip()
-    return ok, output
+    return VerifyResult(
+        ok=result.returncode == 0,
+        timed_out=result.returncode == TIMEOUT_RETURNCODE,
+        output=(result.stdout + result.stderr).strip(),
+    )
+
+
+def verify(
+    path: Path, binary: str = "wit", timeout: Optional[float] = DEFAULT_WIT_TIMEOUT,
+    cancel: Optional[CancellationToken] = None,
+) -> tuple[bool, str]:
+    """`verify_result` para quien solo necesita el sí/no y el texto.
+
+    Es lo que usa la Biblioteca para "Verificar integridad", donde un
+    timeout y una imagen mala se muestran igual (un toast con el motivo).
+    La cola de transferencias usa `verify_result`, que sí los distingue."""
+    result = verify_result(path, binary, timeout=timeout, cancel=cancel)
+    return result.ok, result.output
 
 
 _ISOSIZE_LINE_RE = re.compile(r"^\s*(\d+)\s+(\d+)\s+\S")
