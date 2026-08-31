@@ -126,6 +126,71 @@ def test_la_ventana_se_arma_y_se_muestra(gtk, tmp_path, monkeypatch):
                                               "fabrica", "tienda", "ajustes"]
 
 
+def _importar_todo_el_paquete():
+    """Importa TODOS los módulos de `wiibackup_manager`.
+
+    Se llama antes de tocar las traducciones, y es la mitad menos obvia
+    del aislamiento: ver `_poner_el_catalogo_en_ingles`."""
+    import importlib
+    import pkgutil
+
+    import wiibackup_manager as paquete
+
+    for info in pkgutil.walk_packages(paquete.__path__, paquete.__name__ + "."):
+        importlib.import_module(info.name)
+
+
+def _poner_el_catalogo_en_ingles(monkeypatch, en):
+    """Deja toda la app hablando inglés, y -lo que de verdad cuesta- hace
+    que vuelva al español cuando el test termina.
+
+    Casi todos los módulos hacen `from .i18n import _`, así que se llevan
+    una REFERENCIA a la función, no una vista de `i18n._`. Parchear
+    `i18n._` no los alcanza: hay que parchear cada módulo por separado.
+    Eso ya se hacía, pero con una lista escrita a mano de cuatro módulos,
+    y había dos agujeros.
+
+    El primero, obvio: la lista se quedó vieja. `recovery_dialog` nunca
+    estuvo, y es el que `window` importa para el resumen de restos.
+
+    El segundo, el que hacía que el fallo fuera intermitente y difícil de
+    ver: **el orden**. Un módulo que se importa por PRIMERA vez con el
+    parche ya puesto ejecuta su `from .i18n import _` y se lleva el `_` en
+    inglés. `monkeypatch` recién ahí anota "el valor original", que ya es
+    el inglés, y al terminar el test lo "restaura"... al inglés. El módulo
+    se queda traducido para siempre, y el próximo test que mire una cadena
+    en español falla -o no, según en qué orden haya salido la suite.
+
+    Por eso acá se hacen dos cosas, y las dos hacen falta:
+
+    1. Importar el paquete entero ANTES de parchear nada, así ningún
+       módulo puede capturar la versión en inglés.
+    2. Descubrir a quién parchear en vez de mantener una lista: cualquier
+       módulo ya cargado cuyo `_` (o `ngettext`) sea el de `i18n`. Un
+       módulo nuevo con el mismo patrón queda cubierto solo, sin que nadie
+       se acuerde de anotarlo acá.
+
+    El arreglo de fondo es que los módulos usen `from . import i18n` y
+    llamen `i18n._(...)`, que no se puede capturar por valor. Eso es una
+    refactorización de todo el proyecto y no de este archivo.
+    """
+    import sys
+
+    from wiibackup_manager import i18n
+
+    _importar_todo_el_paquete()
+
+    gettext_original = i18n._
+    ngettext_original = i18n.ngettext
+    for nombre, modulo in sorted(sys.modules.items()):
+        if not nombre.startswith("wiibackup_manager"):
+            continue
+        if getattr(modulo, "_", None) is gettext_original:
+            monkeypatch.setattr(modulo, "_", en.gettext)
+        if getattr(modulo, "ngettext", None) is ngettext_original:
+            monkeypatch.setattr(modulo, "ngettext", en.ngettext)
+
+
 def test_la_ventana_tambien_arranca_en_ingles(gtk, tmp_path, monkeypatch):
     """El mismo arranque con el catálogo inglés cargado: comprueba que
     ninguna cadena traducida rompe la construcción de la interfaz."""
@@ -134,19 +199,16 @@ def test_la_ventana_tambien_arranca_en_ingles(gtk, tmp_path, monkeypatch):
 
     from gi.repository import Adw, GLib
 
-    from wiibackup_manager import config, i18n, oscwii_client
+    from wiibackup_manager import config, oscwii_client
     from wiibackup_manager.styles import load_css
 
     locale_dir = Path(__file__).resolve().parent.parent / "data" / "locale"
     en = gettext.translation("wiibackup-manager", str(locale_dir), languages=["en"])
-    monkeypatch.setattr(i18n, "_", en.gettext)
+    # Todo el aislamiento del catálogo vive acá adentro: por qué no alcanza
+    # con parchear `i18n._`, y por qué el orden de los imports importa.
+    _poner_el_catalogo_en_ingles(monkeypatch, en)
 
-    # window.py importó `_` por valor, así que se parchea también ahí y en
-    # los widgets que lo usan al construir la interfaz.
     from wiibackup_manager import window as window_mod
-    from wiibackup_manager.widgets import homebrew_store_view, log_view, transfer_view
-    for mod in (window_mod, homebrew_store_view, log_view, transfer_view):
-        monkeypatch.setattr(mod, "_", en.gettext)
 
     biblioteca = tmp_path / "biblioteca"
     biblioteca.mkdir()

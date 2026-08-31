@@ -68,3 +68,40 @@ def iso_bytes():
         buf[0x20:0x20 + len(title)] = title
         return bytes(buf)
     return _make
+
+
+@pytest.fixture(autouse=True)
+def sin_traducciones_pegadas():
+    """Que ningún test deje un módulo hablando en otro idioma.
+
+    Casi todos los módulos hacen `from .i18n import _`, o sea que se
+    quedan con una REFERENCIA a la función de traducción. Un test que
+    parchea el catálogo (hoy solo `test_smoke_gui`, al arrancar la app en
+    inglés) tiene que devolver esa referencia a su lugar en CADA módulo
+    que se la llevó, y es fácil que se le escape uno: la lista se queda
+    vieja, o un módulo se importa por primera vez con el parche ya puesto
+    y `monkeypatch` termina "restaurándolo" al inglés.
+
+    El síntoma es horrible de diagnosticar: otro test, en otro archivo,
+    falla comparando un texto en español, y solo cuando la suite sale en
+    cierto orden. Este chequeo lo convierte en un fallo inmediato que
+    además dice qué módulo quedó pegado y quién lo dejó así.
+
+    Corre después de CADA test porque el culpable es el test anterior, no
+    el que falla. Cuesta recorrer unos 40 módulos: nada, comparado con la
+    tarde que se pierde persiguiendo el fallo intermitente."""
+    yield
+    import sys
+
+    from wiibackup_manager import i18n
+
+    pegados = sorted(
+        nombre for nombre, modulo in sys.modules.items()
+        if nombre.startswith("wiibackup_manager")
+        and getattr(modulo, "_", None) is not None
+        and getattr(modulo, "_") is not i18n._
+    )
+    assert not pegados, (
+        "estos módulos quedaron con una traducción pegada después del test: "
+        + ", ".join(pegados)
+        + " -- ver `_poner_el_catalogo_en_ingles` en tests/test_smoke_gui.py")
