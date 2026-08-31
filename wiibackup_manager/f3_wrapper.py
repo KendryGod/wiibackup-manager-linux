@@ -135,6 +135,11 @@ class CheckResult:
 
     ok: bool
     cancelled: bool = False
+    # La memoria desapareció a mitad de la prueba. Va aparte de
+    # `error` -que igual se llena, con la frase para el usuario- para
+    # que la interfaz y el historial puedan tratarlo distinto: acá no
+    # hay veredicto sobre la memoria, no es que la memoria falló.
+    disconnected: bool = False
     # Espacio libre que había al empezar: lo que la memoria DICE tener
     # disponible, y por lo tanto lo que se le puso a prueba.
     announced_bytes: int = 0

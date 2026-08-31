@@ -390,7 +390,19 @@ class MemoryCheckView(Gtk.Box):
             except f3_wrapper.F3NotFoundError as e:
                 result = f3_wrapper.CheckResult(ok=False, error=str(e))
             except Exception as e:  # noqa: BLE001
-                result = f3_wrapper.CheckResult(ok=False, error=str(e))
+                if drives.device_is_gone(mount_point=mount_point,
+                                         known_dir=mount_point, exc=e):
+                    # Sacar la memoria a mitad de la prueba es de lo más
+                    # fácil que puede pasar acá: `f3` la está llenando y
+                    # tarda horas. No es un fallo de la memoria -no hay
+                    # veredicto- y decir "no se pudo completar la
+                    # verificación" a secas invita a desconfiar del
+                    # pendrive cuando el problema fue el cable.
+                    result = f3_wrapper.CheckResult(
+                        ok=False, disconnected=True,
+                        error=drives.disconnected_message())
+                else:
+                    result = f3_wrapper.CheckResult(ok=False, error=str(e))
             self.ops.finish(op, self._outcome_for(unidad, result))
             GLib.idle_add(self._on_check_done, unidad, result)
 
@@ -404,6 +416,9 @@ class MemoryCheckView(Gtk.Box):
         encontrar en el historial tres semanas después."""
         if result.cancelled:
             return OperationOutcome(oplog.STATUS_CANCELLED, unidad.name)
+        if result.disconnected:
+            return OperationOutcome(oplog.STATUS_DISCONNECTED, unidad.name,
+                                    result.error)
         if result.error:
             return OperationOutcome(oplog.STATUS_ERROR, unidad.name, result.error)
         if result.ok:
@@ -486,6 +501,17 @@ class MemoryCheckView(Gtk.Box):
         camino."""
         self._result_group.set_visible(True)
         self._format_group.set_visible(False)
+
+        if result.disconnected:
+            # Título propio y en amarillo: no hay veredicto sobre la
+            # memoria, así que "No se pudo completar la verificación" con
+            # un ícono de error la deja bajo sospecha sin motivo.
+            self._set_result_row("drive-removable-media-symbolic", "warning",
+                                 _("Se desconectó la memoria"),
+                                 _("{detail} Volvé a conectarla y empezá la "
+                                   "verificación de nuevo.").format(
+                                       detail=result.error))
+            return
 
         if result.error:
             self._set_result_row("dialog-error-symbolic", "error",

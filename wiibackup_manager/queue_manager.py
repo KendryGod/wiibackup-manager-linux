@@ -85,6 +85,13 @@ class JobStatus(Enum):
     # va a andar en la consola. Contarlos juntos escondería justamente el
     # caso que esta verificación existe para encontrar.
     CORRUPT = N_("Copiado, pero no verificó")
+    # Se desconectó la unidad a mitad de la copia. No es un ERROR
+    # común: no hay nada roto que arreglar ni un archivo que revisar,
+    # y la acción que corresponde es otra -volver a enchufar y repetir-.
+    # Aparte, en una tanda de 40 juegos, un cable flojo produce 30
+    # fallos idénticos: verlos como "Error" invita a buscar 30
+    # problemas donde hay uno.
+    DEVICE_DISCONNECTED = N_("Unidad desconectada")
     CANCELLED = N_("Cancelado")
 
     @property
@@ -101,7 +108,7 @@ class JobStatus(Enum):
 
 _FINAL_STATUSES = frozenset(
     {JobStatus.DONE, JobStatus.SKIPPED, JobStatus.ERROR, JobStatus.CORRUPT,
-     JobStatus.CANCELLED}
+     JobStatus.DEVICE_DISCONNECTED, JobStatus.CANCELLED}
 )
 
 
@@ -192,6 +199,10 @@ class QueueSummary:
     # sumarlos a los errores los volvería invisibles en una tanda que ya
     # tenía fallos de copia.
     corrupt: int = 0
+    # Los que se cortaron porque desapareció la unidad. Aparte de
+    # `errors` por lo mismo que el estado: son un solo problema
+    # repetido, y el aviso final tiene que poder decirlo así.
+    disconnected: int = 0
     cancelled: int = 0
     # Generación de la tanda que este resumen cierra (ver
     # `TransferQueue.batch_id`). La interfaz lo compara contra el número
@@ -202,7 +213,7 @@ class QueueSummary:
     @property
     def total(self) -> int:
         return (self.done + self.skipped + self.errors + self.corrupt
-                + self.cancelled)
+                + self.disconnected + self.cancelled)
 
 
 # Cada cuánto, como mucho, se le avisa a la interfaz del avance de la
@@ -319,7 +330,7 @@ class TransferQueue:
         self._worker: Optional[threading.Thread] = None
         self._stopping = False
         self._tally = {"done": 0, "skipped": 0, "errors": 0, "corrupt": 0,
-                       "cancelled": 0}
+                       "disconnected": 0, "cancelled": 0}
         # Número de tanda. Sube cada vez que la cola pasa de vacía a
         # activa (ver `add_jobs`), y viaja adentro del `QueueSummary` para
         # que la interfaz pueda descartar un aviso de "cola terminada"
@@ -594,6 +605,7 @@ class TransferQueue:
                                skipped=self._tally["skipped"],
                                errors=self._tally["errors"],
                                corrupt=self._tally["corrupt"],
+                               disconnected=self._tally["disconnected"],
                                cancelled=self._tally["cancelled"],
                                batch_id=self._batch_id)
         for clave in self._tally:
@@ -702,6 +714,12 @@ class TransferQueue:
             ultimo[0] = ahora
             self._report_progress(job, escritos, ahora)
 
+        # Foto ANTES de escribir: `dest_root` puede ser el punto de montaje
+        # (una unidad elegida de la lista) o una carpeta adentro (un
+        # destino guardado). Solo en el primer caso "ya no es un punto de
+        # montaje" significa algo; ver `drives.device_is_gone`.
+        raiz_era_montaje = drives.is_mount_point(job.dest_root)
+
         try:
             dest = library_ops.send_to_wbfs_drive(
                 job.game, job.dest_root, job.wit_binary,
@@ -745,6 +763,12 @@ class TransferQueue:
                 # cancelar, no un problema de la copia.
                 self._finish_job(job, JobStatus.CANCELLED, "",
                                  oplog.STATUS_CANCELLED, op=op)
+            elif drives.device_is_gone(
+                    mount_point=job.dest_root if raiz_era_montaje else None,
+                    known_dir=job.dest_root, exc=e):
+                self._finish_job(job, JobStatus.DEVICE_DISCONNECTED,
+                                 drives.disconnected_message(),
+                                 oplog.STATUS_DISCONNECTED, op=op)
             else:
                 self._finish_job(job, JobStatus.ERROR, str(e),
                                  oplog.STATUS_ERROR, op=op)
@@ -907,6 +931,8 @@ class TransferQueue:
                 self._tally["errors"] += 1
             elif status is JobStatus.CORRUPT:
                 self._tally["corrupt"] += 1
+            elif status is JobStatus.DEVICE_DISCONNECTED:
+                self._tally["disconnected"] += 1
             elif status is JobStatus.CANCELLED:
                 self._tally["cancelled"] += 1
 

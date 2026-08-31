@@ -60,6 +60,7 @@ le está escribiendo algo, y viceversa -sin esto, nada impedía lanzar
 """
 from __future__ import annotations
 
+import errno
 import os
 import re
 import shutil
@@ -68,6 +69,8 @@ import time
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
+
+from .i18n import _
 
 MOUNT_ROOTS = ("/run/media", "/media")
 
@@ -134,6 +137,112 @@ def is_mount_point(path: Path) -> bool:
         return os.path.ismount(path)
     except OSError:
         return False
+
+
+# ------------------------------------- ¿Se desconectó el dispositivo? --
+#
+# Cuando alguien tira del cable a mitad de una copia, lo que llega al
+# código de arriba es ruido: un OSError con un errno cualquiera, o -si el
+# trabajo lo hacía `wit` o `f3`- ni siquiera eso, sino un proceso que
+# salió con un código raro y un texto en inglés. Mostrarlo tal cual deja
+# al usuario con "Errno 5 Input/output error" en pantalla, que no le dice
+# ni qué pasó ni qué hacer.
+#
+# No hay UNA señal confiable, así que se miran tres, de la más específica
+# a la más general. Alcanza con que una diga que sí.
+
+# 1. Errno que significan "el dispositivo no está", sin ambigüedad.
+_ERRNOS_SIN_DISPOSITIVO = frozenset({
+    errno.ENODEV,     # No such device
+    errno.ENXIO,      # No such device or address
+    errno.ESHUTDOWN,  # Cannot send after transport endpoint shutdown
+    errno.EREMOTEIO,  # Remote I/O error
+    errno.ESTALE,     # Stale file handle: el montaje quedó colgado
+})
+
+# EIO (5) y EROFS (30) quedan AFUERA a propósito, aunque sean los que más
+# se ven al tirar del cable. Los dos salen también de un disco que sigue
+# enchufado y anda mal -sectores ilegibles, o el kernel remontando en solo
+# lectura después de errores-, y decirle a alguien "la unidad fue
+# desconectada" cuando en realidad se le está muriendo el pendrive lo
+# manda a buscar el problema al lado equivocado. Cuando además el cable no
+# está, los otros dos chequeos lo detectan igual.
+
+
+def _errno_de(exc) -> int | None:
+    """El errno de `exc`, mirando también la excepción que la causó.
+
+    `wit_wrapper` y compañía envuelven el OSError original en un
+    RuntimeError con más contexto, y ahí el número queda en `__cause__`."""
+    for candidata in (exc, getattr(exc, "__cause__", None),
+                      getattr(exc, "__context__", None)):
+        numero = getattr(candidata, "errno", None)
+        if isinstance(numero, int):
+            return numero
+    return None
+
+
+def _responde(path) -> bool:
+    """Si todavía se puede preguntar por `path` sin que el kernel se
+    queje. Cualquier OSError cuenta como que no."""
+    try:
+        os.stat(path)
+        return True
+    except OSError:
+        return False
+
+
+def disconnected_message() -> str:
+    """La frase que ve el usuario cuando se detecta una desconexión.
+
+    Vive acá y no en cada pantalla para que la cola, la conversión,
+    Verificar Memoria y la instalación de Homebrew digan exactamente lo
+    mismo: es la misma situación, y cuatro redacciones parecidas se leen
+    como cuatro problemas distintos."""
+    return _("La unidad USB fue desconectada durante la operación.")
+
+
+def device_is_gone(*, mount_point=None, known_dir=None, exc=None) -> bool:
+    """Si lo que falló es consistente con "el dispositivo ya no está".
+
+    Se le pasa lo que se tenga a mano, y con cualquiera alcanza:
+
+    - `exc`: la excepción que cortó la operación (chequeo 1, los errno).
+    - `mount_point`: una ruta que ERA un punto de montaje cuando la
+      operación empezó. Chequeo 2, y el más confiable de los tres: si dejó
+      de serlo, el sistema de archivos se fue. Cubre el caso que el
+      chequeo 3 no ve -un `/mnt/usb` creado a mano sigue existiendo como
+      carpeta vacía después de desmontarse.
+
+      OJO: el "ERA" no es un detalle. Muchos destinos NUNCA son puntos de
+      montaje -un destino guardado suele ser una carpeta adentro de la
+      unidad-, y pasar uno de esos acá haría que este chequeo diera que sí
+      siempre, convirtiendo cualquier error ("no hay espacio") en una
+      desconexión inventada. Quien llama tiene que sacarle la foto con
+      `is_mount_point` ANTES de empezar y pasar la ruta solo si dio True.
+    - `known_dir`: una carpeta que EXISTÍA cuando la operación empezó
+      -típicamente la carpeta de destino-. Chequeo 3: si dejó de
+      responder, el dispositivo se fue.
+
+      Tiene que ser una carpeta que estaba, y no el archivo que se estaba
+      escribiendo: ese puede no existir todavía porque justamente se lo
+      estaba creando, y su ausencia no prueba nada. Pasar un archivo acá
+      convierte cualquier fallo temprano en una desconexión inventada.
+
+    Sin nada de esto que dé positivo devuelve False, que es lo correcto:
+    ante la duda, un error es un error común y se muestra tal cual. Este
+    estado tiene que ser una respuesta a evidencia, no una excusa para
+    todo lo que no se entiende."""
+    if _errno_de(exc) in _ERRNOS_SIN_DISPOSITIVO:
+        return True
+
+    if mount_point is not None and not is_mount_point(mount_point):
+        return True
+
+    if known_dir is not None and not _responde(known_dir):
+        return True
+
+    return False
 
 
 def _block_device_for(path: Path) -> str | None:

@@ -2512,6 +2512,10 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             total_bytes = max(
                 transfer_plan.estimate_output_size(game, target_ext, self.settings.wit_binary), 1)
             detail = ""
+            # Se desconectó la unidad donde vive la biblioteca. No es `ok`
+            # ni `cancelled`, y en el historial no va como error: no falló
+            # la conversión, desapareció el disco.
+            disconnected = False
             try:
                 # El destino puede existir (el usuario confirmó pisarlo):
                 # se lo aparta y se lo devuelve si la conversión no
@@ -2563,6 +2567,14 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                     cancelled = True
                     detail = "cancelada por el usuario"
                     msg = f"Conversión de '{game.title}' cancelada."
+                elif drives.device_is_gone(known_dir=dest.parent, exc=e):
+                    # La biblioteca puede estar en un USB: convertir ahí y
+                    # que se desconecte a mitad da un error de I/O crudo
+                    # que no dice nada. (Si la biblioteca está en el disco
+                    # interno esto no se cumple nunca, que es lo correcto.)
+                    disconnected = True
+                    msg = drives.disconnected_message()
+                    detail = msg
                 else:
                     ok, msg = False, f"Error al convertir: {e}"
                     detail = str(e)
@@ -2571,6 +2583,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 # chocaría con esta misma operación y quedaría postergado.
                 GLib.idle_add(self.ops.finish, op, OperationOutcome(
                     status=(oplog.STATUS_CANCELLED if cancelled
+                            else oplog.STATUS_DISCONNECTED if disconnected
                             else oplog.STATUS_OK if ok else oplog.STATUS_ERROR),
                     target=game.title,
                     detail=detail,

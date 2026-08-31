@@ -34,6 +34,12 @@ STATUS_OK = "ok"
 STATUS_ERROR = "error"
 STATUS_PARTIAL = "partial"
 STATUS_CANCELLED = "cancelled"
+# La operación no falló por lo que hacía: le sacaron el dispositivo de
+# abajo. Se distingue de STATUS_ERROR porque no hay nada que arreglar
+# en la app ni en el archivo -hay que volver a enchufar y repetir- y
+# porque en una tanda larga conviene poder ver de un vistazo que los
+# diez fallos seguidos fueron todos el mismo cable flojo.
+STATUS_DISCONNECTED = "disconnected"
 
 # La clave (STATUS_OK = "ok", …) es lo que se guarda en history.json y no
 # se traduce nunca: cambiar de idioma no puede volver ilegible un historial
@@ -43,6 +49,7 @@ STATUS_LABELS = {
     STATUS_ERROR: _("Con error"),
     STATUS_PARTIAL: _("Terminada con errores"),
     STATUS_CANCELLED: _("Cancelada"),
+    STATUS_DISCONNECTED: _("Unidad desconectada"),
 }
 
 _VALID_STATUSES = frozenset(STATUS_LABELS)

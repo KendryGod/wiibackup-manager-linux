@@ -25,6 +25,8 @@ _STATUS_ICONS = {
     oplog.STATUS_ERROR: ("dialog-error-symbolic", "error"),
     oplog.STATUS_PARTIAL: ("dialog-warning-symbolic", "warning"),
     oplog.STATUS_CANCELLED: ("process-stop-symbolic", "dim-label"),
+    # Amarillo, no rojo: no se rompió nada, se fue el cable.
+    oplog.STATUS_DISCONNECTED: ("drive-removable-media-symbolic", "warning"),
 }
 
 

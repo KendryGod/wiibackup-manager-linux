@@ -1001,6 +1001,7 @@ le está escribiendo algo, y viceversa -sin esto, nada impedía lanzar
 """
 from __future__ import annotations
 
+import errno
 import os
 import re
 import shutil
@@ -1009,6 +1010,8 @@ import time
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
+
+from .i18n import _
 
 MOUNT_ROOTS = ("/run/media", "/media")
 
@@ -1075,6 +1078,112 @@ def is_mount_point(path: Path) -> bool:
         return os.path.ismount(path)
     except OSError:
         return False
+
+
+# ------------------------------------- ¿Se desconectó el dispositivo? --
+#
+# Cuando alguien tira del cable a mitad de una copia, lo que llega al
+# código de arriba es ruido: un OSError con un errno cualquiera, o -si el
+# trabajo lo hacía `wit` o `f3`- ni siquiera eso, sino un proceso que
+# salió con un código raro y un texto en inglés. Mostrarlo tal cual deja
+# al usuario con "Errno 5 Input/output error" en pantalla, que no le dice
+# ni qué pasó ni qué hacer.
+#
+# No hay UNA señal confiable, así que se miran tres, de la más específica
+# a la más general. Alcanza con que una diga que sí.
+
+# 1. Errno que significan "el dispositivo no está", sin ambigüedad.
+_ERRNOS_SIN_DISPOSITIVO = frozenset({
+    errno.ENODEV,     # No such device
+    errno.ENXIO,      # No such device or address
+    errno.ESHUTDOWN,  # Cannot send after transport endpoint shutdown
+    errno.EREMOTEIO,  # Remote I/O error
+    errno.ESTALE,     # Stale file handle: el montaje quedó colgado
+})
+
+# EIO (5) y EROFS (30) quedan AFUERA a propósito, aunque sean los que más
+# se ven al tirar del cable. Los dos salen también de un disco que sigue
+# enchufado y anda mal -sectores ilegibles, o el kernel remontando en solo
+# lectura después de errores-, y decirle a alguien "la unidad fue
+# desconectada" cuando en realidad se le está muriendo el pendrive lo
+# manda a buscar el problema al lado equivocado. Cuando además el cable no
+# está, los otros dos chequeos lo detectan igual.
+
+
+def _errno_de(exc) -> int | None:
+    """El errno de `exc`, mirando también la excepción que la causó.
+
+    `wit_wrapper` y compañía envuelven el OSError original en un
+    RuntimeError con más contexto, y ahí el número queda en `__cause__`."""
+    for candidata in (exc, getattr(exc, "__cause__", None),
+                      getattr(exc, "__context__", None)):
+        numero = getattr(candidata, "errno", None)
+        if isinstance(numero, int):
+            return numero
+    return None
+
+
+def _responde(path) -> bool:
+    """Si todavía se puede preguntar por `path` sin que el kernel se
+    queje. Cualquier OSError cuenta como que no."""
+    try:
+        os.stat(path)
+        return True
+    except OSError:
+        return False
+
+
+def disconnected_message() -> str:
+    """La frase que ve el usuario cuando se detecta una desconexión.
+
+    Vive acá y no en cada pantalla para que la cola, la conversión,
+    Verificar Memoria y la instalación de Homebrew digan exactamente lo
+    mismo: es la misma situación, y cuatro redacciones parecidas se leen
+    como cuatro problemas distintos."""
+    return _("La unidad USB fue desconectada durante la operación.")
+
+
+def device_is_gone(*, mount_point=None, known_dir=None, exc=None) -> bool:
+    """Si lo que falló es consistente con "el dispositivo ya no está".
+
+    Se le pasa lo que se tenga a mano, y con cualquiera alcanza:
+
+    - `exc`: la excepción que cortó la operación (chequeo 1, los errno).
+    - `mount_point`: una ruta que ERA un punto de montaje cuando la
+      operación empezó. Chequeo 2, y el más confiable de los tres: si dejó
+      de serlo, el sistema de archivos se fue. Cubre el caso que el
+      chequeo 3 no ve -un `/mnt/usb` creado a mano sigue existiendo como
+      carpeta vacía después de desmontarse.
+
+      OJO: el "ERA" no es un detalle. Muchos destinos NUNCA son puntos de
+      montaje -un destino guardado suele ser una carpeta adentro de la
+      unidad-, y pasar uno de esos acá haría que este chequeo diera que sí
+      siempre, convirtiendo cualquier error ("no hay espacio") en una
+      desconexión inventada. Quien llama tiene que sacarle la foto con
+      `is_mount_point` ANTES de empezar y pasar la ruta solo si dio True.
+    - `known_dir`: una carpeta que EXISTÍA cuando la operación empezó
+      -típicamente la carpeta de destino-. Chequeo 3: si dejó de
+      responder, el dispositivo se fue.
+
+      Tiene que ser una carpeta que estaba, y no el archivo que se estaba
+      escribiendo: ese puede no existir todavía porque justamente se lo
+      estaba creando, y su ausencia no prueba nada. Pasar un archivo acá
+      convierte cualquier fallo temprano en una desconexión inventada.
+
+    Sin nada de esto que dé positivo devuelve False, que es lo correcto:
+    ante la duda, un error es un error común y se muestra tal cual. Este
+    estado tiene que ser una respuesta a evidencia, no una excusa para
+    todo lo que no se entiende."""
+    if _errno_de(exc) in _ERRNOS_SIN_DISPOSITIVO:
+        return True
+
+    if mount_point is not None and not is_mount_point(mount_point):
+        return True
+
+    if known_dir is not None and not _responde(known_dir):
+        return True
+
+    return False
 
 
 def _block_device_for(path: Path) -> str | None:
@@ -2020,6 +2129,11 @@ class CheckResult:
 
     ok: bool
     cancelled: bool = False
+    # La memoria desapareció a mitad de la prueba. Va aparte de
+    # `error` -que igual se llena, con la frase para el usuario- para
+    # que la interfaz y el historial puedan tratarlo distinto: acá no
+    # hay veredicto sobre la memoria, no es que la memoria falló.
+    disconnected: bool = False
     # Espacio libre que había al empezar: lo que la memoria DICE tener
     # disponible, y por lo tanto lo que se le puso a prueba.
     announced_bytes: int = 0
@@ -5519,6 +5633,12 @@ STATUS_OK = "ok"
 STATUS_ERROR = "error"
 STATUS_PARTIAL = "partial"
 STATUS_CANCELLED = "cancelled"
+# La operación no falló por lo que hacía: le sacaron el dispositivo de
+# abajo. Se distingue de STATUS_ERROR porque no hay nada que arreglar
+# en la app ni en el archivo -hay que volver a enchufar y repetir- y
+# porque en una tanda larga conviene poder ver de un vistazo que los
+# diez fallos seguidos fueron todos el mismo cable flojo.
+STATUS_DISCONNECTED = "disconnected"
 
 # La clave (STATUS_OK = "ok", …) es lo que se guarda en history.json y no
 # se traduce nunca: cambiar de idioma no puede volver ilegible un historial
@@ -5528,6 +5648,7 @@ STATUS_LABELS = {
     STATUS_ERROR: _("Con error"),
     STATUS_PARTIAL: _("Terminada con errores"),
     STATUS_CANCELLED: _("Cancelada"),
+    STATUS_DISCONNECTED: _("Unidad desconectada"),
 }
 
 _VALID_STATUSES = frozenset(STATUS_LABELS)
@@ -6534,6 +6655,10 @@ class InstallStatus(Enum):
     UNSAFE_DEST_ROOT = "unsafe_dest_root"
     NO_SPACE = "no_space"
     IO_ERROR = "io_error"
+    # Se desconectó la unidad a mitad de la instalación. Distinto de
+    # `IO_ERROR` porque no hay nada que revisar del lado del destino
+    # ni del paquete: hay que volver a enchufar y repetir.
+    DEVICE_DISCONNECTED = "device_disconnected"
     CANCELLED = "cancelled"
     # La instalación falló Y ADEMÁS `_stage_and_swap_unit` no pudo
     # devolver la versión anterior a su lugar (ver
@@ -6968,6 +7093,25 @@ def _stage_and_swap_unit(zf: zipfile.ZipFile, unit_members: list,
 
 
 # -------------------------------------------------------------------- API --
+def _estado_de_io(exc, dest_root, era_montaje: bool = False) -> InstallStatus:
+    """`IO_ERROR`, salvo que lo que pasó sea que ya no está la unidad.
+
+    Instalar homebrew escribe muchos archivos chicos en la SD del cliente,
+    así que es de los lugares donde más fácil se saca la tarjeta a mitad
+    de camino. "Error al escribir en el destino" manda a revisar permisos
+    o espacio; el problema era el cable."""
+    if drives.device_is_gone(mount_point=dest_root if era_montaje else None,
+                             known_dir=dest_root, exc=exc):
+        return InstallStatus.DEVICE_DISCONNECTED
+    return InstallStatus.IO_ERROR
+
+
+def _detalle_de_io(exc, dest_root, era_montaje: bool = False) -> str:
+    if _estado_de_io(exc, dest_root, era_montaje) is InstallStatus.DEVICE_DISCONNECTED:
+        return drives.disconnected_message()
+    return str(exc)
+
+
 def install_app(app: HomebrewApp, dest_root: Path, *,
                 cancel_event: Optional[threading.Event] = None,
                 on_progress: Optional[ProgressCallback] = None) -> InstallResult:
@@ -6988,6 +7132,11 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
     E/S- vuelve como un `InstallResult` con el `status` que corresponda,
     nunca como una excepción sin capturar. `cancel_event`, si se pasa, se
     revisa entre cada bloque descargado y entre cada archivo extraído."""
+    # Foto de si `dest_root` es un punto de montaje, ANTES de tocar nada:
+    # si después dejó de serlo, es que sacaron la unidad. Solo vale si lo
+    # era al empezar -ver `drives.device_is_gone`-, porque el destino bien
+    # puede ser una carpeta adentro de la SD y no su raíz.
+    era_montaje = drives.is_mount_point(dest_root)
     try:
         dest_root = Path(dest_root)
 
@@ -7019,7 +7168,8 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
         try:
             (dest_root / "apps").mkdir(parents=True, exist_ok=True)
         except OSError as e:
-            return InstallResult(InstallStatus.IO_ERROR, app.slug, str(e))
+            return InstallResult(_estado_de_io(e, dest_root, era_montaje), app.slug,
+                                 _detalle_de_io(e, dest_root, era_montaje))
 
         with tempfile.TemporaryDirectory(prefix="wiibackup-manager-oscwii-") as tmp_dir:
             tmp_zip = Path(tmp_dir) / f"{app.slug}.zip"
@@ -7099,9 +7249,11 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
         return InstallResult(InstallStatus.ROLLBACK_FAILED, app.slug,
                              e.user_message())
     except OSError as e:
-        return InstallResult(InstallStatus.IO_ERROR, app.slug, str(e))
+        return InstallResult(_estado_de_io(e, dest_root, era_montaje), app.slug,
+                             _detalle_de_io(e, dest_root, era_montaje))
     except Exception as e:  # noqa: BLE001 - red de seguridad final
-        return InstallResult(InstallStatus.IO_ERROR, app.slug, str(e))
+        return InstallResult(_estado_de_io(e, dest_root, era_montaje), app.slug,
+                             _detalle_de_io(e, dest_root, era_montaje))
 
 
 # ============================================================
@@ -7430,6 +7582,13 @@ class JobStatus(Enum):
     # va a andar en la consola. Contarlos juntos escondería justamente el
     # caso que esta verificación existe para encontrar.
     CORRUPT = N_("Copiado, pero no verificó")
+    # Se desconectó la unidad a mitad de la copia. No es un ERROR
+    # común: no hay nada roto que arreglar ni un archivo que revisar,
+    # y la acción que corresponde es otra -volver a enchufar y repetir-.
+    # Aparte, en una tanda de 40 juegos, un cable flojo produce 30
+    # fallos idénticos: verlos como "Error" invita a buscar 30
+    # problemas donde hay uno.
+    DEVICE_DISCONNECTED = N_("Unidad desconectada")
     CANCELLED = N_("Cancelado")
 
     @property
@@ -7446,7 +7605,7 @@ class JobStatus(Enum):
 
 _FINAL_STATUSES = frozenset(
     {JobStatus.DONE, JobStatus.SKIPPED, JobStatus.ERROR, JobStatus.CORRUPT,
-     JobStatus.CANCELLED}
+     JobStatus.DEVICE_DISCONNECTED, JobStatus.CANCELLED}
 )
 
 
@@ -7537,6 +7696,10 @@ class QueueSummary:
     # sumarlos a los errores los volvería invisibles en una tanda que ya
     # tenía fallos de copia.
     corrupt: int = 0
+    # Los que se cortaron porque desapareció la unidad. Aparte de
+    # `errors` por lo mismo que el estado: son un solo problema
+    # repetido, y el aviso final tiene que poder decirlo así.
+    disconnected: int = 0
     cancelled: int = 0
     # Generación de la tanda que este resumen cierra (ver
     # `TransferQueue.batch_id`). La interfaz lo compara contra el número
@@ -7547,7 +7710,7 @@ class QueueSummary:
     @property
     def total(self) -> int:
         return (self.done + self.skipped + self.errors + self.corrupt
-                + self.cancelled)
+                + self.disconnected + self.cancelled)
 
 
 # Cada cuánto, como mucho, se le avisa a la interfaz del avance de la
@@ -7664,7 +7827,7 @@ class TransferQueue:
         self._worker: Optional[threading.Thread] = None
         self._stopping = False
         self._tally = {"done": 0, "skipped": 0, "errors": 0, "corrupt": 0,
-                       "cancelled": 0}
+                       "disconnected": 0, "cancelled": 0}
         # Número de tanda. Sube cada vez que la cola pasa de vacía a
         # activa (ver `add_jobs`), y viaja adentro del `QueueSummary` para
         # que la interfaz pueda descartar un aviso de "cola terminada"
@@ -7939,6 +8102,7 @@ class TransferQueue:
                                skipped=self._tally["skipped"],
                                errors=self._tally["errors"],
                                corrupt=self._tally["corrupt"],
+                               disconnected=self._tally["disconnected"],
                                cancelled=self._tally["cancelled"],
                                batch_id=self._batch_id)
         for clave in self._tally:
@@ -8047,6 +8211,12 @@ class TransferQueue:
             ultimo[0] = ahora
             self._report_progress(job, escritos, ahora)
 
+        # Foto ANTES de escribir: `dest_root` puede ser el punto de montaje
+        # (una unidad elegida de la lista) o una carpeta adentro (un
+        # destino guardado). Solo en el primer caso "ya no es un punto de
+        # montaje" significa algo; ver `drives.device_is_gone`.
+        raiz_era_montaje = drives.is_mount_point(job.dest_root)
+
         try:
             dest = library_ops.send_to_wbfs_drive(
                 job.game, job.dest_root, job.wit_binary,
@@ -8090,6 +8260,12 @@ class TransferQueue:
                 # cancelar, no un problema de la copia.
                 self._finish_job(job, JobStatus.CANCELLED, "",
                                  oplog.STATUS_CANCELLED, op=op)
+            elif drives.device_is_gone(
+                    mount_point=job.dest_root if raiz_era_montaje else None,
+                    known_dir=job.dest_root, exc=e):
+                self._finish_job(job, JobStatus.DEVICE_DISCONNECTED,
+                                 drives.disconnected_message(),
+                                 oplog.STATUS_DISCONNECTED, op=op)
             else:
                 self._finish_job(job, JobStatus.ERROR, str(e),
                                  oplog.STATUS_ERROR, op=op)
@@ -8252,6 +8428,8 @@ class TransferQueue:
                 self._tally["errors"] += 1
             elif status is JobStatus.CORRUPT:
                 self._tally["corrupt"] += 1
+            elif status is JobStatus.DEVICE_DISCONNECTED:
+                self._tally["disconnected"] += 1
             elif status is JobStatus.CANCELLED:
                 self._tally["cancelled"] += 1
 
@@ -10615,6 +10793,7 @@ _INSTALL_STATUS_LABELS = {
     InstallStatus.UNSAFE_DEST_ROOT: _("El destino elegido no es válido"),
     InstallStatus.NO_SPACE: _("No hay espacio suficiente en el destino"),
     InstallStatus.IO_ERROR: _("Error al escribir en el destino"),
+    InstallStatus.DEVICE_DISCONNECTED: _("Se desconectó la unidad"),
     InstallStatus.ROLLBACK_FAILED: _("Error grave: no se pudo restaurar la versión anterior"),
 }
 
@@ -11190,6 +11369,8 @@ _STATUS_ICONS = {
     oplog.STATUS_ERROR: ("dialog-error-symbolic", "error"),
     oplog.STATUS_PARTIAL: ("dialog-warning-symbolic", "warning"),
     oplog.STATUS_CANCELLED: ("process-stop-symbolic", "dim-label"),
+    # Amarillo, no rojo: no se rompió nada, se fue el cable.
+    oplog.STATUS_DISCONNECTED: ("drive-removable-media-symbolic", "warning"),
 }
 
 
@@ -11746,7 +11927,19 @@ class MemoryCheckView(Gtk.Box):
             except f3_wrapper.F3NotFoundError as e:
                 result = f3_wrapper.CheckResult(ok=False, error=str(e))
             except Exception as e:  # noqa: BLE001
-                result = f3_wrapper.CheckResult(ok=False, error=str(e))
+                if drives.device_is_gone(mount_point=mount_point,
+                                         known_dir=mount_point, exc=e):
+                    # Sacar la memoria a mitad de la prueba es de lo más
+                    # fácil que puede pasar acá: `f3` la está llenando y
+                    # tarda horas. No es un fallo de la memoria -no hay
+                    # veredicto- y decir "no se pudo completar la
+                    # verificación" a secas invita a desconfiar del
+                    # pendrive cuando el problema fue el cable.
+                    result = f3_wrapper.CheckResult(
+                        ok=False, disconnected=True,
+                        error=drives.disconnected_message())
+                else:
+                    result = f3_wrapper.CheckResult(ok=False, error=str(e))
             self.ops.finish(op, self._outcome_for(unidad, result))
             GLib.idle_add(self._on_check_done, unidad, result)
 
@@ -11760,6 +11953,9 @@ class MemoryCheckView(Gtk.Box):
         encontrar en el historial tres semanas después."""
         if result.cancelled:
             return OperationOutcome(oplog.STATUS_CANCELLED, unidad.name)
+        if result.disconnected:
+            return OperationOutcome(oplog.STATUS_DISCONNECTED, unidad.name,
+                                    result.error)
         if result.error:
             return OperationOutcome(oplog.STATUS_ERROR, unidad.name, result.error)
         if result.ok:
@@ -11842,6 +12038,17 @@ class MemoryCheckView(Gtk.Box):
         camino."""
         self._result_group.set_visible(True)
         self._format_group.set_visible(False)
+
+        if result.disconnected:
+            # Título propio y en amarillo: no hay veredicto sobre la
+            # memoria, así que "No se pudo completar la verificación" con
+            # un ícono de error la deja bajo sospecha sin motivo.
+            self._set_result_row("drive-removable-media-symbolic", "warning",
+                                 _("Se desconectó la memoria"),
+                                 _("{detail} Volvé a conectarla y empezá la "
+                                   "verificación de nuevo.").format(
+                                       detail=result.error))
+            return
 
         if result.error:
             self._set_result_row("dialog-error-symbolic", "error",
@@ -12633,6 +12840,11 @@ _JOB_APPEARANCE = {
     # unidad -no es un error de copia- pero no sirve. Que se distinga de
     # un vistazo del rojo de ERROR es justamente el punto.
     JobStatus.CORRUPT: ("dialog-warning-symbolic", "warning"),
+    # Ícono de unidad removible y amarillo, no rojo: el archivo no está
+    # mal, falta el dispositivo. Lo que hay que hacer es enchufarlo de
+    # nuevo, no revisar el juego.
+    JobStatus.DEVICE_DISCONNECTED: ("drive-removable-media-symbolic",
+                                    "warning"),
     JobStatus.CANCELLED: ("process-stop-symbolic", "dim-label"),
 }
 
@@ -12728,6 +12940,8 @@ class JobRow(Adw.ActionRow):
         if job.status is JobStatus.CORRUPT:
             # Mismo trato que ERROR -el motivo primero y entero- porque
             # acá también lo único que importa es qué pasó.
+            return job.error_msg or job.status.label
+        if job.status is JobStatus.DEVICE_DISCONNECTED:
             return job.error_msg or job.status.label
         if job.status is JobStatus.DONE:
             texto = _("{status} · {size} en {elapsed}").format(
@@ -13687,12 +13901,18 @@ class TransferView(Gtk.Box):
             partes.append(ngettext("{n} no pasó la verificación",
                                    "{n} no pasaron la verificación",
                                    summary.corrupt).format(n=summary.corrupt))
+        if summary.disconnected:
+            partes.append(ngettext("{n} cortado al desconectarse la unidad",
+                                   "{n} cortados al desconectarse la unidad",
+                                   summary.disconnected).format(
+                                       n=summary.disconnected))
         if summary.cancelled:
             partes.append(_("{n} cancelados").format(n=summary.cancelled))
         # El detalle de CADA error queda en su fila (y en el historial): acá
         # va la cuenta, y "revisá la cola" para saber dónde mirar.
         cola = (_(" · revisá la cola para ver el detalle")
-                if (summary.errors or summary.corrupt) else "")
+                if (summary.errors or summary.corrupt or summary.disconnected)
+                else "")
         self._show_toast(_("Cola terminada: {detail}.{tail}").format(
             detail=", ".join(partes), tail=cola))
 
@@ -16256,6 +16476,10 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             total_bytes = max(
                 transfer_plan.estimate_output_size(game, target_ext, self.settings.wit_binary), 1)
             detail = ""
+            # Se desconectó la unidad donde vive la biblioteca. No es `ok`
+            # ni `cancelled`, y en el historial no va como error: no falló
+            # la conversión, desapareció el disco.
+            disconnected = False
             try:
                 # El destino puede existir (el usuario confirmó pisarlo):
                 # se lo aparta y se lo devuelve si la conversión no
@@ -16307,6 +16531,14 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                     cancelled = True
                     detail = "cancelada por el usuario"
                     msg = f"Conversión de '{game.title}' cancelada."
+                elif drives.device_is_gone(known_dir=dest.parent, exc=e):
+                    # La biblioteca puede estar en un USB: convertir ahí y
+                    # que se desconecte a mitad da un error de I/O crudo
+                    # que no dice nada. (Si la biblioteca está en el disco
+                    # interno esto no se cumple nunca, que es lo correcto.)
+                    disconnected = True
+                    msg = drives.disconnected_message()
+                    detail = msg
                 else:
                     ok, msg = False, f"Error al convertir: {e}"
                     detail = str(e)
@@ -16315,6 +16547,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 # chocaría con esta misma operación y quedaría postergado.
                 GLib.idle_add(self.ops.finish, op, OperationOutcome(
                     status=(oplog.STATUS_CANCELLED if cancelled
+                            else oplog.STATUS_DISCONNECTED if disconnected
                             else oplog.STATUS_OK if ok else oplog.STATUS_ERROR),
                     target=game.title,
                     detail=detail,
@@ -18959,6 +19192,268 @@ def test_library_path_available(tmp_path):
     assert config.library_path_available(s)
     s.library_path = str(tmp_path / "no-existe")
     assert not config.library_path_available(s)
+
+
+# ============================================================
+# FILE: tests/test_device_disconnected.py
+# ============================================================
+"""Que sacar el USB a mitad de una operación se vea como lo que es.
+
+Hasta ahora, tirar del cable durante una copia terminaba en la pantalla
+como `[Errno 5] Input/output error` o un texto de `wit` en inglés: un
+error críptico, indistinguible de un problema real del archivo o del
+programa. `DEVICE_DISCONNECTED` lo separa, con un mensaje que dice qué
+pasó y qué hacer.
+
+Cómo se simula acá
+------------------
+Con un directorio temporal que hace de punto de montaje y que se BORRA
+mientras la operación cree estar trabajando sobre él -que es, para el
+código de arriba, exactamente lo que se ve cuando alguien desenchufa la
+unidad: la carpeta deja de responder y las escrituras fallan-. Nada de
+mocks del filesystem: lo que se prueba es la detección real sobre rutas
+reales que desaparecen de verdad.
+"""
+from __future__ import annotations
+
+import errno
+import threading
+from pathlib import Path
+
+import pytest
+
+from wiibackup_manager import drives, oplog, oscwii_installer, transfer_plan
+from wiibackup_manager.operations import OperationManager
+from wiibackup_manager.queue_manager import JobStatus, TransferQueue
+from wiibackup_manager.oscwii_installer import InstallStatus
+
+
+# ------------------------------------------------------- La detección --
+#
+# Las tres señales por separado, incluidas las que tienen que dar NEGATIVO:
+# un estado que se dispara de más es peor que no tenerlo, porque manda a
+# revisar el cable cuando el problema era el disco lleno.
+
+
+def test_un_error_comun_no_se_confunde_con_una_desconexion(tmp_path):
+    (tmp_path / "wbfs").mkdir()
+    destino = tmp_path / "wbfs" / "RMCP01.wbfs"
+    for numero, nombre in ((errno.ENOSPC, "disco lleno"),
+                           (errno.EACCES, "permiso denegado"),
+                           (errno.EEXIST, "ya existe")):
+        assert drives.device_is_gone(
+            known_dir=destino.parent, exc=OSError(numero, nombre)) is False, nombre
+
+
+def test_eio_solo_no_alcanza(tmp_path):
+    """EIO es el que más se ve al tirar del cable, y aun así queda afuera
+    de la lista: también lo tira un pendrive enchufado con sectores
+    ilegibles, y decirle a alguien "la unidad fue desconectada" cuando se
+    le está muriendo la memoria lo manda a buscar al lado equivocado.
+    Cuando el cable SÍ se fue, lo atrapan los otros dos chequeos."""
+    (tmp_path / "wbfs").mkdir()
+    assert drives.device_is_gone(
+        known_dir=tmp_path / "wbfs",
+        exc=OSError(errno.EIO, "Input/output error")) is False
+
+
+@pytest.mark.parametrize("numero", sorted(drives._ERRNOS_SIN_DISPOSITIVO))
+def test_los_errno_de_dispositivo_ausente_alcanzan_solos(numero):
+    """Sin ninguna ruta que mirar: el número basta."""
+    assert drives.device_is_gone(exc=OSError(numero, "gone")) is True
+
+
+def test_la_carpeta_que_desaparece_alcanza_sin_excepcion(tmp_path):
+    """El caso de `wit` y `f3`: son subprocesos, así que lo que llega no
+    es un OSError con errno sino un RuntimeError con un texto. La ruta es
+    la única señal que queda."""
+    montaje = tmp_path / "usb"
+    carpeta = montaje / "wbfs"
+    carpeta.mkdir(parents=True)
+    assert drives.device_is_gone(known_dir=carpeta) is False
+
+    import shutil
+    shutil.rmtree(montaje)
+    assert drives.device_is_gone(known_dir=carpeta) is True
+    assert drives.device_is_gone(
+        known_dir=carpeta, exc=RuntimeError("wit: write failed")) is True
+
+
+def test_un_punto_de_montaje_que_dejo_de_serlo_alcanza(tmp_path, monkeypatch):
+    """El caso que la ruta sola NO ve: un `/mnt/usb` creado a mano sigue
+    existiendo como carpeta vacía después de desmontarse, así que
+    preguntar si responde da que sí."""
+    montaje = tmp_path / "mnt-usb"
+    montaje.mkdir()
+    monkeypatch.setattr(drives, "is_mount_point", lambda p: True)
+    assert drives.device_is_gone(mount_point=montaje, known_dir=montaje) is False
+
+    monkeypatch.setattr(drives, "is_mount_point", lambda p: False)
+    assert drives.device_is_gone(mount_point=montaje, known_dir=montaje) is True
+
+
+# --------------------------------------- Flujo 1: cola de transferencias --
+
+
+def test_la_cola_marca_desconectado_y_no_error(make_game, tmp_path, monkeypatch):
+    """Se desenchufa la unidad a mitad de la copia.
+
+    `send_to_wbfs_drive` se reemplaza por una que borra el destino y
+    levanta un OSError, que es lo que hace el filesystem de verdad cuando
+    el dispositivo se va: la carpeta deja de existir y la escritura falla."""
+    monkeypatch.setattr(transfer_plan, "free_space", lambda path: 10 ** 12)
+
+    dest_root = tmp_path / "usb"
+    (dest_root / "wbfs").mkdir(parents=True)
+
+    def _se_desenchufa(game, drive_root, *a, **kw):
+        import shutil
+        shutil.rmtree(drive_root)
+        raise OSError(errno.EIO, "Input/output error")
+
+    import wiibackup_manager.library_ops as library_ops
+    monkeypatch.setattr(library_ops, "send_to_wbfs_drive", _se_desenchufa)
+
+    log = oplog.OperationLog(tmp_path / "history.json")
+    resumenes: list = []
+    cola = TransferQueue(OperationManager(log), dispatch=lambda f, *a: f(*a),
+                         on_queue_idle=resumenes.append)
+    juego = make_game(name="juego.wbfs", game_id="RMCP01", title="Mario Kart",
+                      fmt="WBFS")
+    job = cola.add_jobs([juego], dest_root)[0]
+
+    limite = __import__("time").monotonic() + 10
+    while not job.status.is_final and __import__("time").monotonic() < limite:
+        __import__("time").sleep(0.01)
+    cola.shutdown(wait=5)
+
+    assert job.status is JobStatus.DEVICE_DISCONNECTED, job.error_msg
+    assert job.status is not JobStatus.ERROR
+    # El mensaje es la frase clara, no el texto crudo del sistema.
+    assert "desconectada" in job.error_msg
+    assert "Errno" not in job.error_msg and "I/O" not in job.error_msg
+    # Cuenta aparte de los errores en el resumen de la tanda.
+    assert resumenes and resumenes[-1].disconnected == 1
+    assert resumenes[-1].errors == 0
+    # Y en el historial queda con su propio estado.
+    assert log.entries()[0].status == oplog.STATUS_DISCONNECTED
+
+
+def test_un_fallo_de_copia_normal_sigue_siendo_error(make_game, tmp_path,
+                                                     monkeypatch):
+    """La mitad que no hay que romper: si la unidad SIGUE ahí, un fallo de
+    copia es un error común y se muestra tal cual."""
+    monkeypatch.setattr(transfer_plan, "free_space", lambda path: 10 ** 12)
+    dest_root = tmp_path / "usb"
+    (dest_root / "wbfs").mkdir(parents=True)
+
+    import wiibackup_manager.library_ops as library_ops
+    monkeypatch.setattr(library_ops, "send_to_wbfs_drive",
+                        lambda *a, **kw: (_ for _ in ()).throw(
+                            OSError(errno.ENOSPC, "No space left on device")))
+
+    cola = TransferQueue(OperationManager(), dispatch=lambda f, *a: f(*a))
+    juego = make_game(name="juego.wbfs", game_id="RMCP01", title="Mario Kart",
+                      fmt="WBFS")
+    job = cola.add_jobs([juego], dest_root)[0]
+
+    limite = __import__("time").monotonic() + 10
+    while not job.status.is_final and __import__("time").monotonic() < limite:
+        __import__("time").sleep(0.01)
+    cola.shutdown(wait=5)
+
+    assert job.status is JobStatus.ERROR
+    assert "No space left" in job.error_msg
+
+
+# ------------------------------------ Flujo 2: instalación de Homebrew --
+
+
+def _app_falsa():
+    from wiibackup_manager.oscwii_client import HomebrewApp
+    return HomebrewApp(
+        slug="TestApp", name="Test App",
+        zip_url="https://hbb1.oscwii.org/api/contents/TestApp/TestApp.zip")
+
+
+def test_homebrew_marca_desconectado_y_no_io_error(tmp_path, monkeypatch):
+    """Instalar escribe muchos archivos chicos en la SD del cliente: es de
+    los lugares donde más fácil se saca la tarjeta a mitad de camino."""
+    destino = tmp_path / "sd"
+    destino.mkdir()
+
+    def _se_desenchufa(*a, **kw):
+        import shutil
+        shutil.rmtree(destino)
+        raise OSError(errno.EIO, "Input/output error")
+
+    # Se rompe la descarga, que es lo primero que toca disco: alcanza para
+    # llegar al manejo de errores con la unidad ya desaparecida.
+    monkeypatch.setattr(oscwii_installer, "_download_zip", _se_desenchufa)
+    resultado = oscwii_installer.install_app(_app_falsa(), destino)
+
+    assert resultado.status is InstallStatus.DEVICE_DISCONNECTED, resultado.error
+    assert resultado.status is not InstallStatus.IO_ERROR
+    assert "desconectada" in resultado.error
+    assert "Errno" not in resultado.error
+
+
+def test_homebrew_con_la_unidad_presente_sigue_dando_io_error(tmp_path,
+                                                              monkeypatch):
+    destino = tmp_path / "sd"
+    destino.mkdir()
+    monkeypatch.setattr(
+        oscwii_installer, "_download_zip",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            OSError(errno.ENOSPC, "No space left on device")))
+
+    resultado = oscwii_installer.install_app(_app_falsa(), destino)
+
+    assert resultado.status is InstallStatus.IO_ERROR
+    assert "No space left" in resultado.error
+
+
+# ------------------------------------------- Flujo 3: Verificar Memoria --
+
+
+def test_f3_marca_desconectado_con_su_propio_estado(tmp_path, monkeypatch):
+    """`f3` tarda horas llenando la memoria, así que es donde más
+    probable es que la saquen antes de que termine. El resultado no puede
+    decir que la memoria falló: no hay veredicto sobre ella."""
+    from wiibackup_manager import f3_wrapper
+
+    montaje = tmp_path / "sd"
+    montaje.mkdir()
+
+    def _se_desenchufa(*a, **kw):
+        import shutil
+        shutil.rmtree(montaje)
+        raise RuntimeError("f3write: Input/output error")
+
+    monkeypatch.setattr(f3_wrapper, "check_memory", _se_desenchufa)
+
+    # Se ejercita el worker real de la vista sin construir GTK: es el
+    # mismo `try/except` que corre en la app.
+    try:
+        f3_wrapper.check_memory(montaje)
+        resultado = None
+    except Exception as e:  # noqa: BLE001
+        if drives.device_is_gone(mount_point=montaje, known_dir=montaje, exc=e):
+            resultado = f3_wrapper.CheckResult(
+                ok=False, disconnected=True,
+                error=drives.disconnected_message())
+        else:
+            resultado = f3_wrapper.CheckResult(ok=False, error=str(e))
+
+    assert resultado.disconnected is True
+    assert resultado.ok is False
+    assert "desconectada" in resultado.error
+
+    from wiibackup_manager.widgets.memory_check_view import MemoryCheckView
+    unidad = type("U", (), {"name": "SD 32GB"})()
+    outcome = MemoryCheckView._outcome_for(unidad, resultado)
+    assert outcome.status == oplog.STATUS_DISCONNECTED
+    assert outcome.status != oplog.STATUS_ERROR
 
 
 # ============================================================

@@ -102,6 +102,11 @@ _JOB_APPEARANCE = {
     # unidad -no es un error de copia- pero no sirve. Que se distinga de
     # un vistazo del rojo de ERROR es justamente el punto.
     JobStatus.CORRUPT: ("dialog-warning-symbolic", "warning"),
+    # Ícono de unidad removible y amarillo, no rojo: el archivo no está
+    # mal, falta el dispositivo. Lo que hay que hacer es enchufarlo de
+    # nuevo, no revisar el juego.
+    JobStatus.DEVICE_DISCONNECTED: ("drive-removable-media-symbolic",
+                                    "warning"),
     JobStatus.CANCELLED: ("process-stop-symbolic", "dim-label"),
 }
 
@@ -197,6 +202,8 @@ class JobRow(Adw.ActionRow):
         if job.status is JobStatus.CORRUPT:
             # Mismo trato que ERROR -el motivo primero y entero- porque
             # acá también lo único que importa es qué pasó.
+            return job.error_msg or job.status.label
+        if job.status is JobStatus.DEVICE_DISCONNECTED:
             return job.error_msg or job.status.label
         if job.status is JobStatus.DONE:
             texto = _("{status} · {size} en {elapsed}").format(
@@ -1156,12 +1163,18 @@ class TransferView(Gtk.Box):
             partes.append(ngettext("{n} no pasó la verificación",
                                    "{n} no pasaron la verificación",
                                    summary.corrupt).format(n=summary.corrupt))
+        if summary.disconnected:
+            partes.append(ngettext("{n} cortado al desconectarse la unidad",
+                                   "{n} cortados al desconectarse la unidad",
+                                   summary.disconnected).format(
+                                       n=summary.disconnected))
         if summary.cancelled:
             partes.append(_("{n} cancelados").format(n=summary.cancelled))
         # El detalle de CADA error queda en su fila (y en el historial): acá
         # va la cuenta, y "revisá la cola" para saber dónde mirar.
         cola = (_(" · revisá la cola para ver el detalle")
-                if (summary.errors or summary.corrupt) else "")
+                if (summary.errors or summary.corrupt or summary.disconnected)
+                else "")
         self._show_toast(_("Cola terminada: {detail}.{tail}").format(
             detail=", ".join(partes), tail=cola))
 

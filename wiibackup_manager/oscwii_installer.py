@@ -136,6 +136,10 @@ class InstallStatus(Enum):
     UNSAFE_DEST_ROOT = "unsafe_dest_root"
     NO_SPACE = "no_space"
     IO_ERROR = "io_error"
+    # Se desconectó la unidad a mitad de la instalación. Distinto de
+    # `IO_ERROR` porque no hay nada que revisar del lado del destino
+    # ni del paquete: hay que volver a enchufar y repetir.
+    DEVICE_DISCONNECTED = "device_disconnected"
     CANCELLED = "cancelled"
     # La instalación falló Y ADEMÁS `_stage_and_swap_unit` no pudo
     # devolver la versión anterior a su lugar (ver
@@ -570,6 +574,25 @@ def _stage_and_swap_unit(zf: zipfile.ZipFile, unit_members: list,
 
 
 # -------------------------------------------------------------------- API --
+def _estado_de_io(exc, dest_root, era_montaje: bool = False) -> InstallStatus:
+    """`IO_ERROR`, salvo que lo que pasó sea que ya no está la unidad.
+
+    Instalar homebrew escribe muchos archivos chicos en la SD del cliente,
+    así que es de los lugares donde más fácil se saca la tarjeta a mitad
+    de camino. "Error al escribir en el destino" manda a revisar permisos
+    o espacio; el problema era el cable."""
+    if drives.device_is_gone(mount_point=dest_root if era_montaje else None,
+                             known_dir=dest_root, exc=exc):
+        return InstallStatus.DEVICE_DISCONNECTED
+    return InstallStatus.IO_ERROR
+
+
+def _detalle_de_io(exc, dest_root, era_montaje: bool = False) -> str:
+    if _estado_de_io(exc, dest_root, era_montaje) is InstallStatus.DEVICE_DISCONNECTED:
+        return drives.disconnected_message()
+    return str(exc)
+
+
 def install_app(app: HomebrewApp, dest_root: Path, *,
                 cancel_event: Optional[threading.Event] = None,
                 on_progress: Optional[ProgressCallback] = None) -> InstallResult:
@@ -590,6 +613,11 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
     E/S- vuelve como un `InstallResult` con el `status` que corresponda,
     nunca como una excepción sin capturar. `cancel_event`, si se pasa, se
     revisa entre cada bloque descargado y entre cada archivo extraído."""
+    # Foto de si `dest_root` es un punto de montaje, ANTES de tocar nada:
+    # si después dejó de serlo, es que sacaron la unidad. Solo vale si lo
+    # era al empezar -ver `drives.device_is_gone`-, porque el destino bien
+    # puede ser una carpeta adentro de la SD y no su raíz.
+    era_montaje = drives.is_mount_point(dest_root)
     try:
         dest_root = Path(dest_root)
 
@@ -621,7 +649,8 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
         try:
             (dest_root / "apps").mkdir(parents=True, exist_ok=True)
         except OSError as e:
-            return InstallResult(InstallStatus.IO_ERROR, app.slug, str(e))
+            return InstallResult(_estado_de_io(e, dest_root, era_montaje), app.slug,
+                                 _detalle_de_io(e, dest_root, era_montaje))
 
         with tempfile.TemporaryDirectory(prefix="wiibackup-manager-oscwii-") as tmp_dir:
             tmp_zip = Path(tmp_dir) / f"{app.slug}.zip"
@@ -701,6 +730,8 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
         return InstallResult(InstallStatus.ROLLBACK_FAILED, app.slug,
                              e.user_message())
     except OSError as e:
-        return InstallResult(InstallStatus.IO_ERROR, app.slug, str(e))
+        return InstallResult(_estado_de_io(e, dest_root, era_montaje), app.slug,
+                             _detalle_de_io(e, dest_root, era_montaje))
     except Exception as e:  # noqa: BLE001 - red de seguridad final
-        return InstallResult(InstallStatus.IO_ERROR, app.slug, str(e))
+        return InstallResult(_estado_de_io(e, dest_root, era_montaje), app.slug,
+                             _detalle_de_io(e, dest_root, era_montaje))
