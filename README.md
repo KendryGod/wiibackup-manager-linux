@@ -397,6 +397,12 @@ traducida.
 5. La pestaña **Log** guarda qué hizo la app y qué salió mal, incluso de
    sesiones anteriores.
 
+Si usás la app para preparar unidades de clientes, el
+[MANUAL_TALLER.md](MANUAL_TALLER.md) tiene el flujo recomendado de punta a
+punta -verificar la memoria, Modo Fábrica, transferir con la verificación
+prendida, expulsar- y las reglas de oro que evitan entregar una unidad con
+un juego que no anda.
+
 ## Problemas comunes
 
 **"No se encontró 'wit'"** — la app funciona igual con ISOs planas, pero
