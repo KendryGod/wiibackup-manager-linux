@@ -4161,10 +4161,16 @@ catálogo en vez de asumir uno: la misma app corre desde el repo, desde
 
 Uso
 ---
-    from .i18n import _
+    from .i18n import _, N_
 
     _("Eliminar")                       # cadena suelta
     _("Eliminado: {name}").format(...)  # con datos
+    N_("Pendiente")                     # se traduce en otro momento
+
+`N_` es para el caso en que la cadena se ESCRIBE en un lugar y se MUESTRA
+en otro: el valor de un enum, por ejemplo, que se define al importar el
+módulo -cuando todavía no hay ninguna pantalla- y se traduce recién al
+dibujar la fila. Ver más abajo, en su propia docstring.
 
 Nunca `_(f"...")`: la f-string se interpola ANTES de buscar la traducción,
 así que el msgid tendría adentro el nombre del archivo del usuario y no
@@ -4215,6 +4221,30 @@ _translation = _load()
 
 _ = _translation.gettext
 ngettext = _translation.ngettext
+
+
+def N_(message: str) -> str:
+    """Marca una cadena para el catálogo SIN traducirla todavía.
+
+    Devuelve el texto tal cual: es una función identidad. Lo único que
+    hace es ser visible para `xgettext`, que arma el catálogo leyendo el
+    fuente y no puede saber qué cadena termina adentro de un `_()` si esa
+    cadena se escribió en otro lado.
+
+    El caso que la trajo son los valores de los enums que se muestran al
+    usuario (`OperationKind`, `queue_manager.JobStatus`). Ahí la cadena se
+    define al importar el módulo -cuando todavía no hay ninguna ventana ni
+    idioma que valga- y se traduce recién al mostrarla, con `_(self.value)`
+    en la propiedad `.label`. Para `xgettext` eso es invisible: lo único
+    que ve es `_(self.value)`, una variable, así que esos textos no
+    llegaban nunca a la plantilla y `.label` devolvía el español aunque la
+    app estuviera en inglés. Envolviendo el valor en `N_` la cadena entra
+    al catálogo, y `.label` la encuentra.
+
+    Para que esto funcione, `tools/update-translations.sh` le pasa
+    `--keyword=N_` a `xgettext`; agregar otro marcador quiere decir
+    agregarlo también ahí."""
+    return message
 
 
 def current_language() -> str:
@@ -4934,7 +4964,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
-from .i18n import _
+from .i18n import _, N_
 
 
 class OperationKind(Enum):
@@ -4944,18 +4974,24 @@ class OperationKind(Enum):
     declara cada operación al arrancar (`read_paths` / `write_paths`), que
     es información concreta y no una propiedad del tipo. La transferencia
     era el ejemplo de por qué: "no modifica la biblioteca" es cierto, pero
-    escribe -y mucho- en la unidad de destino."""
+    escribe -y mucho- en la unidad de destino.
 
-    SCANNING = "Escaneando la biblioteca"
-    IMPORTING = "Agregando juegos"
-    CONVERTING = "Convirtiendo"
-    VERIFYING = "Verificando"
-    TRANSFERRING = "Enviando a la unidad"
-    DELETING = "Eliminando"
-    RENAMING = "Renombrando"
-    INSTALLING_HOMEBREW = "Instalando homebrew"
-    CHECKING_MEMORY = "Verificando la memoria"
-    FORMATTING = "Formateando la unidad"
+    Los valores van envueltos en `N_` -que no traduce nada, solo marca-
+    porque si no `xgettext` no los ve: lo único que hay escrito en el
+    fuente es `_(self.value)`, y de ahí no se puede deducir qué cadenas
+    son. Sin la marca no entran al catálogo, y `.label` termina
+    devolviendo el español aunque la app esté en otro idioma."""
+
+    SCANNING = N_("Escaneando la biblioteca")
+    IMPORTING = N_("Agregando juegos")
+    CONVERTING = N_("Convirtiendo")
+    VERIFYING = N_("Verificando")
+    TRANSFERRING = N_("Enviando a la unidad")
+    DELETING = N_("Eliminando")
+    RENAMING = N_("Renombrando")
+    INSTALLING_HOMEBREW = N_("Instalando homebrew")
+    CHECKING_MEMORY = N_("Verificando la memoria")
+    FORMATTING = N_("Formateando la unidad")
 
     @property
     def label(self) -> str:
@@ -7280,7 +7316,7 @@ from gi.repository import GLib
 
 from . import (drives, formatting, library_ops, oplog, transfer_plan,
                wit_wrapper)
-from .i18n import _, ngettext
+from .i18n import _, ngettext, N_
 from .game_model import Game
 from .transfer_plan import TransferItem
 from .operations import OperationBusy, OperationKind, OperationOutcome
@@ -7291,17 +7327,19 @@ class JobStatus(Enum):
 
     Igual que `OperationKind`, el VALOR queda en español (es el idioma del
     código fuente y el msgid del catálogo) y la traducción se aplica al
-    mostrarlo, con `.label`."""
+    mostrarlo, con `.label`; y por el mismo motivo va envuelto en `N_`,
+    que es lo que hace que `xgettext` encuentre estas cadenas (ver
+    `i18n.N_`)."""
 
-    PENDING = "Pendiente"
-    RUNNING = "Copiando"
+    PENDING = N_("Pendiente")
+    RUNNING = N_("Copiando")
     # Releyendo lo que se acabó de escribir (ver `Settings.verify_after_copy`).
     # No es final: la copia ya terminó, pero la tarea todavía no tiene
     # veredicto.
-    VERIFYING = "Verificando"
-    DONE = "Completado"
-    SKIPPED = "Ya estaba en el destino"
-    ERROR = "Error"
+    VERIFYING = N_("Verificando")
+    DONE = N_("Completado")
+    SKIPPED = N_("Ya estaba en el destino")
+    ERROR = N_("Error")
     # El archivo se copió entero, pero al releerlo `wit` dijo que lo que
     # quedó en la unidad está mal. Es un estado propio y no un ERROR a
     # secas porque son dos problemas distintos y se arreglan distinto: un
@@ -7309,8 +7347,8 @@ class JobStatus(Enum):
     # antes), y acá hay un archivo que ocupa lugar, parece un juego y no
     # va a andar en la consola. Contarlos juntos escondería justamente el
     # caso que esta verificación existe para encontrar.
-    CORRUPT = "Copiado, pero no verificó"
-    CANCELLED = "Cancelado"
+    CORRUPT = N_("Copiado, pero no verificó")
+    CANCELLED = N_("Cancelado")
 
     @property
     def label(self) -> str:
@@ -21854,6 +21892,76 @@ def test_no_quedan_cadenas_sin_traducir(po):
     assert not sin_traducir, (
         f"{len(sin_traducir)} cadenas sin traducir en {po.parent.parent.name}: "
         + ", ".join(s[:40] for s in sin_traducir[:5]))
+
+
+# --------------------------------- Cadenas que no se marcan con `_()` --
+#
+# Los valores de `OperationKind` y `JobStatus` se muestran al usuario pero
+# se traducen lejos de donde se escriben, con `_(self.value)` en `.label`.
+# `xgettext` no puede deducir eso -lo único que ve es una variable-, así
+# que van envueltos en `N_()`, que no traduce nada y solo los hace
+# visibles para la extracción. Estos dos tests cuidan ese arreglo: sin
+# ellos, agregar un estado nuevo sin la marca vuelve a dejar media
+# interfaz en español, y en silencio.
+
+
+def _msgids(po: Path) -> set:
+    return {msgid for msgid, _t in _entradas(po)}
+
+
+@pytest.mark.parametrize("po", CATALOGOS, ids=lambda p: p.parent.parent.name)
+def test_los_valores_de_los_enums_visibles_estan_en_el_catalogo(po):
+    """Cada valor que termina en pantalla vía `.label` tiene su entrada.
+
+    Es la prueba del caso real: `JobStatus.PENDING` valía "Pendiente" sin
+    marcar, no estaba en ningún catálogo, y un usuario en inglés veía
+    "Pendiente" en la fila de una cola por lo demás traducida."""
+    from wiibackup_manager.operations import OperationKind
+    from wiibackup_manager.queue_manager import JobStatus
+
+    presentes = _msgids(po)
+    faltan = [f"{enum.__name__}.{m.name} = {m.value!r}"
+              for enum in (JobStatus, OperationKind)
+              for m in enum if m.value not in presentes]
+    assert not faltan, (
+        "valores de enum que no llegaron al catálogo (¿les falta `N_()`, o "
+        "hay que correr tools/update-translations.sh?):\n  "
+        + "\n  ".join(faltan))
+
+
+def test_toda_cadena_marcada_con_N_llega_a_la_plantilla():
+    """El otro lado del mismo arreglo: que `--keyword=N_` siga en
+    `tools/update-translations.sh`. Si alguien lo saca, las cadenas
+    marcadas dejan de extraerse y esto lo dice, en vez de que se note
+    recién en una captura de pantalla en inglés a medias."""
+    raiz = Path(__file__).resolve().parent.parent
+    # Por `_entradas` y no con un `in` sobre el texto: `xgettext` parte las
+    # cadenas largas en varias líneas, y un `msgid "..."` literal no las
+    # encontraría.
+    plantilla = _msgids(LOCALE_DIR / f"{DOMINIO}.pot")
+    marcadas = set()
+    for py in sorted((raiz / "wiibackup_manager").rglob("*.py")):
+        marcadas |= set(re.findall(r'\bN_\(\s*"((?:[^"\\]|\\.)*)"\s*\)',
+                                   py.read_text(encoding="utf-8")))
+    assert marcadas, "no se encontró ninguna cadena marcada con N_()"
+    faltan = [m for m in sorted(marcadas) if m not in plantilla]
+    assert not faltan, (
+        "marcadas con N_() pero ausentes de la plantilla: " + ", ".join(faltan))
+
+
+@pytest.mark.parametrize("po", CATALOGOS, ids=lambda p: p.parent.parent.name)
+def test_no_quedan_entradas_fuzzy(po):
+    """Una entrada `#, fuzzy` NO se muestra: `msgfmt` la deja afuera del
+    .mo y la app cae al español, igual que si no estuviera traducida. Y no
+    la ve `test_no_quedan_cadenas_sin_traducir`, porque msgstr no está
+    vacío -tiene la adivinanza de `msgmerge`, que suele ser cualquier
+    cosa: al agregar estos enums propuso "Customer" para "Pendiente"-."""
+    r = subprocess.run(["msgattrib", "--fuzzy", "--no-obsolete", str(po)],
+                       capture_output=True, text=True, check=True)
+    difusas = [m for m in re.findall(r'^msgid "((?:[^"\\]|\\.)+)"', r.stdout, re.M)]
+    assert not difusas, (
+        f"{len(difusas)} entradas fuzzy en {po.parent.parent.name} "
+        "(revisarlas y sacarles la marca): " + ", ".join(difusas[:5]))
 
 
 # ============================================================

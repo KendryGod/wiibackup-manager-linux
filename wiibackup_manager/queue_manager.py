@@ -53,7 +53,7 @@ from gi.repository import GLib
 
 from . import (drives, formatting, library_ops, oplog, transfer_plan,
                wit_wrapper)
-from .i18n import _, ngettext
+from .i18n import _, ngettext, N_
 from .game_model import Game
 from .transfer_plan import TransferItem
 from .operations import OperationBusy, OperationKind, OperationOutcome
@@ -64,17 +64,19 @@ class JobStatus(Enum):
 
     Igual que `OperationKind`, el VALOR queda en español (es el idioma del
     código fuente y el msgid del catálogo) y la traducción se aplica al
-    mostrarlo, con `.label`."""
+    mostrarlo, con `.label`; y por el mismo motivo va envuelto en `N_`,
+    que es lo que hace que `xgettext` encuentre estas cadenas (ver
+    `i18n.N_`)."""
 
-    PENDING = "Pendiente"
-    RUNNING = "Copiando"
+    PENDING = N_("Pendiente")
+    RUNNING = N_("Copiando")
     # Releyendo lo que se acabó de escribir (ver `Settings.verify_after_copy`).
     # No es final: la copia ya terminó, pero la tarea todavía no tiene
     # veredicto.
-    VERIFYING = "Verificando"
-    DONE = "Completado"
-    SKIPPED = "Ya estaba en el destino"
-    ERROR = "Error"
+    VERIFYING = N_("Verificando")
+    DONE = N_("Completado")
+    SKIPPED = N_("Ya estaba en el destino")
+    ERROR = N_("Error")
     # El archivo se copió entero, pero al releerlo `wit` dijo que lo que
     # quedó en la unidad está mal. Es un estado propio y no un ERROR a
     # secas porque son dos problemas distintos y se arreglan distinto: un
@@ -82,8 +84,8 @@ class JobStatus(Enum):
     # antes), y acá hay un archivo que ocupa lugar, parece un juego y no
     # va a andar en la consola. Contarlos juntos escondería justamente el
     # caso que esta verificación existe para encontrar.
-    CORRUPT = "Copiado, pero no verificó"
-    CANCELLED = "Cancelado"
+    CORRUPT = N_("Copiado, pero no verificó")
+    CANCELLED = N_("Cancelado")
 
     @property
     def label(self) -> str:

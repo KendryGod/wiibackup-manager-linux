@@ -6,8 +6,8 @@
 #     ./tools/update-translations.sh
 #
 # Qué hace, en orden:
-#   1. Vuelve a extraer del código todos los textos marcados con _() y
-#      ngettext() a data/locale/wiibackup-manager.pot.
+#   1. Vuelve a extraer del código todos los textos marcados con _(),
+#      ngettext() y N_() a data/locale/wiibackup-manager.pot.
 #   2. Fusiona ese .pot con cada .po que ya exista (msgmerge), así las
 #      traducciones ya hechas se conservan y solo aparecen como pendientes
 #      las cadenas nuevas o las que cambiaron.
@@ -22,10 +22,16 @@ POT="data/locale/$DOMAIN.pot"
 
 # El idioma del código fuente es el español: los msgid son las cadenas en
 # español, así que no hay un catálogo es/ que mantener (ver i18n.py).
+#
+# `N_` es el marcador que no traduce: sirve para las cadenas que se
+# escriben lejos de donde se muestran -los valores de los enums que
+# terminan en pantalla-, que si no `xgettext` no tiene forma de ver (ver
+# i18n.N_). Si algún día se agrega otro marcador, va acá también.
 xgettext \
     --language=Python \
     --keyword=_ \
     --keyword=ngettext:1,2 \
+    --keyword=N_ \
     --from-code=UTF-8 \
     --package-name="WiiBackup Manager" \
     --msgid-bugs-address="https://github.com/KendryGod/wiibackup-manager-linux/issues" \

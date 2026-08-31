@@ -91,6 +91,18 @@ Son operaciones sin nada que ver: una mira el hardware, la otra mira un
 archivo. En español el verbo es el mismo por casualidad; en inglés no hay
 por qué arrastrar esa casualidad.
 
+Adentro del `verify` hay una segunda distinción, y esta no es de estilo:
+**"no pasó la verificación" y "quedó sin verificar" son cosas distintas**.
+Un archivo que `wit` miró y rechazó es *did not pass verification*; uno
+que nadie llegó a mirar —timeout, `wit` que falta, verificación
+cancelada— es *left unverified*. Traducir el primero como *unverified*
+diría que no se comprobó, que es justo lo contrario de lo que pasó.
+
+| Español | Inglés |
+|---|---|
+| Copiado, pero no verificó | **Copied, but did not pass verification** |
+| quedó sin comprobar | **was left unverified** |
+
 ## Convenciones de forma
 
 - **Ortografía**: `cancelled` / `cancelling` con doble L, que es lo que ya
@@ -136,9 +148,11 @@ cosas a mano sobre `data/locale/en/LC_MESSAGES/wiibackup-manager.po`:
 ```bash
 PO=data/locale/en/LC_MESSAGES/wiibackup-manager.po
 
-# 1. Entradas con msgstr idéntico al msgid: tienen que ser TODAS nombres
-#    propios de la lista de arriba. Cualquier otra cosa es una cadena que
-#    se pasó por alto.
+# 1. Entradas con msgstr idéntico al msgid: casi todas tienen que ser
+#    nombres propios de la lista de arriba. La excepción son las palabras
+#    que en inglés se escriben igual -Error, General, Log, Publisher,
+#    Developer- y las cadenas que son puro marcador ("{n} ok"). Cualquier
+#    OTRA cosa es una cadena que se pasó por alto.
 msgattrib --no-obsolete --translated --no-wrap "$PO" \
   | awk '/^msgid /{id=substr($0,7)}
          /^msgstr /{if (substr($0,8)==id && id!="\"\"") print id}'

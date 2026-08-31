@@ -115,3 +115,73 @@ def test_no_quedan_cadenas_sin_traducir(po):
     assert not sin_traducir, (
         f"{len(sin_traducir)} cadenas sin traducir en {po.parent.parent.name}: "
         + ", ".join(s[:40] for s in sin_traducir[:5]))
+
+
+# --------------------------------- Cadenas que no se marcan con `_()` --
+#
+# Los valores de `OperationKind` y `JobStatus` se muestran al usuario pero
+# se traducen lejos de donde se escriben, con `_(self.value)` en `.label`.
+# `xgettext` no puede deducir eso -lo único que ve es una variable-, así
+# que van envueltos en `N_()`, que no traduce nada y solo los hace
+# visibles para la extracción. Estos dos tests cuidan ese arreglo: sin
+# ellos, agregar un estado nuevo sin la marca vuelve a dejar media
+# interfaz en español, y en silencio.
+
+
+def _msgids(po: Path) -> set:
+    return {msgid for msgid, _t in _entradas(po)}
+
+
+@pytest.mark.parametrize("po", CATALOGOS, ids=lambda p: p.parent.parent.name)
+def test_los_valores_de_los_enums_visibles_estan_en_el_catalogo(po):
+    """Cada valor que termina en pantalla vía `.label` tiene su entrada.
+
+    Es la prueba del caso real: `JobStatus.PENDING` valía "Pendiente" sin
+    marcar, no estaba en ningún catálogo, y un usuario en inglés veía
+    "Pendiente" en la fila de una cola por lo demás traducida."""
+    from wiibackup_manager.operations import OperationKind
+    from wiibackup_manager.queue_manager import JobStatus
+
+    presentes = _msgids(po)
+    faltan = [f"{enum.__name__}.{m.name} = {m.value!r}"
+              for enum in (JobStatus, OperationKind)
+              for m in enum if m.value not in presentes]
+    assert not faltan, (
+        "valores de enum que no llegaron al catálogo (¿les falta `N_()`, o "
+        "hay que correr tools/update-translations.sh?):\n  "
+        + "\n  ".join(faltan))
+
+
+def test_toda_cadena_marcada_con_N_llega_a_la_plantilla():
+    """El otro lado del mismo arreglo: que `--keyword=N_` siga en
+    `tools/update-translations.sh`. Si alguien lo saca, las cadenas
+    marcadas dejan de extraerse y esto lo dice, en vez de que se note
+    recién en una captura de pantalla en inglés a medias."""
+    raiz = Path(__file__).resolve().parent.parent
+    # Por `_entradas` y no con un `in` sobre el texto: `xgettext` parte las
+    # cadenas largas en varias líneas, y un `msgid "..."` literal no las
+    # encontraría.
+    plantilla = _msgids(LOCALE_DIR / f"{DOMINIO}.pot")
+    marcadas = set()
+    for py in sorted((raiz / "wiibackup_manager").rglob("*.py")):
+        marcadas |= set(re.findall(r'\bN_\(\s*"((?:[^"\\]|\\.)*)"\s*\)',
+                                   py.read_text(encoding="utf-8")))
+    assert marcadas, "no se encontró ninguna cadena marcada con N_()"
+    faltan = [m for m in sorted(marcadas) if m not in plantilla]
+    assert not faltan, (
+        "marcadas con N_() pero ausentes de la plantilla: " + ", ".join(faltan))
+
+
+@pytest.mark.parametrize("po", CATALOGOS, ids=lambda p: p.parent.parent.name)
+def test_no_quedan_entradas_fuzzy(po):
+    """Una entrada `#, fuzzy` NO se muestra: `msgfmt` la deja afuera del
+    .mo y la app cae al español, igual que si no estuviera traducida. Y no
+    la ve `test_no_quedan_cadenas_sin_traducir`, porque msgstr no está
+    vacío -tiene la adivinanza de `msgmerge`, que suele ser cualquier
+    cosa: al agregar estos enums propuso "Customer" para "Pendiente"-."""
+    r = subprocess.run(["msgattrib", "--fuzzy", "--no-obsolete", str(po)],
+                       capture_output=True, text=True, check=True)
+    difusas = [m for m in re.findall(r'^msgid "((?:[^"\\]|\\.)+)"', r.stdout, re.M)]
+    assert not difusas, (
+        f"{len(difusas)} entradas fuzzy en {po.parent.parent.name} "
+        "(revisarlas y sacarles la marca): " + ", ".join(difusas[:5]))

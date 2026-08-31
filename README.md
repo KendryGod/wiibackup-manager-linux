@@ -363,10 +363,24 @@ Con eso, un sistema en francés abre la app en francés.
   leerlo antes de empezar: evita que la misma idea salga traducida de dos
   formas distintas en dos pantallas.
 
+- Una entrada marcada `#, fuzzy` **no se muestra**: `msgfmt` la deja
+  afuera del `.mo` y la app cae al español. Son las que `msgmerge` adivinó
+  sola a partir de una cadena parecida, y adivina bastante mal —"Pendiente"
+  llegó a quedar como *Customer*—, así que hay que revisarlas una por una
+  y sacarles la marca. `msgattrib --fuzzy` las lista.
+
 **Al cambiar textos de la interfaz** (para quien toque el código): envolver
 la cadena nueva con `_()` —o `ngettext()` si depende de una cantidad—,
 nunca `_(f"...")`, y correr `./tools/update-translations.sh` para que la
 plantilla y los catálogos queden al día.
+
+El tercer marcador es `N_()`, para cuando la cadena se **escribe** en un
+lugar y se **muestra** en otro: los valores de `OperationKind` y de
+`JobStatus`, que se definen al importar el módulo y se traducen recién al
+dibujarlos, con `_(self.value)`. `N_` no traduce nada —devuelve el texto
+tal cual—, solo hace que `xgettext` vea la cadena, que si no queda fuera
+del catálogo y el usuario en inglés ve "Copiando" en medio de la interfaz
+traducida.
 
 ## Primeros pasos
 

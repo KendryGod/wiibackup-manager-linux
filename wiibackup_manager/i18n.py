@@ -25,10 +25,16 @@ catálogo en vez de asumir uno: la misma app corre desde el repo, desde
 
 Uso
 ---
-    from .i18n import _
+    from .i18n import _, N_
 
     _("Eliminar")                       # cadena suelta
     _("Eliminado: {name}").format(...)  # con datos
+    N_("Pendiente")                     # se traduce en otro momento
+
+`N_` es para el caso en que la cadena se ESCRIBE en un lugar y se MUESTRA
+en otro: el valor de un enum, por ejemplo, que se define al importar el
+módulo -cuando todavía no hay ninguna pantalla- y se traduce recién al
+dibujar la fila. Ver más abajo, en su propia docstring.
 
 Nunca `_(f"...")`: la f-string se interpola ANTES de buscar la traducción,
 así que el msgid tendría adentro el nombre del archivo del usuario y no
@@ -79,6 +85,30 @@ _translation = _load()
 
 _ = _translation.gettext
 ngettext = _translation.ngettext
+
+
+def N_(message: str) -> str:
+    """Marca una cadena para el catálogo SIN traducirla todavía.
+
+    Devuelve el texto tal cual: es una función identidad. Lo único que
+    hace es ser visible para `xgettext`, que arma el catálogo leyendo el
+    fuente y no puede saber qué cadena termina adentro de un `_()` si esa
+    cadena se escribió en otro lado.
+
+    El caso que la trajo son los valores de los enums que se muestran al
+    usuario (`OperationKind`, `queue_manager.JobStatus`). Ahí la cadena se
+    define al importar el módulo -cuando todavía no hay ninguna ventana ni
+    idioma que valga- y se traduce recién al mostrarla, con `_(self.value)`
+    en la propiedad `.label`. Para `xgettext` eso es invisible: lo único
+    que ve es `_(self.value)`, una variable, así que esos textos no
+    llegaban nunca a la plantilla y `.label` devolvía el español aunque la
+    app estuviera en inglés. Envolviendo el valor en `N_` la cadena entra
+    al catálogo, y `.label` la encuentra.
+
+    Para que esto funcione, `tools/update-translations.sh` le pasa
+    `--keyword=N_` a `xgettext`; agregar otro marcador quiere decir
+    agregarlo también ahí."""
+    return message
 
 
 def current_language() -> str:

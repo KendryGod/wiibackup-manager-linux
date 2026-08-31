@@ -53,7 +53,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
-from .i18n import _
+from .i18n import _, N_
 
 
 class OperationKind(Enum):
@@ -63,18 +63,24 @@ class OperationKind(Enum):
     declara cada operación al arrancar (`read_paths` / `write_paths`), que
     es información concreta y no una propiedad del tipo. La transferencia
     era el ejemplo de por qué: "no modifica la biblioteca" es cierto, pero
-    escribe -y mucho- en la unidad de destino."""
+    escribe -y mucho- en la unidad de destino.
 
-    SCANNING = "Escaneando la biblioteca"
-    IMPORTING = "Agregando juegos"
-    CONVERTING = "Convirtiendo"
-    VERIFYING = "Verificando"
-    TRANSFERRING = "Enviando a la unidad"
-    DELETING = "Eliminando"
-    RENAMING = "Renombrando"
-    INSTALLING_HOMEBREW = "Instalando homebrew"
-    CHECKING_MEMORY = "Verificando la memoria"
-    FORMATTING = "Formateando la unidad"
+    Los valores van envueltos en `N_` -que no traduce nada, solo marca-
+    porque si no `xgettext` no los ve: lo único que hay escrito en el
+    fuente es `_(self.value)`, y de ahí no se puede deducir qué cadenas
+    son. Sin la marca no entran al catálogo, y `.label` termina
+    devolviendo el español aunque la app esté en otro idioma."""
+
+    SCANNING = N_("Escaneando la biblioteca")
+    IMPORTING = N_("Agregando juegos")
+    CONVERTING = N_("Convirtiendo")
+    VERIFYING = N_("Verificando")
+    TRANSFERRING = N_("Enviando a la unidad")
+    DELETING = N_("Eliminando")
+    RENAMING = N_("Renombrando")
+    INSTALLING_HOMEBREW = N_("Instalando homebrew")
+    CHECKING_MEMORY = N_("Verificando la memoria")
+    FORMATTING = N_("Formateando la unidad")
 
     @property
     def label(self) -> str:
