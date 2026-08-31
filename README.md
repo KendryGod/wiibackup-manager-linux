@@ -6,7 +6,7 @@ de Windows. Hecho con GTK4 + libadwaita para verse nativo en Fedora/GNOME.
 [![CI](https://github.com/KendryGod/wiibackup-manager-linux/actions/workflows/ci.yml/badge.svg)](https://github.com/KendryGod/wiibackup-manager-linux/actions/workflows/ci.yml)
 ![Estado](https://img.shields.io/badge/estado-alpha-orange)
 ![Licencia](https://img.shields.io/badge/licencia-MIT-blue)
-![Versión](https://img.shields.io/badge/versión-0.1.6-green)
+![Versión](https://img.shields.io/badge/versión-0.2.0-green)
 
 ![La pestaña Biblioteca con las carátulas descargadas](docs/screenshots/biblioteca.png)
 
@@ -493,6 +493,145 @@ wiibackup_manager/
 ```
 
 ## Changelog
+
+### 0.2.0
+
+40 commits desde la 0.1.6, y la versión más grande hasta ahora: seis
+funciones nuevas -entre ellas soporte de GameCube y la Homebrew Store
+integrada-, una ronda larga de arreglos de seguridad salidos de revisión
+externa, y el reacomodo interno que hizo falta para sostener todo eso.
+
+El tag `v0.1.6` había quedado puesto en el commit del bump, así que los
+cinco commits que le siguen -CI, gettext y la papelera- son parte de la
+0.1.6 y están descritos en su entrada, no acá.
+
+#### Nuevo
+
+- **Soporte de GameCube.** La biblioteca identifica y transfiere juegos
+  de GameCube además de los de Wii, con su propia estructura de destino
+  (la que busca Nintendont) en vez de la `wbfs/` de los USB Loaders.
+
+- **Homebrew Store integrada** con [oscwii.org](https://oscwii.org):
+  buscar, ver y instalar apps de homebrew a la unidad sin salir de la
+  app, con un instalador que valida lo que baja antes de escribir nada.
+  Incluye **Golden Configs**: deja USB Loader GX y Nintendont
+  preconfigurados en la unidad del cliente.
+
+- **Verificar Memoria.** Detecta pendrives y tarjetas truchos -los que
+  dicen 128 GB y tienen 8- llenando todo el espacio libre y releyéndolo
+  con `f3`, con progreso real de las dos pasadas y cancelación en el
+  momento. El veredicto queda en el historial. Suma además un
+  **formateo FAT32 de propósito general** (estilo GUIFormat), con los
+  mismos blindajes que Modo Fábrica.
+
+- **Ticket de Entrega.** Un PDF de una página con lo que lleva la unidad
+  -juegos de Wii, de GameCube, apps de homebrew, capacidad y formato-,
+  con el nombre del cliente y notas, para mandárselo al entregar el
+  equipo. Se dibuja con cairo, sin dependencias nuevas.
+
+- **Recovery Manager.** Si se cortó la luz preparando una unidad, al
+  abrir la app un aviso lista lo que quedó tirado -respaldos ocultos,
+  instalaciones a medias, temporales de varios GB- y ofrece restaurar o
+  limpiar cada uno. Antes de mostrar nada confirma que el proceso que lo
+  dejó ya no esté corriendo, así que nunca toca una operación en curso.
+
+- **Verificación después de copiar** (opcional, apagada por defecto):
+  releer cada juego de la unidad con `wit VERIFY` al terminar de
+  copiarlo, para encontrar el pendrive que falla en silencio. Un juego
+  que se copia entero pero no verifica queda marcado aparte de un error
+  de copia: son dos problemas distintos, y este deja un archivo que
+  ocupa lugar y no anda en la consola.
+
+- **Confirmación al cerrar la app con una operación en curso.** Cerrar
+  mientras se formatea, se copia, se convierte o se prueba una memoria
+  ahora pregunta, con "Seguir esperando" o "Cancelar operación y
+  cerrar", en vez de irse y confiar en que el trabajo de fondo termine
+  bien solo. Un escaneo de biblioteca no interrumpe nada, así que no
+  pregunta.
+
+- **Barra lateral de navegación** en lugar de las pestañas, **Modo
+  Fábrica** blindado, y **scrubbing opcional** de la partición de
+  actualización al convertir.
+
+#### Seguridad
+
+Casi todo de esta sección salió de rondas de revisión externa
+(ChatGPT) sobre el código de integridad de datos.
+
+- **Modo Fábrica valida la identidad estable del USB** y pasa por el
+  registro de operaciones: ya no se puede formatear un disco mientras
+  una transferencia o una instalación le están escribiendo encima, ni al
+  revés.
+
+- **El rollback ya no se traga sus errores.** Si al restaurar un
+  respaldo fallaba alguno de los archivos -típico en un WBFS dividido en
+  tres-, el fallo se ignoraba y la app daba la restauración por buena. El
+  juego quedaba inservible sin que nadie se enterara.
+
+- **Instalación de Homebrew transaccional por carpeta**, no archivo por
+  archivo: una extracción cortada a mitad de una actualización podía
+  dejar la app mezclando archivos de la versión vieja y la nueva, cada
+  uno válido por separado y el conjunto roto.
+
+- **ZIPs ambiguos y descargas no confiables.** Dos entradas de un ZIP
+  que colisionan al escribirse en FAT/exFAT ya no pasan la validación, y
+  las descargas quedan contra una lista blanca: contenido que viene de
+  la red no decide más cosas que le tocan a este código.
+
+- **Temporales atómicos seguros entre threads.** El nombre del temporal
+  llevaba solo el PID, así que dos threads copiando al mismo destino
+  calculaban el mismo nombre y se truncaban el archivo entre sí -sobre
+  los ISO de los clientes, a mitad de camino.
+
+- **Un respaldo temporal que no se puede borrar ya no desaparece en
+  silencio**: son archivos ocultos de varios GB, y el usuario se quedaba
+  con la unidad llena por algo que no podía ver.
+
+- **Política explícita de número de disco** (0 y 1, no "cualquiera menor
+  que 8"): un header corrupto armaba un `disc3.iso` que Nintendont no
+  busca ni podría usar.
+
+- **Validar el destino contra puntos de montaje críticos** al instalar
+  homebrew, y **verificar el desmontaje antes de formatear**.
+
+- **Un escaneo de restos que falla ya no se ve como un disco limpio**, y
+  **el escaneo de la biblioteca ya no esconde los restos** al arrancar:
+  los dos corrían juntos y el segundo tapaba al primero, así que la app
+  abría sin aviso -exactamente lo que se ve cuando no hay nada que
+  recuperar.
+
+#### Arquitectura
+
+- **`atomicfs`**: las primitivas de "dejar algo en su lugar" (escribir
+  en un temporal y mover al final, respaldar y restaurar) extraídas a un
+  módulo propio y compartidas por todo lo que escribe.
+- **`library.py` dividido** en seis módulos con un trabajo cada uno
+  -modelo, escaneo, copiado, cálculo de destinos, operaciones de disco y
+  formateo de texto- sin cambiar comportamiento: las 49 definiciones que
+  se movieron quedaron byte-idénticas.
+- **`fsutil`** e **`InflightRegistry`** extraídos, unificando la
+  escritura atómica, las rutas de datos y el dedupe de pedidos en vuelo.
+
+#### Traducciones
+
+- Catálogo de inglés al día con toda la interfaz nueva, y un **glosario**
+  (`docs/glosario-traduccion.md`) que fija el vocabulario para que la
+  misma idea no salga traducida de dos formas en dos pantallas.
+- **Los estados de las operaciones y de la cola ahora se traducen.**
+  Estaban en el valor de un enum, invisible para `xgettext`, así que un
+  usuario en inglés veía "Pendiente" y "Copiando" en medio de una
+  interfaz por lo demás traducida.
+
+#### Otros
+
+- Ícono nuevo, con esquinas redondeadas estilo macOS y tamaño 24×24.
+- El lanzador del escritorio ya no depende del PATH del usuario.
+- Timeout propio para `wit ISOSIZE`, en vez de heredar los 30 minutos.
+- El aviso de "cola terminada" ya no aparece sobre una tanda nueva.
+- La etiqueta "Cola de Tareas" del sidebar pasó a llamarse "Transferir".
+- Cobertura completa de `gametdb.py` y `oscwii_client.py`, y un agujero
+  de aislamiento entre pruebas -un test dejaba módulos hablando en
+  inglés- cerrado con un guard que lo detecta solo.
 
 ### 0.1.6
 
