@@ -6,7 +6,7 @@ de Windows. Hecho con GTK4 + libadwaita para verse nativo en Fedora/GNOME.
 [![CI](https://github.com/KendryGod/wiibackup-manager-linux/actions/workflows/ci.yml/badge.svg)](https://github.com/KendryGod/wiibackup-manager-linux/actions/workflows/ci.yml)
 ![Estado](https://img.shields.io/badge/estado-alpha-orange)
 ![Licencia](https://img.shields.io/badge/licencia-MIT-blue)
-![Versión](https://img.shields.io/badge/versión-0.2.0-green)
+![Versión](https://img.shields.io/badge/versión-0.2.1-green)
 
 ![La pestaña Biblioteca con las carátulas descargadas](docs/screenshots/biblioteca.png)
 
@@ -499,6 +499,44 @@ wiibackup_manager/
 ```
 
 ## Changelog
+
+### 0.2.1
+
+Cuatro commits desde la 0.2.0. Una versión chica y de taller: la guía para
+usar la app preparando unidades de clientes, y que desconectar un USB a
+mitad de una operación deje de verse como un error críptico.
+
+#### Nuevo
+
+- **Manual del taller** ([MANUAL_TALLER.md](MANUAL_TALLER.md), enlazado
+  desde "Primeros pasos"): el flujo de punta a punta para preparar la
+  unidad de un cliente -verificar la memoria, Modo Fábrica, transferir con
+  la verificación prendida, esperar la cola, expulsar- y las cinco reglas
+  que evitan entregar una unidad con un juego que no anda. Incluye lo que
+  hay que revisar a mano después de un F3 cancelado o de un crash, y qué
+  cosas ya están cubiertas y no hay que vigilar.
+
+- **"Unidad desconectada" es un estado propio**, distinto de un error.
+  Antes, tirar del cable a mitad de una copia terminaba en pantalla como
+  `[Errno 5] Input/output error` o como un texto de `wit` en inglés:
+  indistinguible de un problema real del archivo o de la app, cuando lo
+  único que había que hacer era volver a enchufar y repetir. Ahora la cola
+  de transferencias, la conversión, Verificar Memoria y la instalación de
+  Homebrew lo detectan y lo dicen con esas palabras, cada uno con su
+  estado -en la cola cuenta aparte de los errores, porque un cable flojo
+  en una tanda de 40 juegos produce 30 fallos idénticos y verlos como
+  "Error" invita a buscar 30 problemas donde hay uno-, y en el historial
+  queda como "Unidad desconectada" y no como "Con error".
+
+  La detección no se apoya en una sola señal: mira el errno cuando lo hay
+  (`ENODEV`, `ENXIO`, `ESHUTDOWN`, `EREMOTEIO`, `ESTALE`), que una ruta
+  que era punto de montaje haya dejado de serlo, y que una carpeta que
+  existía al empezar deje de responder -esta última es la única que
+  queda cuando el trabajo lo hacía `wit` o `f3`, que son subprocesos y no
+  levantan un `OSError` con número-. `EIO` queda afuera a propósito
+  aunque sea el que más se ve al desconectar: también lo tira un pendrive
+  enchufado con sectores ilegibles, y confundirlos manda a buscar el
+  problema al lado equivocado.
 
 ### 0.2.0
 
