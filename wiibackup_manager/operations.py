@@ -130,6 +130,44 @@ _SHARED_PROGRESS_KINDS = frozenset(
 )
 
 
+# Tipos que NO se pueden cortar de golpe sin dejar algo a medias en el
+# disco de un cliente. Es lo que hace que cerrar la ventana pida
+# confirmación en vez de irse y confiar en que el cleanup de fondo salga
+# bien (ver `WiiBackupWindow._on_close_request`).
+#
+# El criterio es qué queda en el disco si el proceso se muere AHORA, no
+# cuánto tarda la operación:
+#
+# - `CHECKING_MEMORY` y `FORMATTING` le están escribiendo a la unidad del
+#   cliente, y `f3write` además corre en su propia sesión de procesos: se
+#   sobrevive al cierre de la app.
+# - `TRANSFERRING`, `CONVERTING` e `INSTALLING_HOMEBREW` dejan un archivo
+#   a medio escribir donde tendría que haber un juego o una app.
+# - `VERIFYING` es de solo lectura y no rompe nada, pero releer un
+#   dual-layer tarda varios minutos: irse sin avisar tira ese trabajo a la
+#   basura y el usuario se queda sin el veredicto que estaba esperando.
+#
+# Afuera quedan las que son seguras de interrumpir: `SCANNING` (no
+# escribe, y vuelve a correr solo al abrir), `RENAMING` (un rename es
+# atómico: pasó o no pasó), `DELETING` (mover a la papelera también), e
+# `IMPORTING`, que escribe en un temporal oculto y recién al final lo
+# mueve al destino -si se corta, el original del usuario sigue intacto y
+# el resto lo encuentra el Recovery Manager.
+INTERRUPT_UNSAFE_KINDS = frozenset(
+    {OperationKind.CHECKING_MEMORY, OperationKind.FORMATTING,
+     OperationKind.TRANSFERRING, OperationKind.CONVERTING,
+     OperationKind.VERIFYING, OperationKind.INSTALLING_HOMEBREW}
+)
+
+# De las de arriba, las que además no se pueden cancelar: no hay a quién
+# pedirle que pare. `format_as_wii_usb` corre `mkfs` a través de `pkexec`,
+# o sea en un proceso de root que no es hijo nuestro y que ningún token de
+# cancelación alcanza. Cerrar la ventana mientras formatea NO detiene el
+# formateo, y el diálogo de cierre tiene que decirlo en vez de ofrecer una
+# cancelación que no existe.
+UNCANCELLABLE_KINDS = frozenset({OperationKind.FORMATTING})
+
+
 def _uses_progress_bar(kind: OperationKind, declared: bool) -> bool:
     """Si esta operación ocupa la barra de progreso: por ser de un tipo
     que siempre la usa, o porque quien la arranca lo declaró (el caso de
@@ -271,6 +309,17 @@ class OperationManager:
             if op.label not in labels:
                 labels.append(op.label)
         return " · ".join(labels)
+
+    def unsafe_to_interrupt(self) -> list:
+        """Las operaciones en curso que no se pueden cortar de golpe, de la
+        más vieja a la más nueva.
+
+        Lista vacía quiere decir que se puede cerrar la app sin preguntar
+        nada: o no hay nada corriendo, o lo que hay es seguro de
+        interrumpir. Ver `INTERRUPT_UNSAFE_KINDS`."""
+        with self._lock:
+            return [op for op in self._active.values()
+                    if op.kind in INTERRUPT_UNSAFE_KINDS]
 
     def is_path_busy(self, path) -> bool:
         """True si ese archivo está tomado por alguna operación."""

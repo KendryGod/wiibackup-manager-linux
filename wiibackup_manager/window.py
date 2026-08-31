@@ -84,6 +84,11 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         # Qué se avisa al tocar "Cancelar": lo pone la operación que está
         # usando la barra en ese momento (enviar o convertir).
         self._cancel_message = "Cancelando…"
+        # Que el usuario ya confirmó que quiere cerrar con algo peligroso
+        # en curso. Sin esto, el `self.close()` que dispara el diálogo
+        # volvería a entrar a `_on_close_request`, que volvería a
+        # preguntar, y la ventana no se cerraría nunca.
+        self._close_confirmed = False
 
         # Historial persistente de operaciones (pestaña Log). Se le pasa al
         # OperationManager para que cada operación que termina informando
@@ -185,6 +190,10 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         # terminaría con un `wit` a mitad de una escritura sobre el
         # pendrive: pedirle que pare (y que mate a `wit`) antes de irse
         # deja la unidad en un estado predecible.
+        #
+        # Y si lo que está corriendo es de lo que no se puede cortar de
+        # golpe, el cierre se frena y se pregunta primero: ver
+        # `_on_close_request`.
         self.connect("close-request", self._on_close_request)
 
     # ------------------------------------------------------------ Sidebar --
@@ -2708,10 +2717,101 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         about.present(self)
 
     def _on_close_request(self, *_args) -> bool:
+        """Decide si la ventana se puede cerrar ya o hay que preguntar.
+
+        Devolver True FRENA el cierre (es lo que espera GTK de
+        `close-request`); False lo deja seguir.
+
+        Con algo peligroso en curso se frena y se pregunta. La alternativa
+        -cerrar y confiar en que los `shutdown()` terminen bien solos- es
+        la que había, y no alcanza: son hilos daemon corriendo mientras el
+        proceso se está muriendo, sobre la unidad de un cliente que
+        probablemente esté por desenchufar. Que la app se cierre no es
+        motivo suficiente para arriesgar eso sin avisar."""
+        if self._close_confirmed:
+            # Segunda vuelta: el usuario ya eligió "Cancelar y cerrar" y ya
+            # se canceló lo que había. Salir sin volver a preguntar.
+            return False
+
+        riesgosas = self.ops.unsafe_to_interrupt()
+        if not riesgosas:
+            self._shutdown_views()
+            return False  # False = seguir con el cierre normal
+
+        self._confirm_close(riesgosas)
+        return True  # True = no cerrar todavía
+
+    def _shutdown_views(self):
+        """Les pide a las tres vistas con trabajo de fondo que corten lo
+        que estén haciendo. Todas vuelven en el acto (mandan una señal o
+        prenden una bandera), así que esto no traba el cierre."""
         self.transfer_view.shutdown()
         self.homebrew_view.shutdown()
         self.memory_check_view.shutdown()
-        return False  # False = seguir con el cierre normal
+
+    def _confirm_close(self, riesgosas: list) -> "Adw.AlertDialog":
+        """El diálogo que frena el cierre. Devuelve el diálogo ya
+        presentado, para poder mirarlo desde las pruebas."""
+        nombres = []
+        for op in riesgosas:
+            if op.label not in nombres:
+                nombres.append(op.label)
+        detalle = ", ".join(nombres)
+
+        cuerpo = ngettext(
+            "Hay una operación en curso: {ops}.",
+            "Hay operaciones en curso: {ops}.",
+            len(nombres)).format(ops=detalle)
+        # Lo que se pierde es distinto según qué esté corriendo, así que se
+        # dice en concreto en vez de un "puede haber problemas" genérico.
+        sin_cancelacion = [op.label for op in riesgosas
+                           if op.kind in operations.UNCANCELLABLE_KINDS]
+        if sin_cancelacion:
+            cuerpo += "\n\n" + _(
+                "Ojo: «{ops}» no se puede cancelar -corre con permisos de "
+                "administrador, fuera de la app-. Si cerrás, la ventana "
+                "desaparece pero eso sigue funcionando hasta terminar. Es "
+                "mejor esperar.").format(ops=", ".join(sin_cancelacion))
+        else:
+            cuerpo += "\n\n" + _(
+                "Si cerrás ahora se cancela y puede quedar un archivo a "
+                "medio escribir en la unidad.")
+
+        dialog = Adw.AlertDialog(
+            heading=_("¿Cerrar con una operación en curso?"),
+            body=cuerpo,
+        )
+        dialog.add_response("wait", _("Seguir esperando"))
+        dialog.add_response("close", _("Cancelar operación y cerrar"))
+        dialog.set_response_appearance("close", Adw.ResponseAppearance.DESTRUCTIVE)
+        # Que la tecla Escape y el botón por defecto sean el que NO destruye
+        # nada: cerrar sin querer lo que se estaba esperando es justo el
+        # accidente que este diálogo viene a evitar.
+        dialog.set_default_response("wait")
+        dialog.set_close_response("wait")
+        dialog.connect("response", self._on_close_response)
+        dialog.present(self)
+        return dialog
+
+    def _on_close_response(self, _dialog, response: str):
+        """Qué hacer con lo que eligió el usuario.
+
+        Con "Seguir esperando" no hay nada que hacer: la ventana ya se
+        quedó abierta porque `_on_close_request` devolvió True.
+
+        "Cancelar operación y cerrar" corta de verdad ANTES de cerrar -las
+        tres vistas con trabajo de fondo y el token de la barra de
+        progreso, que es el que usan convertir y verificar- y recién ahí
+        pide el cierre otra vez, ya con la bandera puesta."""
+        if response != "close":
+            return
+        self._shutdown_views()
+        # Lo que corre por la barra de progreso de la ventana (convertir,
+        # verificar en lote) no pasa por ninguna vista: se corta con el
+        # token, que además mata el `wit` en curso.
+        self._cancel_token.cancel()
+        self._close_confirmed = True
+        self.close()
 
     def _show_toast(self, message: str):
         self._toast_overlay.add_toast(Adw.Toast(title=message, timeout=3))
