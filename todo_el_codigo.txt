@@ -13642,8 +13642,10 @@ class TransferView(Gtk.Box):
 # ============================================================
 from __future__ import annotations
 
+import sys
 import threading
 import time
+import traceback
 from pathlib import Path
 
 import gi
@@ -13763,6 +13765,11 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         # volver a avisarlo.
         self._recovery_leftovers: list = []
         self._recovery_ignored: set = set()
+        # Por qué falló el escaneo de restos, si falló. Va aparte de la
+        # lista y no como "lista vacía" porque son dos cosas distintas:
+        # vacía quiere decir "miré y no hay nada", y esto quiere decir "no
+        # pude mirar". Ver `_start_recovery_scan`.
+        self._recovery_scan_error: str = ""
 
         self._build_ui()
 
@@ -15324,29 +15331,43 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         demorar la aparición de la ventana por un aviso que casi siempre no
         hay que dar.
 
-        Cualquier problema termina en silencio y sin restos: esto es un
-        extra que corre solo al arrancar, y nada de lo que le pase puede
-        impedir que la app se abra. Los errores de disco ya los absorbe
-        `recovery_service.scan`; el `except` de acá es para el caso raro de
-        que la unidad de la biblioteca se desconecte justo mientras se
-        arman las raíces."""
+        Ningún problema puede impedir que la app se abra -esto es un extra
+        que corre solo al arrancar-, así que se atrapa todo. Pero atraparlo
+        NO es lo mismo que darlo por bueno: si el escaneo se cae, no se
+        sabe si hay restos o no, y eso se dice. Antes esta rama dejaba la
+        lista vacía, que es exactamente lo que significa "miré y está todo
+        limpio"; un escaneo roto se veía igual que un disco sano, y el
+        usuario perdía el aviso de los restos justo cuando algo andaba mal.
+
+        Los errores de disco esperables ya los absorbe
+        `recovery_service.scan`, que sigue de largo con lo que no puede
+        leer. Lo que llega acá es lo IMPREVISTO -la unidad que se
+        desconecta mientras se arman las raíces, un bug nuestro-, así que
+        además del aviso en pantalla va el traceback a stderr: en la
+        pantalla no entra, y sin él no hay por dónde empezar a mirar."""
         def worker():
+            error = ""
             try:
                 raices = recovery_service.scan_roots(self.settings)
                 encontrados = recovery_service.scan(raices, ops=self.ops)
-            except Exception:  # noqa: BLE001 - un aviso opcional no puede tirar la app
+            except Exception as e:  # noqa: BLE001 - un aviso opcional no puede tirar la app
                 encontrados = []
-            GLib.idle_add(self._on_recovery_scan_done, encontrados)
+                error = f"{type(e).__name__}: {e}"
+                print(f"[wiibackup-manager] falló el escaneo de restos: {error}",
+                      file=sys.stderr)
+                traceback.print_exc()
+            GLib.idle_add(self._on_recovery_scan_done, encontrados, error)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_recovery_scan_done(self, leftovers: list):
+    def _on_recovery_scan_done(self, leftovers: list, error: str = ""):
         # El escaneo puede terminar después de que la ventana se cerró (es
         # un hilo daemon que arrancó al construirla): tocar un widget ya
         # dispuesto por GTK tira la app entera. Mismo cuidado que con las
         # carátulas que llegan tarde, ver `gtk_helpers.widget_is_alive`.
         if not gtk_helpers.widget_is_alive(self._recovery_banner):
             return False
+        self._recovery_scan_error = error
         self._recovery_leftovers = [lo for lo in leftovers
                                     if lo.path not in self._recovery_ignored]
         self._update_recovery_banner()
@@ -15354,10 +15375,24 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
     def _update_recovery_banner(self):
         """Sin restos no hay banner. Un aviso que dice "no encontré nada"
-        es ruido en la única pantalla que el usuario ve siempre."""
+        es ruido en la única pantalla que el usuario ve siempre.
+
+        Que el escaneo FALLE sí se avisa, y con otro texto: ahí no se sabe
+        si hay restos, y callarse sería afirmar que no los hay."""
+        if self._recovery_scan_error:
+            # Sin botón: "Ver detalles" abriría el diálogo con la lista
+            # vacía, que es justo el "no hay nada" que este banner viene a
+            # desmentir. El motivo exacto va a stderr, no acá.
+            self._recovery_banner.set_button_label("")
+            self._recovery_banner.set_title(
+                _("No se pudo completar el escaneo de restos: puede haber "
+                  "restos de una operación interrumpida sin detectar."))
+            self._recovery_banner.set_revealed(True)
+            return
         if not self._recovery_leftovers:
             self._recovery_banner.set_revealed(False)
             return
+        self._recovery_banner.set_button_label(_("Ver detalles"))
         self._recovery_banner.set_title(summary_text(self._recovery_leftovers))
         self._recovery_banner.set_revealed(True)
 
@@ -26062,6 +26097,7 @@ import os
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -26673,6 +26709,137 @@ def test_la_antiguedad_se_dice_en_la_unidad_que_se_entiende(segundos, esperado):
     from wiibackup_manager.widgets.recovery_dialog import format_age
 
     assert format_age(segundos) == esperado
+
+
+# ------------------------- Cuando el escaneo del arranque se cae solo --
+#
+# El escaneo automático corre en un hilo y atrapa TODO: nada de lo que le
+# pase puede impedir que la app se abra. Pero atrapar no es dar por bueno.
+# Antes esa rama dejaba la lista vacía, que es exactamente lo que dice un
+# disco limpio, así que un escaneo roto se veía igual que "no hay nada que
+# recuperar": el usuario se quedaba sin el aviso de los restos justo
+# cuando algo andaba mal, y sin nada que mirar para saber por qué.
+#
+# Se ejercita el código real de `WiiBackupWindow` con un `self` de
+# mentira, como en `test_queue_manager.py`: importar el módulo no abre
+# ninguna ventana, así que esto corre en cualquier terminal y no solo bajo
+# Xvfb, que es donde vive el resto de lo que toca GTK.
+
+
+class _BannerDeMentira:
+    """Lo mínimo de `Adw.Banner` que usa `_update_recovery_banner`."""
+
+    def __init__(self):
+        self.title = None
+        self.revealed = None
+        self.button_label = "Ver detalles"
+
+    def set_title(self, texto):
+        self.title = texto
+
+    def set_revealed(self, valor):
+        self.revealed = valor
+
+    def set_button_label(self, texto):
+        self.button_label = texto
+
+
+class _VentanaDeMentira:
+    def __init__(self):
+        self.settings = object()
+        self.ops = object()
+        self._recovery_banner = _BannerDeMentira()
+        self._recovery_leftovers: list = []
+        self._recovery_ignored: set = set()
+        self._recovery_scan_error = ""
+
+
+def _correr_escaneo_del_arranque(monkeypatch):
+    """Corre `_start_recovery_scan` de verdad -con su hilo- y despacha a
+    mano lo que haya quedado encolado para el hilo de GTK, que en un test
+    no existe. Devuelve la ventana falsa ya actualizada."""
+    from wiibackup_manager import window
+    from wiibackup_manager.widgets import gtk_helpers
+
+    monkeypatch.setattr(gtk_helpers, "widget_is_alive", lambda w: True)
+    pendientes: list = []
+    monkeypatch.setattr(window.GLib, "idle_add",
+                        lambda func, *args: pendientes.append((func, args)))
+
+    ventana = _VentanaDeMentira()
+    # Los tres métodos REALES de la ventana, atados al `self` de mentira:
+    # el hilo llama al callback por `self`, y el callback al banner por
+    # `self`, así que sin esto se probaría media cadena. Lo único simulado
+    # es el widget del final.
+    for nombre in ("_start_recovery_scan", "_on_recovery_scan_done",
+                   "_update_recovery_banner"):
+        setattr(ventana, nombre,
+                types.MethodType(getattr(window.WiiBackupWindow, nombre), ventana))
+
+    ventana._start_recovery_scan()
+
+    limite = time.monotonic() + 10
+    while not pendientes and time.monotonic() < limite:
+        time.sleep(0.01)
+    assert pendientes, "el escaneo no avisó nunca al hilo de GTK"
+    func, args = pendientes.pop(0)
+    func(*args)
+    return ventana
+
+
+@pytest.mark.parametrize("rompe", ["scan_roots", "scan"])
+def test_un_escaneo_de_restos_que_se_cae_avisa_y_no_dice_que_esta_limpio(
+        monkeypatch, capsys, rompe):
+    """Lo que este arreglo vino a evitar: que un fallo del escaneo se vea
+    igual que un disco sin restos.
+
+    Se prueba rompiendo cada una de las dos llamadas que cubre el `try`,
+    porque las dos dejan al usuario en la misma situación -no se sabe si
+    hay restos- y las dos tienen que avisar igual."""
+    def _explota(*_a, **_k):
+        raise OSError("la unidad se desconectó a mitad del escaneo")
+    monkeypatch.setattr(rs, rompe, _explota)
+    # La otra llamada tiene que poder correr: lo que se prueba es que
+    # rompa la de esta vuelta, no las dos a la vez.
+    if rompe == "scan_roots":
+        monkeypatch.setattr(rs, "scan", lambda *_a, **_k: [])
+    else:
+        monkeypatch.setattr(rs, "scan_roots", lambda *_a, **_k: [])
+
+    ventana = _correr_escaneo_del_arranque(monkeypatch)
+
+    # 1. El aviso se ve, y es el de "no pude mirar", no el de "no hay nada".
+    assert ventana._recovery_banner.revealed is True, (
+        "un escaneo caído se vio igual que un disco limpio: sin ningún aviso")
+    assert "No se pudo completar el escaneo" in ventana._recovery_banner.title
+    # Y dice qué implica, que es lo que lo hace distinto de "todo limpio".
+    assert "sin detectar" in ventana._recovery_banner.title
+    # 2. Sin botón: "Ver detalles" abriría el diálogo vacío, que es
+    #    justamente el mensaje que este banner viene a desmentir.
+    assert ventana._recovery_banner.button_label == ""
+    # 3. El motivo quedó registrado para poder diagnosticarlo.
+    err = capsys.readouterr().err
+    assert "falló el escaneo de restos" in err
+    assert "la unidad se desconectó a mitad del escaneo" in err
+    assert "OSError" in err
+    # 4. Y no se inventaron restos que nadie llegó a ver.
+    assert ventana._recovery_leftovers == []
+
+
+def test_un_escaneo_que_no_encuentra_nada_no_muestra_ningun_aviso(monkeypatch,
+                                                                  capsys):
+    """La otra mitad, sin la cual la anterior no prueba nada: cuando el
+    escaneo SÍ termina y no hay restos, el banner sigue callado y no se
+    ensucia stderr. Los dos casos tienen que verse distinto."""
+    monkeypatch.setattr(rs, "scan_roots", lambda *_a, **_k: [])
+    monkeypatch.setattr(rs, "scan", lambda *_a, **_k: [])
+
+    ventana = _correr_escaneo_del_arranque(monkeypatch)
+
+    assert ventana._recovery_banner.revealed is False
+    assert ventana._recovery_banner.title is None
+    assert ventana._recovery_scan_error == ""
+    assert capsys.readouterr().err == ""
 
 
 # ============================================================
