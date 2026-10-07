@@ -10,6 +10,8 @@ coordina nada, hace el trabajo.
 """
 from __future__ import annotations
 
+import os
+import re
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -162,6 +164,51 @@ class RollbackFailedError(RuntimeError):
             "La conversión falló ({motivo}) y además no se pudo "
             "restaurar completamente el archivo original: {detalle}"
         ).format(motivo=str(self.original_error), detalle=str(self))
+
+
+# Las dos estructuras de juegos que arma `transfer_plan`: `wbfs/<ID6>/`
+# para Wii (`wbfs_dest_path`, la que buscan los USB Loaders) y
+# `games/<Título [ID6]>/` para GameCube (`gc_dest_path`, la de Nintendont).
+WII_DIR = "wbfs"
+GAMECUBE_DIR = "games"
+_ID6 = re.compile(r"^[A-Z0-9]{6}$")
+
+
+def _is_game_folder(folder: Path) -> bool:
+    """Si `folder` es la carpeta de UN juego: `games/<lo que sea>/` o
+    `wbfs/<ID6>/`. Nunca las raíces `games/` ni `wbfs/`."""
+    if folder.name in (GAMECUBE_DIR, WII_DIR):
+        return False
+    if folder.parent.name == GAMECUBE_DIR:
+        return True
+    return folder.parent.name == WII_DIR and bool(_ID6.match(folder.name))
+
+
+def remove_dir_if_empty(folder) -> bool:
+    """Borra la carpeta de UN juego (`wbfs/<ID6>/` o
+    `games/<Título [ID6]>/`) si quedó vacía, y devuelve si la borró.
+
+    Quien llama es responsable de que haya quedado vacía por algo de esta
+    app (una copia que creó la carpeta y no llegó, un temporal que el
+    Recovery Manager acaba de eliminar): esta función no puede saber si
+    una carpeta vacía estaba así de antes.
+
+    Solo toca carpetas de juego (`_is_game_folder`): nunca `wbfs/` ni
+    `games/` en sí, ni nada fuera de esas estructuras. Y usa `os.rmdir`,
+    que el kernel rechaza si adentro hay CUALQUIER cosa -incluidos
+    archivos ocultos, como el `.parcial-*` de otra copia en curso-, y que
+    comprueba y borra en un solo paso: no hay un momento entre "está
+    vacía" y "borrarla" en el que alguien pueda dejar algo adentro."""
+    folder = Path(folder)
+    if not _is_game_folder(folder):
+        return False
+    try:
+        os.rmdir(folder)
+    except OSError:
+        # No vacía, no existe, unidad desconectada: no hay nada que hacer,
+        # y nada de eso es un error de la operación que llamó.
+        return False
+    return True
 
 
 def replace_cut_by_disconnect(error: "RollbackFailedError", known_dir) -> bool:
@@ -444,8 +491,31 @@ def send_to_wbfs_drive(
     if not overwrite and dest.exists():
         raise DestinationExistsError(dest)
 
+    # Si la carpeta la crea ESTA copia, es la única que puede saber que,
+    # si no llega, queda vacía por culpa suya.
+    carpeta_nueva = not dest_dir.exists()
     dest_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        return _write_to_drive(game, dest, wit_binary, bytes_progress_cb,
+                               cancel, scrub_update, flush_progress_cb)
+    except BaseException:
+        # Cancelada o fallida: lo que la copia escribió ya lo limpiaron
+        # `atomicfs` o `DestinationGuard`, y la carpeta del juego
+        # (`wbfs/<ID6>/` o `games/<Título [ID6]>/`) que se creó para esto
+        # quedaría vacía en la unidad del cliente. Una que ya estaba -el
+        # juego que se estaba reemplazando, el disco 1 de un juego de dos
+        # discos, una vacía de antes- no se toca.
+        if carpeta_nueva:
+            remove_dir_if_empty(dest_dir)
+        raise
 
+
+def _write_to_drive(game: Game, dest: Path, wit_binary: str,
+                    bytes_progress_cb, cancel, scrub_update,
+                    flush_progress_cb) -> Path:
+    """El cuerpo de `send_to_wbfs_drive`, ya con la carpeta del juego
+    creada: copia directa o conversión con `wit`, según el caso."""
+    dest_dir = dest.parent
     if game.console == "gc":
         _copy_with_progress(game.path, dest,
                             bytes_progress_cb or (lambda _n: None), cancel)

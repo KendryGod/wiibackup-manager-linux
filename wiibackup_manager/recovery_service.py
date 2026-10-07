@@ -894,6 +894,14 @@ def delete(leftover: Leftover) -> None:
             leftover.trashinfo.unlink(missing_ok=True)
         except OSError:
             pass
+    # Un resto de una copia que se cortó suele ser lo ÚNICO que hay en la
+    # carpeta del juego (`wbfs/<ID6>/`, `games/<Título [ID6]>/`): borrado
+    # él, la carpeta quedaría vacía por esto mismo. `remove_dir_if_empty`
+    # no hace nada si queda cualquier otra cosa adentro, ni con las raíces
+    # `wbfs/` y `games/`, ni fuera de esas estructuras (la papelera, por
+    # ejemplo, para un `TRASHED`).
+    for _original, resto in leftover.pairs():
+        library_ops.remove_dir_if_empty(resto.parent)
 
 
 def _restore_from_trash(leftover: Leftover) -> None:

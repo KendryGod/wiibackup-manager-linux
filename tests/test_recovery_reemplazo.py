@@ -149,7 +149,10 @@ def test_las_partes_del_temporal_de_wit_van_juntas(tmp_path):
     (resto,) = _scan(raiz)
     assert resto.size_bytes == 15
     rs.delete(resto)
-    assert list(carpeta.iterdir()) == []
+    # Borrados los dos, la carpeta del juego quedó vacía por esto mismo y
+    # tampoco queda (`library_ops.remove_dir_if_empty`); `wbfs/` sí.
+    assert not carpeta.exists()
+    assert (raiz / "wbfs").is_dir()
 
 
 @pytest.mark.parametrize("nombre", [
