@@ -164,6 +164,29 @@ class RollbackFailedError(RuntimeError):
         ).format(motivo=str(self.original_error), detalle=str(self))
 
 
+def replace_cut_by_disconnect(error: "RollbackFailedError", known_dir) -> bool:
+    """True si un reemplazo no pudo devolver el original porque la unidad
+    DESAPARECIÓ, no porque algo esté roto.
+
+    Es el caso de desenchufar el pendrive a mitad de pisar un juego: el
+    respaldo (`DestinationGuard`) sigue entero en la unidad con su nombre
+    oculto, y lo único que falló es moverlo de vuelta -no hay unidad donde
+    moverlo-. Decírselo así al usuario ("tu juego quedó guardado") es la
+    diferencia entre algo que se arregla al reconectar y "se me borró el
+    juego"."""
+    motivo = error.original_error if error.original_error is not None else error
+    return drives.device_is_gone(known_dir=known_dir, exc=motivo)
+
+
+def original_kept_message() -> str:
+    """Lo que se le dice al usuario cuando un reemplazo se cortó por una
+    desconexión y el original quedó apartado en la unidad."""
+    return (drives.disconnected_message() + " "
+            + _("Tu juego original quedó guardado aparte en la unidad: "
+                "cuando la vuelvas a conectar, la app te va a ofrecer "
+                "restaurarlo."))
+
+
 # Marca del nombre oculto del respaldo: `.{nombre}.respaldo-{pid}`, en la
 # misma carpeta que el original (ver `atomicfs.hidden_sibling`). El nombre
 # tiene que ser reconocible: `_cleanup_partials` lo protege explícitamente

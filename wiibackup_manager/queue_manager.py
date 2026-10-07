@@ -858,6 +858,16 @@ class TransferQueue:
                 oplog.STATUS_ERROR, op=op)
             return
         except library_ops.RollbackFailedError as e:
+            if library_ops.replace_cut_by_disconnect(e, job.dest_root):
+                # Se desenchufó la unidad en medio de un reemplazo. El
+                # original no está perdido: quedó apartado en la unidad con
+                # un nombre oculto, y el Recovery Manager lo ofrece al
+                # reconectarla. Se dice eso, y no "no se pudo restaurar"
+                # con rutas internas, que se lee como "se borró el juego".
+                self._finish_job(job, JobStatus.DEVICE_DISCONNECTED,
+                                 library_ops.original_kept_message(),
+                                 oplog.STATUS_DISCONNECTED, op=op)
+                return
             # Caso grave: la conversión falló Y ADEMÁS no se pudo devolver
             # el original a su lugar (típico en un WBFS dividido si falla
             # justo una de las partes). `user_message` distingue esto de

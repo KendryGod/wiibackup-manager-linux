@@ -1277,6 +1277,16 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                     # éxito, se informa aparte en el resumen final.
                     skipped.append(game.title)
                     bytes_skipped += item.output_bytes
+                except library_ops.RollbackFailedError as e:
+                    # Mismo criterio que la cola (`TransferQueue._copy`): si
+                    # lo que pasó es que se desenchufó la unidad, el
+                    # original quedó apartado ahí y se dice eso.
+                    detalle = (library_ops.original_kept_message()
+                               if library_ops.replace_cut_by_disconnect(
+                                   e, dest_root)
+                               else e.user_message())
+                    errors.append(f"{game.title}: {detalle}")
+                    bytes_failed += item.output_bytes
                 except Exception as e:
                     if cancel.cancelled:
                         # El fallo es consecuencia de haber matado a `wit`
