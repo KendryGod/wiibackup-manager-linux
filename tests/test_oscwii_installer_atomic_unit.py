@@ -22,10 +22,7 @@ import os
 import zipfile
 from pathlib import Path
 
-import pytest
-
-from wiibackup_manager import (atomicfs, formatting, library_ops,
-                               oscwii_installer)
+from wiibackup_manager import atomicfs, formatting, oscwii_installer
 from wiibackup_manager.oscwii_client import HomebrewApp
 from wiibackup_manager.oscwii_installer import InstallStatus
 

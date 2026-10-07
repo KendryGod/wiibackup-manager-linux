@@ -11,7 +11,7 @@ estáticos -a qué ruta apunta cada spec-, como guarda de regresión de la
 investigación del Paso 1 (ver el comentario de golden_configs.py)."""
 from __future__ import annotations
 
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 
 import pytest
 

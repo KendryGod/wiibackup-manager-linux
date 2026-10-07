@@ -5,7 +5,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gtk, GdkPixbuf, GLib, GObject  # noqa: E402
+from gi.repository import Adw, Gtk, GLib, GObject  # noqa: E402
 
 from .. import gametdb
 from ..game_model import Game

@@ -18,8 +18,6 @@ reales que desaparecen de verdad.
 from __future__ import annotations
 
 import errno
-import threading
-from pathlib import Path
 
 import pytest
 
