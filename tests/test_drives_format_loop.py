@@ -45,6 +45,14 @@ def _sh(*cmd, check=True):
                           text=True, check=check)
 
 
+def _particiones(dev: str) -> list[str]:
+    # lsblk directo y no la función de `drives`: así este archivo también
+    # corre contra el código anterior al arreglo, para verificar por
+    # mutación que el caso MBR falla con el error del USB real.
+    salida = _sh("lsblk", "-nrpo", "NAME,TYPE", dev).stdout
+    return [n for n, t in (l.split() for l in salida.splitlines()) if t == "part"]
+
+
 def _montajes_de(dev: str) -> list[str]:
     salida = _sh("lsblk", "-nrpo", "MOUNTPOINT", dev, check=False).stdout
     return [linea for linea in salida.splitlines() if linea.strip()]
@@ -83,20 +91,20 @@ def _particionar(dev: str, tabla: str, *, n: int = 1, fstype: str = "vfat") -> l
         _sh("parted", "-s", dev, "mkpart", "primary", "1MiB", "50%")
         _sh("parted", "-s", dev, "mkpart", "primary", "50%", "100%")
     _sh("udevadm", "settle", check=False)
-    particiones = drives.partitions_of(dev)
+    particiones = _particiones(dev)
     assert len(particiones) == n
     for p in particiones:
         if fstype == "vfat":
             _sh("mkfs.vfat", "-F", "32", p)
         else:
             _sh("mkfs." + fstype, "-q", p)
-    return [str(p) for p in particiones]
+    return particiones
 
 
 def _verificar_resultado(dev: str, punto: Path) -> None:
-    particiones = drives.partitions_of(dev)
+    particiones = _particiones(dev)
     assert len(particiones) == 1
-    particion = str(particiones[0])
+    particion = particiones[0]
     assert _sh("blkid", "-o", "value", "-s", "PTTYPE", dev).stdout.strip() == "dos"
     assert _sh("blkid", "-o", "value", "-s", "TYPE", particion).stdout.strip() == "vfat"
     # El filesystem está en la partición, no en el disco entero.
