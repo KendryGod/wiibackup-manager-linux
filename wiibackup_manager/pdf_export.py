@@ -53,6 +53,7 @@ lo leen muchas cámaras.
 from __future__ import annotations
 
 import io
+import re
 import urllib.parse
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -224,6 +225,62 @@ class ShopProfile:
             accent=accent,
             theme=theme,
         )
+
+
+# Partículas de los nombres y apellidos que van en minúscula salvo al
+# principio: "Juan de la Cruz", "Ana Pérez y Gómez", "Ludwig van Beethoven".
+# Al principio sí llevan mayúscula ("De la Cruz" a secas).
+_PARTICULAS = frozenset({
+    "de", "del", "la", "las", "los", "y", "e", "da", "das", "do", "dos",
+    "di", "du", "van", "von", "der", "den", "le",
+})
+
+
+def _capitalizar_palabra(palabra: str) -> str:
+    """"garcía-lópez" -> "García-López", "o'brien" -> "O'Brien",
+    "mcdonald" -> "McDonald": mayúscula al principio de cada tramo
+    separado por guion o apóstrofo, y después del "Mc" de los apellidos
+    escoceses e irlandeses."""
+    tramos = re.split(r"([-'’])", palabra.lower())
+    salida = []
+    for tramo in tramos:
+        if tramo in ("-", "'", "’") or not tramo:
+            salida.append(tramo)
+        elif tramo.startswith("mc") and len(tramo) > 2:
+            salida.append("Mc" + tramo[2].upper() + tramo[3:])
+        else:
+            salida.append(tramo[0].upper() + tramo[1:])
+    return "".join(salida)
+
+
+def format_client_name(nombre: str) -> str:
+    """El nombre del cliente como se imprime en el ticket: "kendry flores"
+    -> "Kendry Flores", "juan de la cruz" -> "Juan de la Cruz".
+
+    Solo para el PDF: lo que se escribió en el diálogo no se toca. Una
+    palabra que ya viene con mayúsculas y minúsculas mezcladas ("DeLuca",
+    "McDonald") se deja como está: quien la escribió así sabía lo que
+    quería, y ninguna regla automática lo va a saber mejor. Lo que viene
+    todo en minúscula o todo en mayúscula es lo que se formatea."""
+    palabras = nombre.split()
+    salida = []
+    for i, palabra in enumerate(palabras):
+        if palabra != palabra.lower() and palabra != palabra.upper():
+            salida.append(palabra)
+        elif i > 0 and palabra.lower() in _PARTICULAS:
+            salida.append(palabra.lower())
+        else:
+            salida.append(_capitalizar_palabra(palabra))
+    return " ".join(salida)
+
+
+def format_service(texto: str) -> str:
+    """El "servicio realizado" con mayúscula inicial: "hackeo e
+    instalacion gaming" -> "Hackeo e instalacion gaming". Solo la primera
+    letra: el resto queda como se escribió, para no romper siglas ("USB",
+    "HDMI") ni nombres propios."""
+    texto = texto.strip()
+    return texto[:1].upper() + texto[1:] if texto else texto
 
 
 def format_whatsapp(digits: str) -> str:
@@ -570,7 +627,7 @@ def _cabecera_de_seccion(ctx, y, titulo, p: _Paleta, detalle: str = "") -> float
 def _seccion_cliente(ctx, y, data: TicketData, p: _Paleta) -> float:
     pares = []
     if data.client_name:
-        pares.append((_("Cliente"), data.client_name))
+        pares.append((_("Cliente"), format_client_name(data.client_name)))
     pares.append((_("Fecha de entrega"),
                   data.generated_at.strftime("%d/%m/%Y · %H:%M")))
     return _grilla(ctx, y + p.aire + p.arriba, pares, 2, p, tamano=18.3,
@@ -583,7 +640,9 @@ def _seccion_consola(ctx, y, data: TicketData, p: _Paleta) -> float:
         (_("Modelo"), c.model),
         (_("Número de serie"), c.serial),
         (_("Versión del sistema"), c.system_version),
-        (_("Servicio realizado"), c.service),
+        # El número de serie y la versión van tal cual: "LU12ab" o "4.3u"
+        # no son texto para embellecer, y cambiarles una letra es mentir.
+        (_("Servicio realizado"), format_service(c.service)),
     ) if valor]
     if not pares:
         return y
@@ -875,7 +934,7 @@ def _encabezado_continuacion(ctx, data: TicketData, shop: ShopProfile,
     else:
         alto = _texto(ctx, MARGIN, y, _("Ticket de Entrega"),
                       f"{FONT_TITLE} Bold 16", p.texto)
-    partes = [data.client_name] if data.client_name else []
+    partes = [format_client_name(data.client_name)] if data.client_name else []
     partes.append(data.generated_at.strftime("%d/%m/%Y"))
     detalle = _layout(ctx, " · ".join(partes), f"{FONT_BODY} 11",
                       ancho=220, max_lineas=1, alinear=Pango.Alignment.RIGHT)

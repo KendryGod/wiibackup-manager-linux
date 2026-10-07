@@ -7,7 +7,7 @@ msgstr ""
 "Project-Id-Version: WiiBackup Manager\n"
 "Report-Msgid-Bugs-To: https://github.com/KendryGod/wiibackup-manager-linux/"
 "issues\n"
-"POT-Creation-Date: 2026-10-07 14:12-0600\n"
+"POT-Creation-Date: 2026-10-07 14:42-0600\n"
 "PO-Revision-Date: 2026-08-30 05:58-0600\n"
 "Last-Translator: GameFix SPS\n"
 "Language-Team: English\n"
@@ -74,7 +74,7 @@ msgid_plural "juegos"
 msgstr[0] "game"
 msgstr[1] "games"
 
-#: wiibackup_manager/formatting.py:111 wiibackup_manager/pdf_export.py:608
+#: wiibackup_manager/formatting.py:111 wiibackup_manager/pdf_export.py:667
 #: wiibackup_manager/widgets/game_detail_dialog.py:54
 msgid "Formato"
 msgstr "Format"
@@ -180,17 +180,17 @@ msgstr "Original title"
 msgid "Título traducido"
 msgstr "Localized title"
 
-#: wiibackup_manager/library_ops.py:59 wiibackup_manager/library_ops.py:70
+#: wiibackup_manager/library_ops.py:60 wiibackup_manager/library_ops.py:71
 #, python-brace-format
 msgid "Ya existe un archivo en {path}"
 msgstr "A file already exists at {path}"
 
-#: wiibackup_manager/library_ops.py:84
+#: wiibackup_manager/library_ops.py:85
 #, python-brace-format
 msgid "No se encontró un nombre libre para {name}"
 msgstr "Could not find a free name for {name}"
 
-#: wiibackup_manager/library_ops.py:162
+#: wiibackup_manager/library_ops.py:163
 #, python-brace-format
 msgid ""
 "La conversión falló ({motivo}) y además no se pudo restaurar completamente "
@@ -199,7 +199,7 @@ msgstr ""
 "The conversion failed ({motivo}) and the original file could not be fully "
 "restored either: {detalle}"
 
-#: wiibackup_manager/library_ops.py:185
+#: wiibackup_manager/library_ops.py:218
 msgid ""
 "Tu juego original quedó guardado aparte en la unidad: cuando la vuelvas a "
 "conectar, la app te va a ofrecer restaurarlo."
@@ -207,7 +207,7 @@ msgstr ""
 "Your original game was kept safe on the drive: when you plug it back in, the "
 "app will offer to restore it."
 
-#: wiibackup_manager/library_ops.py:508
+#: wiibackup_manager/library_ops.py:554
 msgid "Error desconocido al convertir con wit"
 msgstr "Unknown error while converting with wit"
 
@@ -308,113 +308,113 @@ msgstr "Operation history — WiiBackup Manager"
 msgid "(sin operaciones registradas)"
 msgstr "(no operations recorded)"
 
-#: wiibackup_manager/pdf_export.py:473 wiibackup_manager/pdf_export.py:497
-#: wiibackup_manager/pdf_export.py:876 wiibackup_manager/pdf_export.py:918
+#: wiibackup_manager/pdf_export.py:530 wiibackup_manager/pdf_export.py:554
+#: wiibackup_manager/pdf_export.py:935 wiibackup_manager/pdf_export.py:977
 msgid "Ticket de Entrega"
 msgstr "Delivery Receipt"
 
-#: wiibackup_manager/pdf_export.py:573
+#: wiibackup_manager/pdf_export.py:630
 msgid "Cliente"
 msgstr "Customer"
 
-#: wiibackup_manager/pdf_export.py:574
+#: wiibackup_manager/pdf_export.py:631
 msgid "Fecha de entrega"
 msgstr "Delivery date"
 
-#: wiibackup_manager/pdf_export.py:583
+#: wiibackup_manager/pdf_export.py:640
 #: wiibackup_manager/widgets/ticket_dialog.py:79
 msgid "Modelo"
 msgstr "Model"
 
-#: wiibackup_manager/pdf_export.py:584
+#: wiibackup_manager/pdf_export.py:641
 #: wiibackup_manager/widgets/ticket_dialog.py:80
 msgid "Número de serie"
 msgstr "Serial number"
 
-#: wiibackup_manager/pdf_export.py:585
+#: wiibackup_manager/pdf_export.py:642
 #: wiibackup_manager/widgets/ticket_dialog.py:81
 msgid "Versión del sistema"
 msgstr "System version"
 
-#: wiibackup_manager/pdf_export.py:586
+#: wiibackup_manager/pdf_export.py:645
 #: wiibackup_manager/widgets/ticket_dialog.py:82
 msgid "Servicio realizado"
 msgstr "Service performed"
 
-#: wiibackup_manager/pdf_export.py:590
+#: wiibackup_manager/pdf_export.py:649
 msgid "Consola"
 msgstr "Console"
 
-#: wiibackup_manager/pdf_export.py:601
+#: wiibackup_manager/pdf_export.py:660
 #, python-brace-format
 msgid "{percent:.0f}% de la unidad ocupado"
 msgstr "{percent:.0f}% of the drive used"
 
-#: wiibackup_manager/pdf_export.py:603
+#: wiibackup_manager/pdf_export.py:662
 #: wiibackup_manager/widgets/memory_check_view.py:117
 #: wiibackup_manager/window.py:519
 msgid "Unidad"
 msgstr "Drive"
 
-#: wiibackup_manager/pdf_export.py:605
+#: wiibackup_manager/pdf_export.py:664
 msgid "Capacidad total"
 msgstr "Total capacity"
 
-#: wiibackup_manager/pdf_export.py:606
+#: wiibackup_manager/pdf_export.py:665
 msgid "Espacio usado"
 msgstr "Used space"
 
-#: wiibackup_manager/pdf_export.py:607
+#: wiibackup_manager/pdf_export.py:666
 msgid "Espacio libre"
 msgstr "Free space"
 
-#: wiibackup_manager/pdf_export.py:627
+#: wiibackup_manager/pdf_export.py:686
 msgid "Notas"
 msgstr "Notes"
 
-#: wiibackup_manager/pdf_export.py:750
+#: wiibackup_manager/pdf_export.py:809
 #, python-brace-format
 msgid "{console} (continuación)"
 msgstr "{console} (continued)"
 
-#: wiibackup_manager/pdf_export.py:840
+#: wiibackup_manager/pdf_export.py:899
 msgid "Escríbenos por WhatsApp"
 msgstr "Message us on WhatsApp"
 
-#: wiibackup_manager/pdf_export.py:848
+#: wiibackup_manager/pdf_export.py:907
 msgid "Escaneá el código para abrir el chat."
 msgstr "Scan the code to open the chat."
 
-#: wiibackup_manager/pdf_export.py:854
+#: wiibackup_manager/pdf_export.py:913
 msgid "Generado por WiiBackup Manager"
 msgstr "Generated by WiiBackup Manager"
 
-#: wiibackup_manager/pdf_export.py:857
+#: wiibackup_manager/pdf_export.py:916
 #, python-brace-format
 msgid "Página {page} de {total}"
 msgstr "Page {page} of {total}"
 
-#: wiibackup_manager/pdf_export.py:891
+#: wiibackup_manager/pdf_export.py:950
 #: wiibackup_manager/widgets/transfer_view.py:377
 #: wiibackup_manager/window.py:177 wiibackup_manager/window.py:225
 #: wiibackup_manager/window.py:278
 msgid "Juegos"
 msgstr "Games"
 
-#: wiibackup_manager/pdf_export.py:891
+#: wiibackup_manager/pdf_export.py:950
 msgid "Juegos (continuación)"
 msgstr "Games (continued)"
 
-#: wiibackup_manager/pdf_export.py:893
+#: wiibackup_manager/pdf_export.py:952
 #, python-brace-format
 msgid "{wii} Wii · {gc} GameCube · {hb} Homebrew"
 msgstr "{wii} Wii · {gc} GameCube · {hb} Homebrew"
 
-#: wiibackup_manager/pdf_export.py:952
+#: wiibackup_manager/pdf_export.py:1011
 msgid "No se encontraron juegos de Wii ni de GameCube en la unidad."
 msgstr "No Wii or GameCube games were found on the drive."
 
-#: wiibackup_manager/pdf_export.py:1012
+#: wiibackup_manager/pdf_export.py:1071
 #, python-brace-format
 msgid "Hola, tengo una consulta sobre mi entrega del {date}"
 msgstr "Hi, I have a question about my delivery from {date}"
@@ -663,12 +663,12 @@ msgid ""
 msgstr ""
 "Could not delete {ruta}. It may be in use, or the drive may be read-only."
 
-#: wiibackup_manager/recovery_service.py:912
+#: wiibackup_manager/recovery_service.py:919
 #, python-brace-format
 msgid "No se pudo restaurar «{name}»: ya hay algo en {ruta}."
 msgstr "Could not restore “{name}”: there is already something at {ruta}."
 
-#: wiibackup_manager/recovery_service.py:924
+#: wiibackup_manager/recovery_service.py:931
 #, python-brace-format
 msgid "No se pudo restaurar «{name}»: {detail}"
 msgstr "Could not restore “{name}”: {detail}"
@@ -1435,7 +1435,11 @@ msgid ""
 "ejemplo, si se apagó la PC o se desconectó la unidad en el medio). Los "
 "procesos que los dejaron ya no están corriendo, así que se pueden limpiar "
 "sin interrumpir nada."
-msgstr "These are files left over from operations that never finished (for example, if the PC was turned off or the drive was unplugged midway). The processes that left them are no longer running, so they can be cleaned up without interrupting anything."
+msgstr ""
+"These are files left over from operations that never finished (for example, "
+"if the PC was turned off or the drive was unplugged midway). The processes "
+"that left them are no longer running, so they can be cleaned up without "
+"interrupting anything."
 
 #: wiibackup_manager/widgets/recovery_dialog.py:148
 msgid "Restaurar"
