@@ -556,14 +556,9 @@ def _find_id6_line(output: str) -> Optional[tuple[str, str]]:
     return None
 
 
-def _parse_list_sections(output: str) -> Optional[tuple[str, str, str]]:
-    """Del primer `[disc-N]` de `wit LIST --sections`, devuelve
-    (game_id, title, console), o None si no hay un disco con ID6 válido.
-
-    La consola sale de `disctype=` ("1 GameCube" / "2 Wii"), que es lo que
-    `wit` leyó del disco de verdad. Comprobado contra `wit` v3.05a con un
-    GameCube metido en un WBFS (`disctype=1 GameCube`) y un Wii
-    (`disctype=2 Wii`). Solo si falta esa línea se cae a `console_for_id`."""
+def _first_disc_fields(output: str) -> dict[str, str]:
+    """Los pares `clave=valor` del primer `[disc-N]` de
+    `wit LIST --sections` (vacío si no hay ninguno)."""
     campos: dict[str, str] = {}
     en_disco = False
     for raw_line in output.splitlines():
@@ -576,7 +571,29 @@ def _parse_list_sections(output: str) -> Optional[tuple[str, str, str]]:
         if en_disco and "=" in line:
             clave, valor = line.split("=", 1)
             campos[clave.strip()] = valor.strip()
+    return campos
 
+
+def _console_from_disctype(disctype: str) -> Optional[str]:
+    """"gc"/"wii" según el `disctype=` de `wit` ("1 GameCube" / "2 Wii"),
+    o None si no dice ninguna de las dos."""
+    disctype = disctype.lower()
+    if "gamecube" in disctype:
+        return "gc"
+    if "wii" in disctype:
+        return "wii"
+    return None
+
+
+def _parse_list_sections(output: str) -> Optional[tuple[str, str, str]]:
+    """Del primer `[disc-N]` de `wit LIST --sections`, devuelve
+    (game_id, title, console), o None si no hay un disco con ID6 válido.
+
+    La consola sale de `disctype=` ("1 GameCube" / "2 Wii"), que es lo que
+    `wit` leyó del disco de verdad. Comprobado contra `wit` v3.05a con un
+    GameCube metido en un WBFS (`disctype=1 GameCube`) y un Wii
+    (`disctype=2 Wii`). Solo si falta esa línea se cae a `console_for_id`."""
+    campos = _first_disc_fields(output)
     game_id = campos.get("id", "")
     # `is_valid_game_id`: este ID termina formando parte de rutas del
     # filesystem, ver disc_header.
@@ -585,14 +602,26 @@ def _parse_list_sections(output: str) -> Optional[tuple[str, str, str]]:
     game_id = validate_game_id(game_id)
     title = campos.get("title") or campos.get("name") or game_id
 
-    disctype = campos.get("disctype", "").lower()
-    if "gamecube" in disctype:
-        console = "gc"
-    elif "wii" in disctype:
-        console = "wii"
-    else:
-        console = console_for_id(game_id)
+    console = (_console_from_disctype(campos.get("disctype", ""))
+               or console_for_id(game_id))
     return game_id, title, console
+
+
+def disc_console(path: Path, binary: str = "wit") -> Optional[str]:
+    """"gc"/"wii" según el `disctype=` que `wit` lee de `path`, o None si
+    no se pudo saber (sin `wit`, `wit` falló, o no trae esa línea).
+
+    A diferencia de `identify`, NO cae al prefijo del ID: lo usa la cola
+    como segundo control antes de `wit VERIFY` (que con un GameCube dentro
+    de un WBFS sale con 0 sin revisar nada), y ahí una respuesta adivinada
+    no sirve. None quiere decir "no sé", no "es Wii"."""
+    if not find_wit(binary):
+        return None
+    result = _run(binary, "LIST", "--sections", str(path))
+    if result.returncode != 0:
+        return None
+    return _console_from_disctype(
+        _first_disc_fields(result.stdout).get("disctype", ""))
 
 
 def identify(path: Path, binary: str = "wit") -> Optional[DiscInfo]:

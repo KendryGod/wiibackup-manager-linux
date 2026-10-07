@@ -859,7 +859,7 @@ class TransferQueue:
         Sale SIEMPRE por `_finish_job`: acá ya hay un archivo escrito en
         la unidad del cliente, así que ninguna rama puede terminar sin
         dejar dicho qué se sabe de él."""
-        if job.game.console == "gc":
+        if job.game.console == "gc" or self._dest_is_gamecube(job, dest):
             # Comprobado contra `wit` v3.05a: VERIFY contesta
             # `WRONG FILE TYPE ... Wii ISO image expected` y sale con 4
             # ante una imagen de GameCube. Correrlo igual marcaría como
@@ -940,6 +940,21 @@ class TransferQueue:
                      partes).format(n=partes)
             if partes > 1 else _("verificado"))
         self._finish_job(job, JobStatus.DONE, "", oplog.STATUS_OK, op=op)
+
+    @staticmethod
+    def _dest_is_gamecube(job: TransferJob, dest: Path) -> bool:
+        """Segundo control, sobre lo que quedó escrito: True si `wit` dice
+        que `dest` es un disco de GameCube aunque `job.game.console` diga
+        Wii (un ID que no arranca con 'G', como D43E01, identificado antes
+        del arreglo de `wit_wrapper.identify`).
+
+        Cualquier cosa que impida saberlo (sin `wit`, un fallo, una
+        excepción) da False y se verifica como siempre: este control solo
+        evita un "verificado" falso, no puede tapar una verificación."""
+        try:
+            return wit_wrapper.disc_console(dest, job.wit_binary) == "gc"
+        except Exception:  # noqa: BLE001
+            return False
 
     def _sync_copy(self, job: TransferJob, archivos: list, op) -> bool:
         """Baja a la unidad cada parte (.wbfs, .wbf1…) y la saca de la

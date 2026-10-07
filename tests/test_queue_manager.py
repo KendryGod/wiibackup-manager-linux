@@ -454,6 +454,77 @@ def test_verificacion_exitosa_deja_la_tarea_completada_y_lo_anota(
     assert "verificado" in entrada.detail
 
 
+def test_un_destino_que_wit_dice_gamecube_no_se_verifica(
+        make_game, tmp_path, monkeypatch):
+    """El caso de D43E01 (Ocarina of Time / Master Quest): la tarea dice
+    Wii, pero lo escrito es un GameCube. `wit VERIFY` con un GameCube
+    dentro de un WBFS sale con 0 al instante sin revisar nada, así que
+    correrlo daría un "verificado" falso. Se tiene que cerrar igual que
+    Twilight Princess: completado, pero sin verificar."""
+    monkeypatch.setattr(transfer_plan, "free_space", lambda path: 10 ** 12)
+    _sin_wit_para_copiar(monkeypatch)
+
+    consultados = []
+
+    def _disc_console(path, binary="wit"):
+        consultados.append(Path(path))
+        return "gc"
+    monkeypatch.setattr(queue_manager.wit_wrapper, "disc_console", _disc_console)
+
+    def _no_deberia_llamarse(*_a, **_k):
+        raise AssertionError("no se debe correr VERIFY sobre un GameCube")
+    monkeypatch.setattr(queue_manager.wit_wrapper, "verify_result",
+                        _no_deberia_llamarse)
+
+    juego = _juego_wbfs(make_game)
+    assert juego.console == "wii"  # lo que creía la tarea
+    dest_root = tmp_path / "dest"
+    dest_root.mkdir()
+    cola, log = _cola_con_log(tmp_path)
+    job = cola.add_jobs([juego], dest_root, verify_after_copy=True)[0]
+    esperar_final(job)
+    cola.shutdown(wait=5)
+
+    assert job.status is JobStatus.DONE, job.error_msg
+    assert job.verify_note.startswith("sin verificar")
+    assert "verificado" not in job.verify_note.replace("sin verificar", "")
+    # Se consultó lo que quedó en el destino, no el origen.
+    assert consultados == [transfer_plan.wbfs_dest_path(juego, dest_root)]
+    entrada = log.entries()[0]
+    assert "sin verificar" in entrada.detail
+    assert "verificación" not in entrada.detail  # no hubo fase de verify
+
+
+def test_si_no_se_sabe_la_consola_del_destino_se_verifica_igual(
+        make_game, tmp_path, monkeypatch):
+    """El segundo control solo puede evitar un "verificado" falso: si no
+    se pudo preguntar (None o una excepción), se verifica como siempre."""
+    monkeypatch.setattr(transfer_plan, "free_space", lambda path: 10 ** 12)
+    _sin_wit_para_copiar(monkeypatch)
+
+    def _falla(path, binary="wit"):
+        raise OSError("wit se murió")
+    monkeypatch.setattr(queue_manager.wit_wrapper, "disc_console", _falla)
+    vistos = []
+
+    def _verify_ok(path, binary="wit", timeout=None, cancel=None):
+        vistos.append(Path(path))
+        return wit_wrapper.VerifyResult(ok=True, timed_out=False, output="")
+    monkeypatch.setattr(queue_manager.wit_wrapper, "verify_result", _verify_ok)
+
+    dest_root = tmp_path / "dest"
+    dest_root.mkdir()
+    cola = hacer_cola()
+    job = cola.add_jobs([_juego_wbfs(make_game)], dest_root,
+                        verify_after_copy=True)[0]
+    esperar_final(job)
+    cola.shutdown(wait=5)
+
+    assert job.status is JobStatus.DONE, job.error_msg
+    assert job.verify_note == "verificado"
+    assert len(vistos) == 1
+
+
 def test_una_verificacion_fallida_no_se_confunde_con_un_fallo_de_copia(
         make_game, tmp_path, monkeypatch):
     """El corazón de la feature: el archivo se copió ENTERO y sigue en la

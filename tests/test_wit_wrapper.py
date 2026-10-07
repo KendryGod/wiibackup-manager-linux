@@ -440,3 +440,32 @@ def test_el_progreso_no_salta_al_final_con_el_archivo_reservado(tmp_path):
     assert resultado.returncode == 0
     assert vistos, "el sondeo no reportó nada"
     assert max(vistos) < total // 2
+
+
+def _fake_list(monkeypatch, stdout, returncode=0):
+    monkeypatch.setattr(wit_wrapper, "find_wit", lambda b: "/usr/bin/wit")
+    monkeypatch.setattr(
+        wit_wrapper, "_run",
+        lambda binary, *args, timeout=None:
+            subprocess.CompletedProcess(args, returncode, stdout=stdout, stderr=""))
+
+
+def test_disc_console_lee_el_disctype(monkeypatch, tmp_path):
+    _fake_list(monkeypatch, _SECTIONS_D43E01)
+    assert wit_wrapper.disc_console(tmp_path / "D43E01.wbfs") == "gc"
+    _fake_list(monkeypatch, _SECTIONS_RSBE01)
+    assert wit_wrapper.disc_console(tmp_path / "RSBE01.wbfs") == "wii"
+
+
+def test_disc_console_no_adivina_por_el_prefijo(monkeypatch, tmp_path):
+    """Sin `disctype=` no sabe, aunque el ID empiece con 'G': para el
+    control previo a VERIFY una respuesta adivinada no sirve."""
+    _fake_list(monkeypatch, "[disc-0]\nid=GZ2E01\ntitle=Twilight Princess\n")
+    assert wit_wrapper.disc_console(tmp_path / "x.wbfs") is None
+
+
+def test_disc_console_con_wit_fallando_o_ausente(monkeypatch, tmp_path):
+    _fake_list(monkeypatch, _SECTIONS_D43E01, returncode=4)
+    assert wit_wrapper.disc_console(tmp_path / "x.wbfs") is None
+    monkeypatch.setattr(wit_wrapper, "find_wit", lambda b: None)
+    assert wit_wrapper.disc_console(tmp_path / "x.wbfs") is None
