@@ -52,7 +52,7 @@ from typing import Callable, Optional
 
 from gi.repository import GLib
 
-from . import (drives, formatting, library_ops, oplog, transfer_plan,
+from . import (drives, fileops, formatting, library_ops, oplog, transfer_plan,
                wit_wrapper)
 from .i18n import _, ngettext, N_
 from .game_model import Game
@@ -236,18 +236,20 @@ _PROGRESS_INTERVAL = 0.1
 # - "prepare": medir cuánto va a ocupar y mirar el espacio libre.
 # - "copy": la escritura, de punta a punta (`wit COPY` o la copia directa),
 #   hasta que el proceso termina.
+# - "sync": solo si se va a verificar. `wit` termina cuando le entregó
+#   todo al kernel, no a la unidad: lo que quedaba en la caché de escritura
+#   (en una máquina con 16 GB, hasta ~2.5 GB) se baja acá con `fsync`, y
+#   después se descarta de la caché para que VERIFY lea de la unidad y no
+#   de la RAM (ver `fileops.flush_and_drop_cache`). Sin esta fase ese resto
+#   se escribía DURANTE la verificación y el tiempo se cargaba ahí.
 # - "verify": `wit VERIFY` releyendo lo que quedó en la unidad.
 #
-# No hay fase de sincronización porque la cola no fuerza ningún `sync`
-# después de copiar: `wit` termina cuando le entregó todo al kernel, y lo
-# que todavía estaba en la caché de escritura (en una máquina con 16 GB,
-# hasta ~2.5 GB) se sigue bajando a la unidad DURANTE la verificación. Por
-# eso el log anota también cuánto quedaba pendiente al terminar la copia
-# (ver `_pending_writeback_bytes`): sin ese dato, "copia" se lee más corta
-# y "verificación" más larga de lo que fueron de verdad.
+# Sin verificación no hay `fsync`: el log anota igual cuánto quedaba
+# pendiente al terminar la copia (ver `_pending_writeback_bytes`).
 PHASE_LABELS = (
     ("prepare", N_("preparación {t}")),
     ("copy", N_("copia {t}")),
+    ("sync", N_("sincronización {t}")),
     ("verify", N_("verificación {t}")),
 )
 
@@ -869,7 +871,10 @@ class TransferQueue:
             self._finish_job(job, JobStatus.DONE, "", oplog.STATUS_OK, op=op)
             return
 
-        partes = len(transfer_plan.wbfs_group(dest)) or 1
+        grupo = transfer_plan.wbfs_group(dest)
+        partes = len(grupo) or 1
+        if not self._sync_copy(job, grupo, op):
+            return
         self._update(job, status=JobStatus.VERIFYING, progress=0.99,
                      speed_text=_("Releyendo lo copiado…"))
         try:
@@ -932,6 +937,33 @@ class TransferQueue:
                      partes).format(n=partes)
             if partes > 1 else _("verificado"))
         self._finish_job(job, JobStatus.DONE, "", oplog.STATUS_OK, op=op)
+
+    def _sync_copy(self, job: TransferJob, archivos: list, op) -> bool:
+        """Baja a la unidad cada parte (.wbfs, .wbf1…) y la saca de la
+        caché antes de verificar: ver la fase "sync" en `PHASE_LABELS`.
+
+        Devuelve False si la tarea ya se cerró acá: un `fsync` que falla
+        es la unidad diciendo que no guardó lo que se le mandó, y eso no
+        es un "no se pudo verificar" sino una copia que no quedó."""
+        self._update(job, speed_text=_("Sincronizando…"))
+        inicio = time.monotonic()
+        try:
+            fileops.flush_and_drop_cache(archivos)
+        except OSError as e:
+            if drives.device_is_gone(known_dir=job.dest_root, exc=e):
+                self._finish_job(job, JobStatus.DEVICE_DISCONNECTED,
+                                 drives.disconnected_message(),
+                                 oplog.STATUS_DISCONNECTED, op=op)
+            else:
+                self._finish_job(
+                    job, JobStatus.ERROR,
+                    _("La unidad no terminó de guardar la copia: {detail}")
+                    .format(detail=e),
+                    oplog.STATUS_ERROR, op=op)
+            return False
+        finally:
+            self._end_phase(job, "sync", inicio)
+        return True
 
     def _ensure_output_bytes(self, job: TransferJob, op=None) -> bool:
         """Se asegura de saber cuánto va a ocupar el juego en el destino.

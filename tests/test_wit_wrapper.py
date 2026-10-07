@@ -7,6 +7,7 @@ matar el proceso al cancelar, limpiar los temporales-.
 """
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
 import sys
@@ -299,3 +300,69 @@ def test_verify_deja_en_stderr_el_comando_exacto(monkeypatch, tmp_path, capsys):
 
     stderr = capsys.readouterr().err
     assert shlex.split(stderr.split("wit: ", 1)[1]) == lanzado["args"]
+
+
+# ------------------------------------------- Reserva de espacio (prealloc) --
+# En FAT32 `posix_fallocate` no reserva: escribe ceros. Medido en una USB
+# real, 1 GB de reserva tardó 74 s, o sea que cada byte se escribía dos
+# veces. `convert` la apaga solo cuando se lo piden.
+def test_convert_sin_prealloc_le_pasa_off_a_wit(monkeypatch, tmp_path):
+    args = _args_de_convert(monkeypatch, tmp_path, prealloc=False)
+    assert "--prealloc=OFF" in args
+    # Opción y no posicional: va antes del origen y del destino.
+    assert args.index("--prealloc=OFF") < args.index("--dest")
+
+
+def test_convert_por_defecto_deja_la_reserva_de_wit(monkeypatch, tmp_path):
+    args = _args_de_convert(monkeypatch, tmp_path)
+    assert not any(a.startswith("--prealloc") for a in args)
+
+
+@pytest.mark.skipif(wit_wrapper.find_wit("wit") is None, reason="wit no instalado")
+def test_el_wit_real_acepta_prealloc_off(monkeypatch, tmp_path):
+    """Igual que con el scrubbing: si `wit` llega a quejarse del ARCHIVO,
+    pasó el parseo de opciones."""
+    wit_real = wit_wrapper.find_wit("wit")
+    args = _args_de_convert(monkeypatch, tmp_path, prealloc=False)
+    args[0] = wit_real
+    real = subprocess.run(args, capture_output=True, text=True, timeout=30)
+    salida = real.stdout + real.stderr
+    assert real.returncode != 0
+    assert "SYNTAX ERROR" not in salida
+    assert "CAN'T OPEN FILE" in salida
+
+
+# ------------------------------------------- Progreso por bytes escritos --
+def test_process_bytes_written_cuenta_lo_que_escribe_el_proceso(tmp_path):
+    antes = wit_wrapper._process_bytes_written(os.getpid())
+    assert antes is not None
+    (tmp_path / "x").write_bytes(b"\0" * 100_000)
+    assert wit_wrapper._process_bytes_written(os.getpid()) >= antes + 100_000
+
+
+def test_process_bytes_written_de_un_proceso_que_no_existe_es_none():
+    p = subprocess.Popen([sys.executable, "-c", ""])
+    p.wait()
+    assert wit_wrapper._process_bytes_written(p.pid) is None
+
+
+def test_el_progreso_no_salta_al_final_con_el_archivo_reservado(tmp_path):
+    """Lo que hace `wit` con la reserva de espacio: el temporal nace con su
+    tamaño final y después se va llenando. La barra tiene que seguir lo
+    escrito, no el tamaño del archivo."""
+    dest = tmp_path / "RMCP01.wbfs"
+    total = 50 * 1024 * 1024
+    guion = (
+        "import sys, time\n"
+        f"f = open({str(tmp_path / '.RMCP01.wbfs.abc.tmp')!r}, 'wb')\n"
+        f"f.truncate({total})\n"
+        "f.flush()\n"
+        "f.write(b'x' * 1024 * 1024); f.flush()\n"
+        "time.sleep(2.5)\n"
+    )
+    vistos = []
+    resultado = wit_wrapper._run_with_progress(
+        [sys.executable, "-c", guion], dest, vistos.append)
+    assert resultado.returncode == 0
+    assert vistos, "el sondeo no reportó nada"
+    assert max(vistos) < total // 2

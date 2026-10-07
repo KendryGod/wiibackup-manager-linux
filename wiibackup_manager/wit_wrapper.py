@@ -384,6 +384,25 @@ def estimate_bytes_written(dest: Path) -> int:
     return total
 
 
+def _process_bytes_written(pid: int) -> Optional[int]:
+    """Cuántos bytes le pasó el proceso `pid` a `write()` hasta ahora
+    (`wchar` de /proc/<pid>/io), o None si no se pudo leer.
+
+    Es mejor medida de avance que el tamaño del destino: con la reserva
+    de espacio de `wit` (`--prealloc`, activa salvo en FAT32) el archivo
+    temporal nace con su tamaño final, y una barra basada en `st_size`
+    saltaba al 99% en el primer segundo y se quedaba ahí toda la copia."""
+    try:
+        with open(f"/proc/{pid}/io", encoding="ascii") as f:
+            for linea in f:
+                clave, _sep, valor = linea.partition(":")
+                if clave == "wchar":
+                    return int(valor)
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 def _run_with_progress(
     args: list[str],
     dest: Path,
@@ -393,8 +412,9 @@ def _run_with_progress(
     absolute_timeout: Optional[float] = WIT_ABSOLUTE_TIMEOUT,
 ) -> subprocess.CompletedProcess:
     """Como `subprocess.run`, pero con `Popen` en vez de `.run()` para
-    poder sondear cada 1s cuánto lleva escrito hacia `dest`
-    (`estimate_bytes_written`) mientras el proceso sigue corriendo, en vez
+    poder sondear cada 1s cuánto lleva escrito `wit`
+    (`_process_bytes_written`, o `estimate_bytes_written` si el kernel no
+    lo cuenta) mientras el proceso sigue corriendo, en vez
     de bloquear sin ninguna señal intermedia hasta que termina.
 
     stdout/stderr van a archivos temporales (no a `PIPE`): si se
@@ -408,7 +428,7 @@ def _run_with_progress(
     recién surta efecto cuando el archivo grande en curso termine solo.
 
     El mismo sondeo que reporta progreso sirve para detectar un cuelgue:
-    `inactivity_timeout` se reinicia cada vez que el destino crece, así
+    `inactivity_timeout` se reinicia cada vez que `wit` escribe algo, así
     que una transferencia lenta pero sana nunca se corta sola (ver el
     comentario de `WIT_INACTIVITY_TIMEOUT`); `absolute_timeout` queda
     detrás como última red de seguridad."""
@@ -420,10 +440,17 @@ def _run_with_progress(
         # Si la cancelación llegó entre el chequeo previo y el Popen,
         # `attach` lo mata en el acto y devuelve False.
         running = cancel.attach(proc) if cancel is not None else True
+
+        def medir() -> int:
+            # Lo que escribió `wit`, si el kernel lo cuenta; si no, el
+            # tamaño del destino (ver `_process_bytes_written`).
+            escrito = _process_bytes_written(proc.pid)
+            return escrito if escrito is not None else estimate_bytes_written(dest)
+
         start = time.monotonic()
         # Último avance real: arranca en lo que ya había escrito (el
         # destino puede existir de antes) y se actualiza solo cuando crece.
-        last_bytes = estimate_bytes_written(dest)
+        last_bytes = medir()
         last_progress_at = start
         timeout_reason: Optional[str] = None
         try:
@@ -432,7 +459,7 @@ def _run_with_progress(
                     proc.wait(timeout=1.0)
                     break
                 except subprocess.TimeoutExpired:
-                    written = estimate_bytes_written(dest)
+                    written = medir()
                     bytes_progress_cb(written)
                     now = time.monotonic()
                     if written > last_bytes:
@@ -563,18 +590,19 @@ def convert(
     absolute_timeout: Optional[float] = WIT_ABSOLUTE_TIMEOUT,
     overwrite: bool = False,
     scrub_update: bool = True,
+    prealloc: bool = True,
 ) -> subprocess.CompletedProcess:
     """Convierte src -> dest. target_format: 'WBFS' o 'ISO'.
 
     `bytes_progress_cb`, si se pasa, se llama aproximadamente cada 1s
-    (desde este mismo hilo, bloqueante) con una estimación de cuántos
-    bytes lleva escritos `wit` hacia `dest` (ver `estimate_bytes_written`),
+    (desde este mismo hilo, bloqueante) con cuántos bytes lleva escritos
+    `wit` (ver `_process_bytes_written`),
     para poder mostrar progreso real dentro de la conversión de un solo
     archivo grande y no solo saltar de 0% a 100% al terminar. No hay forma
     confiable de leer el progreso real de `wit` (no expone una opción de
-    progreso parseable en `wit HELP COPY`), así que esto es una
-    estimación por tamaño de archivo, no un progreso exacto reportado por
-    la herramienta.
+    progreso parseable en `wit HELP COPY`), así que esto es lo que el
+    kernel le contó escribir, no un progreso exacto reportado por la
+    herramienta.
 
     `split=True` agrega `--split-size` con `FAT32_SPLIT_SIZE_BYTES`
     (división en partes de 4GB, ver comentario junto a esa constante),
@@ -611,7 +639,16 @@ def convert(
     cientos de MB. Es la opción "Optimizar espacio (Scrubbing)" de
     Ajustes -ver `config.Settings.scrub_update`-; con `scrub_update=False`
     el WBFS resultante queda idéntico al disco original, actualizable
-    desde el propio juego."""
+    desde el propio juego.
+
+    `prealloc=False` agrega `--prealloc=OFF`. Por defecto `wit` reserva
+    el archivo destino entero antes de copiar (`posix_fallocate`), y en
+    FAT32 eso no reserva nada: escribe ceros. Medido en una USB real: 1 GB
+    de reserva tardó 74 s (14.7 MB/s), o sea que cada byte se escribía dos
+    veces. Quien llama decide según el filesystem del destino (ver
+    `drives.is_fat_filesystem`); sin la reserva `wit` ya no falla temprano
+    por falta de espacio, así que el espacio libre lo tiene que mirar
+    quien llama ANTES de copiar."""
     if not find_wit(binary):
         raise WitNotFoundError(binary)
 
@@ -634,6 +671,8 @@ def convert(
         # y canales). Va pegado con `=` para que el "-" de la regla no se
         # lea como otra opción.
         args.append("--psel=-UPDATE")
+    if not prealloc:
+        args.append("--prealloc=OFF")
     args += [str(src), "--dest", str(dest)]
     _log_command(args)
 

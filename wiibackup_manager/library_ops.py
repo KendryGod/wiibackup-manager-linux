@@ -461,9 +461,16 @@ def send_to_wbfs_drive(
         # el respaldo apartado, así que si `wit` se encuentra algo con el
         # nombre final es basura de un intento anterior, no el juego del
         # usuario.
+        # En FAT32 la reserva de espacio de `wit` escribe el archivo entero
+        # en ceros antes de copiar (ver `wit_wrapper.convert`). Sin ella
+        # `wit` no falla temprano si no entra: el espacio libre lo miran
+        # quienes llaman ANTES de llegar acá (`TransferQueue._copy` y el
+        # envío desde la Biblioteca en window.py).
+        prealloc = not drives.is_fat_filesystem(dest_dir)
         result = wit_wrapper.convert(game.path, dest, "WBFS", wit_binary, split=split,
                                       bytes_progress_cb=bytes_progress_cb, cancel=cancel,
-                                      overwrite=True, scrub_update=scrub_update)
+                                      overwrite=True, scrub_update=scrub_update,
+                                      prealloc=prealloc)
         if result.returncode != 0:
             raise RuntimeError(
                 result.stderr.strip() or _("Error desconocido al convertir con wit"))

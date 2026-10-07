@@ -9,7 +9,7 @@ msgstr ""
 "Project-Id-Version: WiiBackup Manager\n"
 "Report-Msgid-Bugs-To: https://github.com/KendryGod/wiibackup-manager-linux/"
 "issues\n"
-"POT-Creation-Date: 2026-10-07 04:42-0600\n"
+"POT-Creation-Date: 2026-10-07 05:06-0600\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -23,7 +23,7 @@ msgstr ""
 msgid "Game ID inválido: {game_id!r} (se esperaban 6 caracteres A-Z/0-9)"
 msgstr ""
 
-#: wiibackup_manager/drives.py:202
+#: wiibackup_manager/drives.py:204
 msgid "La unidad USB fue desconectada durante la operación."
 msgstr ""
 
@@ -195,7 +195,7 @@ msgid ""
 "el archivo original: {detalle}"
 msgstr ""
 
-#: wiibackup_manager/library_ops.py:469
+#: wiibackup_manager/library_ops.py:476
 msgid "Error desconocido al convertir con wit"
 msgstr ""
 
@@ -384,94 +384,108 @@ msgstr ""
 msgid "Cancelado"
 msgstr ""
 
-#: wiibackup_manager/queue_manager.py:249
+#: wiibackup_manager/queue_manager.py:250
 #, python-brace-format
 msgid "preparación {t}"
 msgstr ""
 
-#: wiibackup_manager/queue_manager.py:250
+#: wiibackup_manager/queue_manager.py:251
 #, python-brace-format
 msgid "copia {t}"
 msgstr ""
 
-#: wiibackup_manager/queue_manager.py:251
+#: wiibackup_manager/queue_manager.py:252
+#, python-brace-format
+msgid "sincronización {t}"
+msgstr ""
+
+#: wiibackup_manager/queue_manager.py:253
 #, python-brace-format
 msgid "verificación {t}"
 msgstr ""
 
-#: wiibackup_manager/queue_manager.py:317
+#: wiibackup_manager/queue_manager.py:319
 msgid "`wit` no dio detalle"
 msgstr ""
 
-#: wiibackup_manager/queue_manager.py:728
+#: wiibackup_manager/queue_manager.py:730
 #, python-brace-format
 msgid "En espera: {op}"
 msgstr ""
 
-#: wiibackup_manager/queue_manager.py:742
-#: wiibackup_manager/widgets/homebrew_store_view.py:535
+#: wiibackup_manager/queue_manager.py:744
+#: wiibackup_manager/widgets/homebrew_store_view.py:536
 #: wiibackup_manager/widgets/memory_check_view.py:370
 msgid "Preparando…"
 msgstr ""
 
-#: wiibackup_manager/queue_manager.py:755
+#: wiibackup_manager/queue_manager.py:757
 #, python-brace-format
 msgid "No entra en el destino: necesita {need} y quedan {free}."
 msgstr ""
 
-#: wiibackup_manager/queue_manager.py:810
+#: wiibackup_manager/queue_manager.py:812
 #, python-brace-format
 msgid ""
 "No se encontró `wit` ({binary}). Instalalo o configurá la ruta en "
 "Preferencias."
 msgstr ""
 
-#: wiibackup_manager/queue_manager.py:867
+#: wiibackup_manager/queue_manager.py:869
 msgid "sin verificar: `wit VERIFY` solo acepta imágenes de Wii"
 msgstr ""
 
-#: wiibackup_manager/queue_manager.py:874
+#: wiibackup_manager/queue_manager.py:879
 msgid "Releyendo lo copiado…"
 msgstr ""
 
-#: wiibackup_manager/queue_manager.py:897
+#: wiibackup_manager/queue_manager.py:902
 msgid "verificación cancelada"
 msgstr ""
 
-#: wiibackup_manager/queue_manager.py:901
+#: wiibackup_manager/queue_manager.py:906
 msgid "no se pudo verificar: no se encontró `wit`"
 msgstr ""
 
-#: wiibackup_manager/queue_manager.py:908
+#: wiibackup_manager/queue_manager.py:913
 #, python-brace-format
 msgid "no se pudo verificar: {detail}"
 msgstr ""
 
-#: wiibackup_manager/queue_manager.py:913
+#: wiibackup_manager/queue_manager.py:918
 msgid "la verificación no terminó a tiempo: el archivo quedó sin comprobar"
 msgstr ""
 
-#: wiibackup_manager/queue_manager.py:921
+#: wiibackup_manager/queue_manager.py:926
 #, python-brace-format
 msgid "Se copió entero, pero al releerlo no pasó la verificación: {detail}"
 msgstr ""
 
-#: wiibackup_manager/queue_manager.py:931
+#: wiibackup_manager/queue_manager.py:936
 #, python-brace-format
 msgid "verificado ({n} archivo)"
 msgid_plural "verificado ({n} archivos)"
 msgstr[0] ""
 msgstr[1] ""
 
-#: wiibackup_manager/queue_manager.py:933
+#: wiibackup_manager/queue_manager.py:938
 msgid "verificado"
 msgstr ""
 
-#: wiibackup_manager/queue_manager.py:947
+#: wiibackup_manager/queue_manager.py:948
+msgid "Sincronizando…"
+msgstr ""
+
+#: wiibackup_manager/queue_manager.py:960
+#, python-brace-format
+msgid "La unidad no terminó de guardar la copia: {detail}"
+msgstr ""
+
+#: wiibackup_manager/queue_manager.py:979
 msgid "Calculando tamaño…"
 msgstr ""
 
-#: wiibackup_manager/queue_manager.py:978 wiibackup_manager/window.py:1299
+#: wiibackup_manager/queue_manager.py:1010 wiibackup_manager/window.py:1299
 #, python-brace-format
 msgid " · ~{eta} restantes"
 msgstr ""
@@ -564,31 +578,31 @@ msgstr ""
 msgid "Sinopsis"
 msgstr ""
 
-#: wiibackup_manager/widgets/game_detail_dialog.py:161
+#: wiibackup_manager/widgets/game_detail_dialog.py:162
 msgid "No se encontró información adicional en GameTDB para este juego."
 msgstr ""
 
-#: wiibackup_manager/widgets/game_detail_dialog.py:175
+#: wiibackup_manager/widgets/game_detail_dialog.py:176
 msgid "Género"
 msgstr ""
 
-#: wiibackup_manager/widgets/game_detail_dialog.py:177
+#: wiibackup_manager/widgets/game_detail_dialog.py:178
 msgid "Jugadores"
 msgstr ""
 
-#: wiibackup_manager/widgets/game_detail_dialog.py:179
+#: wiibackup_manager/widgets/game_detail_dialog.py:180
 msgid "Fecha de lanzamiento"
 msgstr ""
 
-#: wiibackup_manager/widgets/game_detail_dialog.py:181
+#: wiibackup_manager/widgets/game_detail_dialog.py:182
 msgid "Publisher"
 msgstr ""
 
-#: wiibackup_manager/widgets/game_detail_dialog.py:183
+#: wiibackup_manager/widgets/game_detail_dialog.py:184
 msgid "Developer"
 msgstr ""
 
-#: wiibackup_manager/widgets/game_detail_dialog.py:186
+#: wiibackup_manager/widgets/game_detail_dialog.py:187
 msgid "Controles compatibles"
 msgstr ""
 
@@ -618,14 +632,14 @@ msgstr ""
 
 #: wiibackup_manager/widgets/gtk_helpers.py:51
 #: wiibackup_manager/widgets/gtk_helpers.py:117
-#: wiibackup_manager/widgets/homebrew_store_view.py:496
+#: wiibackup_manager/widgets/homebrew_store_view.py:497
 #: wiibackup_manager/widgets/log_view.py:152
 #: wiibackup_manager/widgets/memory_check_view.py:137
 #: wiibackup_manager/widgets/memory_check_view.py:333
 #: wiibackup_manager/widgets/recovery_dialog.py:213
 #: wiibackup_manager/widgets/recovery_dialog.py:253
 #: wiibackup_manager/widgets/ticket_dialog.py:39
-#: wiibackup_manager/widgets/transfer_view.py:626
+#: wiibackup_manager/widgets/transfer_view.py:628
 #: wiibackup_manager/window.py:318 wiibackup_manager/window.py:1514
 #: wiibackup_manager/window.py:1611 wiibackup_manager/window.py:2661
 msgid "Cancelar"
@@ -676,7 +690,7 @@ msgid "Error grave: no se pudo restaurar la versión anterior"
 msgstr ""
 
 #: wiibackup_manager/widgets/homebrew_store_view.py:155
-#: wiibackup_manager/widgets/homebrew_store_view.py:499
+#: wiibackup_manager/widgets/homebrew_store_view.py:500
 msgid "Instalar"
 msgstr ""
 
@@ -712,7 +726,7 @@ msgid "No se pudo cargar la tienda"
 msgstr ""
 
 #: wiibackup_manager/widgets/homebrew_store_view.py:253
-#: wiibackup_manager/widgets/homebrew_store_view.py:492
+#: wiibackup_manager/widgets/homebrew_store_view.py:493
 #: wiibackup_manager/window.py:385
 msgid "Reintentar"
 msgstr ""
@@ -722,30 +736,30 @@ msgid "Buscar apps por nombre…"
 msgstr ""
 
 #: wiibackup_manager/widgets/homebrew_store_view.py:365
-#: wiibackup_manager/widgets/transfer_view.py:943
+#: wiibackup_manager/widgets/transfer_view.py:945
 msgid "Elegí la carpeta destino"
 msgstr ""
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:391
+#: wiibackup_manager/widgets/homebrew_store_view.py:392
 msgid "motivo desconocido"
 msgstr ""
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:402
+#: wiibackup_manager/widgets/homebrew_store_view.py:403
 #, python-brace-format
 msgid ""
 "Sin conexión con Open Shop Channel: mostrando la última lista guardada "
 "({error})."
 msgstr ""
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:489
+#: wiibackup_manager/widgets/homebrew_store_view.py:490
 msgid "Reinstalar"
 msgstr ""
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:519
+#: wiibackup_manager/widgets/homebrew_store_view.py:520
 msgid "Elegí primero un destino antes de instalar."
 msgstr ""
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:530
+#: wiibackup_manager/widgets/homebrew_store_view.py:531
 #: wiibackup_manager/window.py:940 wiibackup_manager/window.py:1023
 #: wiibackup_manager/window.py:1179 wiibackup_manager/window.py:1380
 #: wiibackup_manager/window.py:2254 wiibackup_manager/window.py:2489
@@ -754,60 +768,60 @@ msgstr ""
 msgid "No se puede ahora: {detail}."
 msgstr ""
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:572
+#: wiibackup_manager/widgets/homebrew_store_view.py:573
 #, python-brace-format
 msgid "Descargando… {pct}%"
 msgstr ""
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:574
+#: wiibackup_manager/widgets/homebrew_store_view.py:575
 #, python-brace-format
 msgid "Extrayendo… {pct}%"
 msgstr ""
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:576
+#: wiibackup_manager/widgets/homebrew_store_view.py:577
 msgid "Descargando…"
 msgstr ""
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:577
+#: wiibackup_manager/widgets/homebrew_store_view.py:578
 msgid "Extrayendo…"
 msgstr ""
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:589
+#: wiibackup_manager/widgets/homebrew_store_view.py:590
 msgid "Instalada ✓"
 msgstr ""
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:591
+#: wiibackup_manager/widgets/homebrew_store_view.py:592
 #, python-brace-format
 msgid "'{name}' instalada ({n} archivo(s))."
 msgstr ""
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:599
+#: wiibackup_manager/widgets/homebrew_store_view.py:600
 #, python-brace-format
 msgid ""
 "'{name}' se instaló, pero no se pudo aplicar su configuración maestra: "
 "{detail}"
 msgstr ""
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:604
+#: wiibackup_manager/widgets/homebrew_store_view.py:605
 #, python-brace-format
 msgid "Se aplicó la configuración maestra de '{name}'."
 msgstr ""
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:615
+#: wiibackup_manager/widgets/homebrew_store_view.py:616
 #, python-brace-format
 msgid "'{name}' se instaló. {detail}"
 msgstr ""
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:620
+#: wiibackup_manager/widgets/homebrew_store_view.py:621
 #, python-brace-format
 msgid "Instalación de '{name}' cancelada."
 msgstr ""
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:622
+#: wiibackup_manager/widgets/homebrew_store_view.py:623
 msgid "Error al instalar"
 msgstr ""
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:625
+#: wiibackup_manager/widgets/homebrew_store_view.py:626
 #, python-brace-format
 msgid "No se pudo instalar '{name}': {detail}"
 msgstr ""
@@ -1154,58 +1168,58 @@ msgstr ""
 msgid "Carpeta de la biblioteca"
 msgstr ""
 
-#: wiibackup_manager/widgets/preferences_dialog.py:33
+#: wiibackup_manager/widgets/preferences_dialog.py:34
 msgid "Unidad/carpeta WBFS (USB Loader)"
 msgstr ""
 
-#: wiibackup_manager/widgets/preferences_dialog.py:34
+#: wiibackup_manager/widgets/preferences_dialog.py:36
 msgid "No configurada"
 msgstr ""
 
-#: wiibackup_manager/widgets/preferences_dialog.py:40
+#: wiibackup_manager/widgets/preferences_dialog.py:42
 msgid "Motor de conversión"
 msgstr ""
 
-#: wiibackup_manager/widgets/preferences_dialog.py:43
+#: wiibackup_manager/widgets/preferences_dialog.py:45
 msgid "detectado ✓"
 msgstr ""
 
-#: wiibackup_manager/widgets/preferences_dialog.py:44
+#: wiibackup_manager/widgets/preferences_dialog.py:46
 msgid "no encontrado ✗"
 msgstr ""
 
-#: wiibackup_manager/widgets/preferences_dialog.py:46
+#: wiibackup_manager/widgets/preferences_dialog.py:48
 #, python-brace-format
 msgid "Estado: {status}"
 msgstr ""
 
-#: wiibackup_manager/widgets/preferences_dialog.py:49
+#: wiibackup_manager/widgets/preferences_dialog.py:51
 msgid "Carátulas"
 msgstr ""
 
-#: wiibackup_manager/widgets/preferences_dialog.py:51
+#: wiibackup_manager/widgets/preferences_dialog.py:53
 msgid "Región preferida"
 msgstr ""
 
-#: wiibackup_manager/widgets/preferences_dialog.py:64
+#: wiibackup_manager/widgets/preferences_dialog.py:66
 msgid "Apariencia"
 msgstr ""
 
-#: wiibackup_manager/widgets/preferences_dialog.py:67
+#: wiibackup_manager/widgets/preferences_dialog.py:69
 msgid "Tema"
 msgstr ""
 
-#: wiibackup_manager/widgets/preferences_dialog.py:69
+#: wiibackup_manager/widgets/preferences_dialog.py:71
 msgid ""
 "Solo tiene efecto con el tema estándar; un tema GTK de terceros manda sobre "
 "esto."
 msgstr ""
 
-#: wiibackup_manager/widgets/preferences_dialog.py:85
+#: wiibackup_manager/widgets/preferences_dialog.py:87
 msgid "Elegí la carpeta de tu biblioteca"
 msgstr ""
 
-#: wiibackup_manager/widgets/preferences_dialog.py:99
+#: wiibackup_manager/widgets/preferences_dialog.py:101
 msgid "Elegí la carpeta/unidad WBFS"
 msgstr ""
 
@@ -1347,11 +1361,11 @@ msgid ""
 "Se genera un PDF con el contenido de «{drive}» para enviarle al cliente."
 msgstr ""
 
-#: wiibackup_manager/widgets/ticket_dialog.py:58
+#: wiibackup_manager/widgets/ticket_dialog.py:59
 msgid "Nombre del cliente"
 msgstr ""
 
-#: wiibackup_manager/widgets/ticket_dialog.py:65
+#: wiibackup_manager/widgets/ticket_dialog.py:66
 msgid "Notas (opcional)"
 msgstr ""
 
@@ -1390,7 +1404,7 @@ msgid "Guardar el destino elegido como acceso rápido, con un nombre."
 msgstr ""
 
 #: wiibackup_manager/widgets/transfer_view.py:322
-#: wiibackup_manager/widgets/transfer_view.py:776
+#: wiibackup_manager/widgets/transfer_view.py:778
 msgid "Generar un PDF con el contenido de la unidad para enviarle al cliente."
 msgstr ""
 
@@ -1399,13 +1413,13 @@ msgid "Expulsar unidad"
 msgstr ""
 
 #: wiibackup_manager/widgets/transfer_view.py:331
-#: wiibackup_manager/widgets/transfer_view.py:885
+#: wiibackup_manager/widgets/transfer_view.py:887
 msgid ""
 "Desmontar de forma segura la unidad seleccionada antes de desconectarla."
 msgstr ""
 
 #: wiibackup_manager/widgets/transfer_view.py:344
-#: wiibackup_manager/widgets/transfer_view.py:727
+#: wiibackup_manager/widgets/transfer_view.py:729
 msgid "Elegí un destino para ver el espacio disponible."
 msgstr ""
 
@@ -1424,7 +1438,7 @@ msgid "Deseleccionar todos"
 msgstr ""
 
 #: wiibackup_manager/widgets/transfer_view.py:419
-#: wiibackup_manager/widgets/transfer_view.py:1207
+#: wiibackup_manager/widgets/transfer_view.py:1210
 msgid "Cola de transferencia"
 msgstr ""
 
@@ -1447,134 +1461,134 @@ msgid "Transferir seleccionados"
 msgstr ""
 
 #: wiibackup_manager/widgets/transfer_view.py:535
-#: wiibackup_manager/widgets/transfer_view.py:590
+#: wiibackup_manager/widgets/transfer_view.py:592
 #, python-brace-format
 msgid "{free:.1f} GB libres de {total:.1f} GB · {path}"
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:568
+#: wiibackup_manager/widgets/transfer_view.py:569
 msgid "El destino elegido ya no está disponible y se quitó de la lista."
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:595
+#: wiibackup_manager/widgets/transfer_view.py:597
 #, python-brace-format
 msgid "No disponible ahora · {path}"
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:603
+#: wiibackup_manager/widgets/transfer_view.py:605
 msgid "Quitar este acceso rápido"
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:613
+#: wiibackup_manager/widgets/transfer_view.py:615
 msgid "Elegí primero un destino de la lista para guardarlo."
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:618
+#: wiibackup_manager/widgets/transfer_view.py:620
 msgid "Guardar este destino"
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:619
+#: wiibackup_manager/widgets/transfer_view.py:621
 #, python-brace-format
 msgid ""
 "Se va a guardar como acceso rápido:\n"
 "{path}"
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:627
+#: wiibackup_manager/widgets/transfer_view.py:629
 msgid "Guardar"
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:642
+#: wiibackup_manager/widgets/transfer_view.py:644
 #, python-brace-format
 msgid "Destino guardado como '{name}'."
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:650
+#: wiibackup_manager/widgets/transfer_view.py:652
 #, python-brace-format
 msgid "Se quitó el acceso rápido '{name}'."
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:658
+#: wiibackup_manager/widgets/transfer_view.py:660
 #, python-brace-format
 msgid "No se pudo guardar la configuración: {error}"
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:722
+#: wiibackup_manager/widgets/transfer_view.py:724
 #, python-brace-format
 msgid "{percent:.0f}% del destino ocupado"
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:733
+#: wiibackup_manager/widgets/transfer_view.py:735
 msgid "No se pudo leer el espacio disponible en el destino."
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:744
+#: wiibackup_manager/widgets/transfer_view.py:746
 #, python-brace-format
 msgid " · {percent:.0f}% usado"
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:747
+#: wiibackup_manager/widgets/transfer_view.py:749
 #, python-brace-format
 msgid "Espacio en destino: {free:.1f} GB libres de {total:.1f} GB{percent}"
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:781
+#: wiibackup_manager/widgets/transfer_view.py:783
 msgid "Elegí primero un destino para poder generar su ticket."
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:802
+#: wiibackup_manager/widgets/transfer_view.py:804
 msgid "Guardar el ticket de entrega"
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:844
+#: wiibackup_manager/widgets/transfer_view.py:846
 #, python-brace-format
 msgid "No se pudo generar el ticket: {error}"
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:861
+#: wiibackup_manager/widgets/transfer_view.py:863
 #, python-brace-format
 msgid "Ticket guardado en {ruta} (no se pudo abrir el visor de PDF)."
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:864
+#: wiibackup_manager/widgets/transfer_view.py:866
 #, python-brace-format
 msgid "Ticket guardado en {ruta}"
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:883
+#: wiibackup_manager/widgets/transfer_view.py:885
 msgid ""
 "No se puede expulsar mientras haya transferencias en curso o en cola hacia "
 "esta unidad."
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:891
+#: wiibackup_manager/widgets/transfer_view.py:893
 msgid ""
 "El destino elegido no es una unidad montada (es una carpeta local): no hay "
 "nada que expulsar."
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:909
+#: wiibackup_manager/widgets/transfer_view.py:911
 msgid ""
 "No se puede expulsar ahora: la cola todavía tiene transferencias hacia esa "
 "unidad. Cancelalas o esperá a que terminen."
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:917
+#: wiibackup_manager/widgets/transfer_view.py:919
 #, python-brace-format
 msgid ""
 "No se puede expulsar ahora: hay una operación en curso sobre esa unidad "
 "({op}). Esperá a que termine o cancelala."
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:996
+#: wiibackup_manager/widgets/transfer_view.py:999
 msgid "Elegí primero una unidad o carpeta destino."
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:1001
+#: wiibackup_manager/widgets/transfer_view.py:1004
 msgid "No hay juegos seleccionados."
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:1022
+#: wiibackup_manager/widgets/transfer_view.py:1025
 #: wiibackup_manager/window.py:1153
 #, python-brace-format
 msgid ""
@@ -1584,83 +1598,83 @@ msgid ""
 "Enviar '{title}' lo va a reemplazar. Esta acción no se puede deshacer."
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:1043
+#: wiibackup_manager/widgets/transfer_view.py:1046
 msgid ""
 "Esos juegos ya están en la cola o ya se copiaron a este destino. Usá "
 "'Limpiar terminadas' para volver a enviarlos."
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:1048
+#: wiibackup_manager/widgets/transfer_view.py:1051
 #, python-brace-format
 msgid ""
 "{n} juego(s) ya estaban en la cola o ya se copiaron: se encolaron solo los "
 "que faltaban."
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:1141
+#: wiibackup_manager/widgets/transfer_view.py:1144
 #, python-brace-format
 msgid "Cancelando '{title}'…"
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:1164
+#: wiibackup_manager/widgets/transfer_view.py:1167
 #, python-brace-format
 msgid "{n} copiados"
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:1166
+#: wiibackup_manager/widgets/transfer_view.py:1169
 #, python-brace-format
 msgid "{n} ya estaban en el destino"
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:1168
+#: wiibackup_manager/widgets/transfer_view.py:1171
 #, python-brace-format
 msgid "{n} con error"
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:1170
+#: wiibackup_manager/widgets/transfer_view.py:1173
 #, python-brace-format
 msgid "{n} no pasó la verificación"
 msgid_plural "{n} no pasaron la verificación"
 msgstr[0] ""
 msgstr[1] ""
 
-#: wiibackup_manager/widgets/transfer_view.py:1174
+#: wiibackup_manager/widgets/transfer_view.py:1177
 #, python-brace-format
 msgid "{n} cortado al desconectarse la unidad"
 msgid_plural "{n} cortados al desconectarse la unidad"
 msgstr[0] ""
 msgstr[1] ""
 
-#: wiibackup_manager/widgets/transfer_view.py:1179
+#: wiibackup_manager/widgets/transfer_view.py:1182
 #, python-brace-format
 msgid "{n} cancelados"
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:1182
+#: wiibackup_manager/widgets/transfer_view.py:1185
 msgid " · revisá la cola para ver el detalle"
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:1185
+#: wiibackup_manager/widgets/transfer_view.py:1188
 #, python-brace-format
 msgid "Cola terminada: {detail}.{tail}"
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:1202
+#: wiibackup_manager/widgets/transfer_view.py:1205
 #, python-brace-format
 msgid "{n} en cola"
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:1204
+#: wiibackup_manager/widgets/transfer_view.py:1207
 #, python-brace-format
 msgid "{n} terminadas"
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:1206
+#: wiibackup_manager/widgets/transfer_view.py:1209
 #, python-brace-format
 msgid "Cola de transferencia — {detail}"
 msgstr ""
 
-#: wiibackup_manager/widgets/transfer_view.py:1221
+#: wiibackup_manager/widgets/transfer_view.py:1224
 #, python-brace-format
 msgid "Cancelando {n} transferencia(s)…"
 msgstr ""
@@ -2349,23 +2363,23 @@ msgid ""
 "operación."
 msgstr ""
 
-#: wiibackup_manager/wit_wrapper.py:446
+#: wiibackup_manager/wit_wrapper.py:473
 #, python-brace-format
 msgid ""
 "`wit` no escribió un solo byte en {minutes:.0f} minutos: se lo dio por "
 "colgado y se canceló la operación."
 msgstr ""
 
-#: wiibackup_manager/wit_wrapper.py:453
+#: wiibackup_manager/wit_wrapper.py:480
 #, python-brace-format
 msgid ""
 "`wit` lleva más de {hours:.0f} horas sin terminar: se canceló la operación."
 msgstr ""
 
-#: wiibackup_manager/wit_wrapper.py:619 wiibackup_manager/wit_wrapper.py:682
+#: wiibackup_manager/wit_wrapper.py:656 wiibackup_manager/wit_wrapper.py:728
 msgid "Operación cancelada antes de arrancar `wit`."
 msgstr ""
 
-#: wiibackup_manager/wit_wrapper.py:695 wiibackup_manager/wit_wrapper.py:714
+#: wiibackup_manager/wit_wrapper.py:741 wiibackup_manager/wit_wrapper.py:760
 msgid "Operación cancelada por el usuario."
 msgstr ""

@@ -197,3 +197,32 @@ def copy_no_replace(src: Path, dest: Path) -> None:
         except OSError:
             pass
         raise
+
+
+def flush_and_drop_cache(paths) -> None:
+    """Baja a la unidad lo que quede en caché de cada archivo de `paths` y
+    después le pide al kernel que olvide sus páginas.
+
+    Es lo que hace falta antes de `wit VERIFY`: sin el `fsync`, lo que
+    `wit COPY` dejó en la caché de escritura (en una máquina con 16 GB,
+    hasta ~2.5 GB) se sigue bajando DURANTE la verificación y el tiempo se
+    le carga a la fase equivocada. Sin el `POSIX_FADV_DONTNEED`, VERIFY lee
+    las páginas que todavía están en RAM, o sea que compara lo que se le
+    mandó a la unidad con sí mismo y no con lo que la unidad guardó.
+
+    `fsync` primero: DONTNEED no descarta páginas sucias, solo las limpias.
+
+    Un error del `fsync` se propaga: es la unidad diciendo que no pudo
+    guardar lo que se le mandó, y eso no se puede tragar en silencio. Que
+    el kernel no haga caso del `fadvise` no rompe nada -VERIFY lee de la
+    caché como antes-, así que ese sí se ignora."""
+    for path in paths:
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+            try:
+                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+            except OSError:
+                pass
+        finally:
+            os.close(fd)

@@ -666,12 +666,13 @@ def test_una_transferencia_verificada_anota_cuanto_duro_cada_fase(
     cola.shutdown(wait=5)
 
     assert job.status is JobStatus.DONE, job.error_msg
-    assert list(job.phase_times) == ["prepare", "copy", "verify"]
+    assert list(job.phase_times) == ["prepare", "copy", "sync", "verify"]
     assert job.phase_times["verify"] >= 0.05
     # Las fases no se pisan: juntas no pueden durar más que la tarea.
     assert sum(job.phase_times.values()) <= job.elapsed + 0.01
     texto = queue_manager.format_phase_times(job.phase_times)
-    assert texto.startswith("preparación 0s, copia 0s, verificación 0s")
+    assert texto.startswith(
+        "preparación 0s, copia 0s, sincronización 0s, verificación 0s")
     assert texto in log.entries()[0].detail
     assert texto in capsys.readouterr().err
 
@@ -719,3 +720,134 @@ def test_format_phase_times_respeta_el_orden_y_saltea_lo_que_no_corrio():
     assert queue_manager.format_phase_times(
         {"verify": 89.0, "copy": 1041.0}) == "copia 17m 21s, verificación 1m 29s"
     assert queue_manager.format_phase_times({}) == ""
+
+
+# ------------------------------------------------- Sync antes de verificar --
+def test_antes_de_verificar_se_baja_y_descarta_cada_parte(
+        make_game, tmp_path, monkeypatch):
+    """Cada parte (.wbfs, .wbf1) pasa por `fsync` + DONTNEED ANTES de
+    lanzar VERIFY, para que `wit` relea de la unidad y no de la RAM. Y el
+    tiempo de eso queda como fase propia, entre la copia y la
+    verificación."""
+    monkeypatch.setattr(transfer_plan, "free_space", lambda path: 10 ** 12)
+    _sin_wit_para_copiar(monkeypatch)
+
+    juego = _juego_wbfs(make_game)
+    dest_root = tmp_path / "dest"
+    dest_root.mkdir()
+    destino = transfer_plan.wbfs_dest_path(juego, dest_root)
+
+    real_send = library_ops.send_to_wbfs_drive
+
+    def _send_partido(game, drive_root, *args, **kwargs):
+        ruta = real_send(game, drive_root, *args, **kwargs)
+        ruta.with_suffix(".wbf1").write_bytes(b"parte 1")
+        return ruta
+    monkeypatch.setattr(library_ops, "send_to_wbfs_drive", _send_partido)
+
+    eventos = []
+
+    def _flush(paths):
+        paths = list(paths)
+        eventos.append(("sync", paths))
+        time.sleep(0.05)
+    monkeypatch.setattr(queue_manager.fileops, "flush_and_drop_cache", _flush)
+
+    def _verify(path, binary="wit", timeout=None, cancel=None):
+        eventos.append(("verify", Path(path)))
+        return wit_wrapper.VerifyResult(ok=True, timed_out=False, output="")
+    monkeypatch.setattr(queue_manager.wit_wrapper, "verify_result", _verify)
+
+    cola = hacer_cola()
+    job = cola.add_jobs([juego], dest_root, verify_after_copy=True)[0]
+    esperar_final(job)
+    cola.shutdown(wait=5)
+
+    assert job.status is JobStatus.DONE, job.error_msg
+    assert eventos == [("sync", [destino, destino.with_suffix(".wbf1")]),
+                       ("verify", destino)]
+    assert list(job.phase_times) == ["prepare", "copy", "sync", "verify"]
+    assert job.phase_times["sync"] >= 0.05
+    assert "sincronización" in queue_manager.format_phase_times(job.phase_times)
+
+
+def test_el_sync_real_corre_sobre_los_archivos_copiados(
+        make_game, tmp_path, monkeypatch):
+    """Sin simular `flush_and_drop_cache`: el `fsync` y el `fadvise` de
+    verdad sobre el archivo recién copiado no rompen la tarea."""
+    monkeypatch.setattr(transfer_plan, "free_space", lambda path: 10 ** 12)
+    _sin_wit_para_copiar(monkeypatch)
+    monkeypatch.setattr(
+        queue_manager.wit_wrapper, "verify_result",
+        lambda *a, **k: wit_wrapper.VerifyResult(ok=True, timed_out=False,
+                                                 output=""))
+    dest_root = tmp_path / "dest"
+    dest_root.mkdir()
+    cola = hacer_cola()
+    job = cola.add_jobs([_juego_wbfs(make_game)], dest_root,
+                        verify_after_copy=True)[0]
+    esperar_final(job)
+    cola.shutdown(wait=5)
+
+    assert job.status is JobStatus.DONE, job.error_msg
+    assert "sync" in job.phase_times
+
+
+def test_un_fsync_que_falla_no_llega_a_verificar(make_game, tmp_path, monkeypatch):
+    """Si la unidad no pudo guardar lo que se le mandó, la copia no quedó:
+    es un error, no un "no se pudo verificar", y VERIFY ni corre."""
+    monkeypatch.setattr(transfer_plan, "free_space", lambda path: 10 ** 12)
+    _sin_wit_para_copiar(monkeypatch)
+
+    def _eio(_paths):
+        raise OSError(5, "Input/output error")
+    monkeypatch.setattr(queue_manager.fileops, "flush_and_drop_cache", _eio)
+    monkeypatch.setattr(queue_manager.drives, "device_is_gone",
+                        lambda **_k: False)
+
+    def _no_deberia_llamarse(*_a, **_k):
+        raise AssertionError("no se verifica lo que no se pudo guardar")
+    monkeypatch.setattr(queue_manager.wit_wrapper, "verify_result",
+                        _no_deberia_llamarse)
+
+    dest_root = tmp_path / "dest"
+    dest_root.mkdir()
+    cola, log = _cola_con_log(tmp_path)
+    job = cola.add_jobs([_juego_wbfs(make_game)], dest_root,
+                        verify_after_copy=True)[0]
+    esperar_final(job)
+    cola.shutdown(wait=5)
+
+    assert job.status is JobStatus.ERROR
+    assert "Input/output error" in job.error_msg
+    assert "sync" in job.phase_times
+    assert log.entries()[0].status == oplog.STATUS_ERROR
+
+
+# ------------------------------------------- Espacio libre sin prealloc --
+def test_en_fat32_el_espacio_se_mira_antes_de_copiar(make_game, tmp_path, monkeypatch):
+    """Sin la reserva de `wit` (apagada en FAT32), `wit` ya no falla al
+    arrancar si no entra: se daría cuenta recién con la unidad llena. El
+    chequeo de la cola tiene que cortar ANTES de lanzar la copia."""
+    monkeypatch.setattr(transfer_plan, "free_space", lambda path: 100)
+    monkeypatch.setattr(library_ops.drives, "is_fat_filesystem", lambda _p: True)
+    monkeypatch.setattr(library_ops.drives, "needs_wbfs_split", lambda _p: True)
+
+    def _no_deberia_llamarse(*_a, **_k):
+        raise AssertionError("no se copia lo que no entra")
+    monkeypatch.setattr(library_ops.wit_wrapper, "convert", _no_deberia_llamarse)
+    monkeypatch.setattr(queue_manager.library_ops, "send_to_wbfs_drive",
+                        _no_deberia_llamarse)
+
+    juego = make_game(name="juego.iso", game_id="RMCP01", fmt="ISO",
+                      contenido=b"x" * 4096)
+    dest_root = tmp_path / "dest"
+    dest_root.mkdir()
+    cola = hacer_cola()
+    job = cola.add_jobs([juego], dest_root)[0]
+    esperar_final(job)
+    cola.shutdown(wait=5)
+
+    assert job.status is JobStatus.ERROR
+    assert "No entra" in job.error_msg
+    assert "copy" not in job.phase_times

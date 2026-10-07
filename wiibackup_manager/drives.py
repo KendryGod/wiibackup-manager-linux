@@ -303,6 +303,16 @@ def needs_wbfs_split(path: Path) -> bool:
     return fstype in _FAT32_FSTYPES
 
 
+def is_fat_filesystem(path: Path) -> bool:
+    """True solo si el destino es FAT con certeza (ver `_FAT32_FSTYPES`).
+
+    Al revés que `needs_wbfs_split`, ante la duda dice que NO: lo usa la
+    copia para apagar la reserva de espacio de `wit`, que en FAT32 escribe
+    ceros (ver `wit_wrapper.convert`), y en un filesystem que no se pudo
+    identificar lo prudente es dejar el comportamiento de siempre."""
+    return filesystem_of(path) in _FAT32_FSTYPES
+
+
 def eject_mount_point(path: Path) -> tuple[bool, str]:
     """Desmonta de forma segura `path` para que la unidad se pueda
     desconectar físicamente. Usa udisksctl (unmount + power-off, lo que

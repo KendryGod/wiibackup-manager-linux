@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import stat
+import subprocess
 import threading
 from pathlib import Path
 
@@ -885,3 +886,82 @@ def test_el_aviso_con_varios_respaldos_suma_el_total(tmp_path):
 
 def test_sin_respaldos_huerfanos_no_hay_aviso():
     assert formatting.format_orphaned_backups([]) == ""
+
+
+# ------------------------------------------- Reserva de espacio en FAT32 --
+@pytest.mark.parametrize("fstype, esperado", [
+    ("vfat", True), ("msdos", True), ("ext4", False), ("exfat", False),
+    # Sin poder identificarlo se deja el comportamiento de siempre.
+    (None, False),
+])
+def test_is_fat_filesystem(monkeypatch, tmp_path, fstype, esperado):
+    from wiibackup_manager import drives
+    monkeypatch.setattr(drives, "filesystem_of", lambda _p: fstype)
+    assert drives.is_fat_filesystem(tmp_path) is esperado
+
+
+@pytest.mark.parametrize("es_fat, prealloc", [(True, False), (False, True)])
+def test_send_to_wbfs_drive_apaga_la_reserva_solo_en_fat(
+        make_game, tmp_path, monkeypatch, es_fat, prealloc):
+    """En FAT32 `wit` reservaría el archivo escribiendo ceros; en el resto
+    de los filesystems queda como estaba."""
+    visto = {}
+
+    def _convert(src, dest, fmt, binary, **kwargs):
+        visto.update(kwargs)
+        dest.write_bytes(b"wbfs")
+        return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+    monkeypatch.setattr(library_ops.wit_wrapper, "is_available", lambda _b: True)
+    monkeypatch.setattr(library_ops.wit_wrapper, "convert", _convert)
+    monkeypatch.setattr(library_ops.drives, "needs_wbfs_split", lambda _p: es_fat)
+    monkeypatch.setattr(library_ops.drives, "is_fat_filesystem", lambda _p: es_fat)
+
+    juego = make_game(name="juego.iso", game_id="RMCP01", fmt="ISO")
+    library_ops.send_to_wbfs_drive(juego, tmp_path / "usb")
+
+    assert visto["prealloc"] is prealloc
+
+
+# ------------------------------------------- Sync antes de verificar --
+def test_flush_and_drop_cache_hace_fsync_y_despues_descarta(tmp_path, monkeypatch):
+    """`fsync` ANTES del `fadvise`: DONTNEED no descarta páginas sucias."""
+    partes = [tmp_path / "RMCP01.wbfs", tmp_path / "RMCP01.wbf1"]
+    for p in partes:
+        p.write_bytes(b"datos")
+    llamadas = []
+    fsync_real = os.fsync
+    monkeypatch.setattr(fileops.os, "fsync",
+                        lambda fd: (llamadas.append(("fsync", fd)), fsync_real(fd)))
+    monkeypatch.setattr(fileops.os, "posix_fadvise",
+                        lambda fd, off, n, consejo: llamadas.append(
+                            ("fadvise", fd, off, n, consejo)))
+
+    fileops.flush_and_drop_cache(partes)
+
+    assert [c[0] for c in llamadas] == ["fsync", "fadvise"] * 2
+    for _fsync, fadvise in zip(llamadas[::2], llamadas[1::2]):
+        assert fadvise[1:] == (_fsync[1], 0, 0, os.POSIX_FADV_DONTNEED)
+
+
+def test_flush_and_drop_cache_no_se_traga_un_fsync_que_falla(tmp_path, monkeypatch):
+    archivo = tmp_path / "RMCP01.wbfs"
+    archivo.write_bytes(b"datos")
+
+    def _eio(_fd):
+        raise OSError(5, "Input/output error")
+    monkeypatch.setattr(fileops.os, "fsync", _eio)
+
+    with pytest.raises(OSError):
+        fileops.flush_and_drop_cache([archivo])
+
+
+def test_flush_and_drop_cache_ignora_un_fadvise_rechazado(tmp_path, monkeypatch):
+    archivo = tmp_path / "RMCP01.wbfs"
+    archivo.write_bytes(b"datos")
+
+    def _rechazo(*_a):
+        raise OSError(22, "Invalid argument")
+    monkeypatch.setattr(fileops.os, "posix_fadvise", _rechazo)
+
+    fileops.flush_and_drop_cache([archivo])
