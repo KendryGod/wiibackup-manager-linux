@@ -6,7 +6,7 @@ de Windows. Hecho con GTK4 + libadwaita para verse nativo en Fedora/GNOME.
 [![CI](https://github.com/KendryGod/wiibackup-manager-linux/actions/workflows/ci.yml/badge.svg)](https://github.com/KendryGod/wiibackup-manager-linux/actions/workflows/ci.yml)
 ![Estado](https://img.shields.io/badge/estado-alpha-orange)
 ![Licencia](https://img.shields.io/badge/licencia-MIT-blue)
-![Versión](https://img.shields.io/badge/versión-0.2.1-green)
+![Versión](https://img.shields.io/badge/versión-0.2.2-green)
 
 ![La pestaña Biblioteca con las carátulas descargadas](docs/screenshots/biblioteca.png)
 
@@ -499,6 +499,54 @@ wiibackup_manager/
 ```
 
 ## Changelog
+
+### 0.2.2
+
+Cuatro commits desde la 0.2.1, todos arreglos. Dos de ellos rompían
+funciones centrales con hardware y juegos reales: formatear un USB de
+fábrica y transferir cualquier juego de Wii con la opción por defecto.
+
+#### Corregido
+
+- **Formatear un USB con tabla de particiones.** Con un USB real (un
+  Kingston DataTraveler) el formateo fallaba con
+  `mkfs.vfat: Partitions or virtual mappings on device '/dev/sda', not
+  making filesystem`: se le pasaba a `mkfs.vfat` el disco entero, y los
+  USB traen tabla de particiones de fábrica. Ahora la partición va
+  primero: en un único paso privilegiado (una sola contraseña) se borran
+  las firmas viejas, se crea una tabla MBR con una partición FAT32 que
+  ocupa todo el disco y se formatea esa partición, no el disco. Los
+  chequeos de siempre -lista blanca, montajes críticos, que sea removible,
+  el tamaño y la identidad del disco- se repiten adentro de ese paso,
+  justo antes de borrar nada, porque el diálogo de contraseña puede
+  quedar abierto todo el tiempo que uno quiera.
+
+  El montaje después de formatear se hace **como el usuario**, fuera del
+  paso privilegiado, y la app exige que el punto de montaje quede a su
+  nombre y escribible; si no, lo dice en vez de dejar una unidad donde
+  después no se puede copiar nada. También se avisa a udev del sistema de
+  archivos nuevo antes de montar: sin eso, udisks seguía viendo la
+  partición vacía y el montaje fallaba con "is not a mountable
+  filesystem".
+
+- **Transferir juegos de Wii.** Con "Optimizar espacio" prendido -el
+  valor por defecto- toda transferencia de un juego de Wii fallaba con
+  `wit: ERROR #108 [SYNTAX ERROR] in AddFilePattern()`. `wit` acepta
+  abreviaturas de opciones largas y expandía `--rm` a `--rm-files`, un
+  filtro de archivos y no de particiones. La partición UPDATE ahora se
+  descarta con `--psel=-UPDATE`, que deja todas las demás (datos y
+  canales). Los juegos de GameCube no pasan por `wit COPY` y no estaban
+  afectados.
+
+- **"&" y otros caracteres en la interfaz.** Los toasts, las filas de
+  Adwaita y algunas descripciones interpretan markup, así que un nombre
+  como "Ocarina of Time & Master Quest" dejaba el texto vacío (con un
+  warning de GTK). Ahora esos textos se muestran sin interpretar o se
+  escapan, según el caso: el aviso de la ventana, el detalle del juego,
+  los destinos de Transferir, las rutas de Preferencias, el error de la
+  tienda de Homebrew y la descripción del Ticket. Al revés, las tarjetas
+  de la tienda de Homebrew escapaban el nombre sobre un texto sin markup
+  y mostraban un `&amp;` literal.
 
 ### 0.2.1
 
