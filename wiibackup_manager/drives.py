@@ -884,7 +884,7 @@ def _mount_points_now(device_path) -> list[Path]:
 
 
 def _mount_as_user(partition, *, run=subprocess.run,
-                   timeout: float = 15.0) -> Path:
+                   timeout: float = 30.0) -> Path:
     """Monta `partition` con `udisksctl` -como el usuario que corre la app,
     NUNCA dentro del paso privilegiado- y devuelve dónde quedó.
 
@@ -893,10 +893,11 @@ def _mount_as_user(partition, *, run=subprocess.run,
     después. Montado por root, en cambio, todo queda de root y FAT no
     tiene cómo cambiarlo después.
 
-    Se reintenta hasta `timeout`: udisks se entera del filesystem nuevo
-    por un evento de udev que puede llegar un instante después de que
-    termina `mkfs.vfat`, y mientras tanto `udisksctl mount` responde que
-    no hay nada montable. Si en el medio gvfs se adelantó y lo automontó,
+    Se reintenta cada medio segundo hasta `timeout`: aunque el script
+    privilegiado fuerza un `udevadm trigger --action=change` y espera a
+    udev, udisks actualiza su objeto D-Bus después, de forma asíncrona, y
+    mientras tanto `udisksctl mount` responde que no hay nada montable. El
+    tope es generoso porque solo se espera entero si algo anda mal. Si en el medio gvfs se adelantó y lo automontó,
     se toma ese montaje (la postcondición de `format_fat32` igual
     confirma que sea del usuario)."""
     inicio = time.monotonic()
@@ -991,16 +992,14 @@ nombre=${dev##*/}
 
 abortar() {
     codigo=$1; shift
-    printf 'wbm-format: %s
-' "$*" >&2
+    printf 'wbm-format: %s\n' "$*" >&2
     exit "$codigo"
 }
 
 identidad_actual() {
     props=$(udevadm info --query=property --name="$dev" 2>/dev/null) || return 0
     for clave in ID_SERIAL ID_SERIAL_SHORT ID_WWN; do
-        valor=$(printf '%s
-' "$props" | sed -n "s/^$clave=//p" | head -n 1)
+        valor=$(printf '%s\n' "$props" | sed -n "s/^$clave=//p" | head -n 1)
         if [ -n "$valor" ]; then
             printf '%s' "$valor"
             return 0
@@ -1050,8 +1049,7 @@ while :; do
     fi
     sleep 0.2
 done
-cantidad=$(printf '%s
-' "$lista" | grep -c .)
+cantidad=$(printf '%s\n' "$lista" | grep -c .)
 [ "$cantidad" -eq 1 ] || abortar 95 "$dev quedó con $cantidad particiones en vez de 1"
 particion=$lista
 
@@ -1063,9 +1061,12 @@ set -- -F 32
 if [ -n "$cluster" ]; then set -- "$@" -s "$cluster"; fi
 if [ -n "$etiqueta" ]; then set -- "$@" -n "$etiqueta"; fi
 mkfs.vfat "$@" "$particion" >&2
+# Sin esto udisks puede seguir viendo la partición vacía (sin la regla
+# "watch" de udev, cerrar el dispositivo después de mkfs no genera evento) y
+# el montaje posterior falla con "is not a mountable filesystem".
+udevadm trigger --action=change "$particion" || true
 udevadm settle --timeout=10 || true
-printf 'PARTICION=%s
-' "$particion"
+printf 'PARTICION=%s\n' "$particion"
 """
 
 _FORMAT_EXIT_ERRORS = {
@@ -1135,7 +1136,7 @@ def normalize_fat_label(label: str | None) -> str:
 def format_fat32(device: BlockDevice, *, run=subprocess.run,
                  label: str | None = None,
                  sectors_per_cluster: int | None = None,
-                 mount_timeout: float = 15.0) -> Path:
+                 mount_timeout: float = 30.0) -> Path:
     """Formatea `device` como FAT32 (tabla MBR con una sola partición que
     ocupa todo el disco), con todos los blindajes puestos, y devuelve el
     punto de montaje donde quedó.
@@ -1247,7 +1248,7 @@ def format_fat32(device: BlockDevice, *, run=subprocess.run,
 def format_as_wii_usb(device: BlockDevice, *, run=subprocess.run,
                       label: str = WII_USB_LABEL,
                       sectors_per_cluster: int = WII_USB_SECTORS_PER_CLUSTER,
-                      mount_timeout: float = 15.0) -> Path:
+                      mount_timeout: float = 30.0) -> Path:
     """Modo Fábrica: `format_fat32` (todos los blindajes + particionar +
     mkfs + montar como el usuario) y encima la estructura de carpetas que
     esperan USB Loader GX y Nintendont, creada ya sin privilegios.

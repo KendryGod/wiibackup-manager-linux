@@ -12,7 +12,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gtk  # noqa: E402
+from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 from ..i18n import _
 
@@ -51,7 +51,8 @@ class TicketDialog(Adw.Dialog):
         group = Adw.PreferencesGroup(
             title=_("Datos del ticket"),
             description=_("Se genera un PDF con el contenido de «{drive}» "
-                          "para enviarle al cliente.").format(drive=drive_label),
+                          "para enviarle al cliente.").format(
+                              drive=GLib.markup_escape_text(drive_label)),
         )
         page.add(group)
 

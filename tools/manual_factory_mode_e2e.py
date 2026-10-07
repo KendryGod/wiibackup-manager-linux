@@ -264,13 +264,20 @@ def fase_4_formateo_real(loop_dev: Path, workdir: Path) -> None:
 
     # Control: el comando del formateo viejo falla acá igual que en el
     # DataTraveler real. Si esto pasara, la fase no estaría reproduciendo
-    # el caso.
+    # el caso. Va con la partición desmontada -el formateo viejo también
+    # desmontaba antes de mkfs-: montada, mkfs.vfat ni siquiera abre el
+    # disco ("Device or resource busy") y el control no probaría nada.
+    punto_fabrica = workdir / "montaje-de-fabrica"
+    subprocess.run(["umount", str(particion_vieja)], check=True)
     viejo = subprocess.run(["mkfs.vfat", "-F", "32", str(loop_dev)],
                            capture_output=True, text=True)
     marcar("Fase 4: (control) mkfs.vfat sobre el disco entero se niega, como "
            "con el USB real", viejo.returncode != 0
            and "Partitions or virtual mappings" in viejo.stderr,
            viejo.stderr.strip())
+    # De vuelta montada: format_as_wii_usb tiene que arrancar como con un
+    # USB recién conectado y automontado.
+    subprocess.run(["mount", str(particion_vieja), str(punto_fabrica)], check=True)
 
     with loop_como_removible(loop_dev, workdir):
         tamano = drives.device_size_bytes(loop_dev)

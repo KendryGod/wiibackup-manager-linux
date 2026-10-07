@@ -1825,7 +1825,7 @@ def _mount_points_now(device_path) -> list[Path]:
 
 
 def _mount_as_user(partition, *, run=subprocess.run,
-                   timeout: float = 15.0) -> Path:
+                   timeout: float = 30.0) -> Path:
     """Monta `partition` con `udisksctl` -como el usuario que corre la app,
     NUNCA dentro del paso privilegiado- y devuelve dónde quedó.
 
@@ -1834,10 +1834,11 @@ def _mount_as_user(partition, *, run=subprocess.run,
     después. Montado por root, en cambio, todo queda de root y FAT no
     tiene cómo cambiarlo después.
 
-    Se reintenta hasta `timeout`: udisks se entera del filesystem nuevo
-    por un evento de udev que puede llegar un instante después de que
-    termina `mkfs.vfat`, y mientras tanto `udisksctl mount` responde que
-    no hay nada montable. Si en el medio gvfs se adelantó y lo automontó,
+    Se reintenta cada medio segundo hasta `timeout`: aunque el script
+    privilegiado fuerza un `udevadm trigger --action=change` y espera a
+    udev, udisks actualiza su objeto D-Bus después, de forma asíncrona, y
+    mientras tanto `udisksctl mount` responde que no hay nada montable. El
+    tope es generoso porque solo se espera entero si algo anda mal. Si en el medio gvfs se adelantó y lo automontó,
     se toma ese montaje (la postcondición de `format_fat32` igual
     confirma que sea del usuario)."""
     inicio = time.monotonic()
@@ -1932,16 +1933,14 @@ nombre=${dev##*/}
 
 abortar() {
     codigo=$1; shift
-    printf 'wbm-format: %s
-' "$*" >&2
+    printf 'wbm-format: %s\n' "$*" >&2
     exit "$codigo"
 }
 
 identidad_actual() {
     props=$(udevadm info --query=property --name="$dev" 2>/dev/null) || return 0
     for clave in ID_SERIAL ID_SERIAL_SHORT ID_WWN; do
-        valor=$(printf '%s
-' "$props" | sed -n "s/^$clave=//p" | head -n 1)
+        valor=$(printf '%s\n' "$props" | sed -n "s/^$clave=//p" | head -n 1)
         if [ -n "$valor" ]; then
             printf '%s' "$valor"
             return 0
@@ -1991,8 +1990,7 @@ while :; do
     fi
     sleep 0.2
 done
-cantidad=$(printf '%s
-' "$lista" | grep -c .)
+cantidad=$(printf '%s\n' "$lista" | grep -c .)
 [ "$cantidad" -eq 1 ] || abortar 95 "$dev quedó con $cantidad particiones en vez de 1"
 particion=$lista
 
@@ -2004,9 +2002,12 @@ set -- -F 32
 if [ -n "$cluster" ]; then set -- "$@" -s "$cluster"; fi
 if [ -n "$etiqueta" ]; then set -- "$@" -n "$etiqueta"; fi
 mkfs.vfat "$@" "$particion" >&2
+# Sin esto udisks puede seguir viendo la partición vacía (sin la regla
+# "watch" de udev, cerrar el dispositivo después de mkfs no genera evento) y
+# el montaje posterior falla con "is not a mountable filesystem".
+udevadm trigger --action=change "$particion" || true
 udevadm settle --timeout=10 || true
-printf 'PARTICION=%s
-' "$particion"
+printf 'PARTICION=%s\n' "$particion"
 """
 
 _FORMAT_EXIT_ERRORS = {
@@ -2076,7 +2077,7 @@ def normalize_fat_label(label: str | None) -> str:
 def format_fat32(device: BlockDevice, *, run=subprocess.run,
                  label: str | None = None,
                  sectors_per_cluster: int | None = None,
-                 mount_timeout: float = 15.0) -> Path:
+                 mount_timeout: float = 30.0) -> Path:
     """Formatea `device` como FAT32 (tabla MBR con una sola partición que
     ocupa todo el disco), con todos los blindajes puestos, y devuelve el
     punto de montaje donde quedó.
@@ -2188,7 +2189,7 @@ def format_fat32(device: BlockDevice, *, run=subprocess.run,
 def format_as_wii_usb(device: BlockDevice, *, run=subprocess.run,
                       label: str = WII_USB_LABEL,
                       sectors_per_cluster: int = WII_USB_SECTORS_PER_CLUSTER,
-                      mount_timeout: float = 15.0) -> Path:
+                      mount_timeout: float = 30.0) -> Path:
     """Modo Fábrica: `format_fat32` (todos los blindajes + particionar +
     mkfs + montar como el usuario) y encima la estructura de carpetas que
     esperan USB Loader GX y Nintendont, creada ya sin privilegios.
@@ -10405,6 +10406,7 @@ class GameDetailDialog(Adw.Dialog):
 
     def _add_row(self, label: str, value: str, wrap: bool = False):
         row = Adw.ActionRow(title=label, subtitle=value)
+        row.set_use_markup(False)
         if wrap:
             # 0 = sin límite de líneas. La lista de controles de un juego
             # como Mario Kart Wii son seis accesorios y no entra en una
@@ -11305,8 +11307,9 @@ class HomebrewStoreView(Gtk.Box):
             return False
 
         if result.status is oscwii_client.FetchStatus.ERROR:
-            self.error_status.set_description(
-                result.error or _("motivo desconocido"))
+            # La descripción de un StatusPage siempre es markup.
+            self.error_status.set_description(GLib.markup_escape_text(
+                result.error or _("motivo desconocido")))
             self.state_stack.set_visible_child_name("error")
             return False
 
@@ -11358,7 +11361,7 @@ class HomebrewStoreView(Gtk.Box):
 
     def _render_card(self, card: HomebrewAppCard):
         app = card.app
-        card.name_label.set_label(GLib.markup_escape_text(app.name))
+        card.name_label.set_label(app.name)
         card.desc_label.set_label(app.short_description)
         card.desc_label.set_visible(bool(app.short_description))
         meta = [p for p in (app.category, f"v{app.version}" if app.version else "") if p]
@@ -12463,6 +12466,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
         page.add(group)
 
         self._library_row = Adw.ActionRow(title=_("Carpeta de la biblioteca"))
+        self._library_row.set_use_markup(False)
         self._library_row.set_subtitle(settings.library_path)
         pick_btn = Gtk.Button(icon_name="folder-open-symbolic", valign=Gtk.Align.CENTER)
         pick_btn.connect("clicked", self._pick_library_folder)
@@ -12470,6 +12474,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
         group.add(self._library_row)
 
         self._wbfs_row = Adw.ActionRow(title=_("Unidad/carpeta WBFS (USB Loader)"))
+        self._wbfs_row.set_use_markup(False)
         self._wbfs_row.set_subtitle(settings.wbfs_drive_path or _("No configurada"))
         pick_wbfs_btn = Gtk.Button(icon_name="folder-open-symbolic", valign=Gtk.Align.CENTER)
         pick_wbfs_btn.connect("clicked", self._pick_wbfs_folder)
@@ -12871,7 +12876,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gtk  # noqa: E402
+from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 from ..i18n import _
 
@@ -12910,7 +12915,8 @@ class TicketDialog(Adw.Dialog):
         group = Adw.PreferencesGroup(
             title=_("Datos del ticket"),
             description=_("Se genera un PDF con el contenido de «{drive}» "
-                          "para enviarle al cliente.").format(drive=drive_label),
+                          "para enviarle al cliente.").format(
+                              drive=GLib.markup_escape_text(drive_label)),
         )
         page.add(group)
 
@@ -13488,6 +13494,7 @@ class TransferView(Gtk.Box):
             subtitle = _("{free:.1f} GB libres de {total:.1f} GB · {path}").format(
                 free=drive.free_gb, total=drive.total_gb, path=drive.mount_point)
             row = Adw.ActionRow(title=drive.name, subtitle=subtitle)
+            row.set_use_markup(False)
             row.dest_path = drive.mount_point
             row.is_manual = False
             row.add_prefix(Gtk.Image.new_from_icon_name("drive-removable-media-symbolic"))
@@ -13528,6 +13535,7 @@ class TransferView(Gtk.Box):
         vuelva."""
         path = Path(preset["path"])
         row = Adw.ActionRow(title=preset["name"])
+        row.set_use_markup(False)
         row.dest_path = path
         row.is_manual = False
         row.is_preset = True
@@ -13906,6 +13914,7 @@ class TransferView(Gtk.Box):
             return
         path = Path(folder.get_path())
         row = Adw.ActionRow(title=path.name or str(path), subtitle=str(path))
+        row.set_use_markup(False)
         row.dest_path = path
         row.is_manual = True
         row.add_prefix(Gtk.Image.new_from_icon_name("folder-symbolic"))
@@ -17013,7 +17022,11 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self.close()
 
     def _show_toast(self, message: str):
-        self._toast_overlay.add_toast(Adw.Toast(title=message, timeout=3))
+        # Sin markup: los avisos llevan nombres de juegos, rutas y errores
+        # ("Ocarina of Time & Master Quest"); con el markup por defecto del
+        # toast, un "&" o "<" deja el aviso vacío.
+        self._toast_overlay.add_toast(
+            Adw.Toast(title=message, timeout=3, use_markup=False))
 
 
 # ============================================================
@@ -18220,13 +18233,20 @@ def fase_4_formateo_real(loop_dev: Path, workdir: Path) -> None:
 
     # Control: el comando del formateo viejo falla acá igual que en el
     # DataTraveler real. Si esto pasara, la fase no estaría reproduciendo
-    # el caso.
+    # el caso. Va con la partición desmontada -el formateo viejo también
+    # desmontaba antes de mkfs-: montada, mkfs.vfat ni siquiera abre el
+    # disco ("Device or resource busy") y el control no probaría nada.
+    punto_fabrica = workdir / "montaje-de-fabrica"
+    subprocess.run(["umount", str(particion_vieja)], check=True)
     viejo = subprocess.run(["mkfs.vfat", "-F", "32", str(loop_dev)],
                            capture_output=True, text=True)
     marcar("Fase 4: (control) mkfs.vfat sobre el disco entero se niega, como "
            "con el USB real", viejo.returncode != 0
            and "Partitions or virtual mappings" in viejo.stderr,
            viejo.stderr.strip())
+    # De vuelta montada: format_as_wii_usb tiene que arrancar como con un
+    # USB recién conectado y automontado.
+    subprocess.run(["mount", str(particion_vieja), str(punto_fabrica)], check=True)
 
     with loop_como_removible(loop_dev, workdir):
         tamano = drives.device_size_bytes(loop_dev)
@@ -21299,6 +21319,20 @@ def test_el_montaje_no_corre_dentro_del_paso_privilegiado(entorno):
     assert nombres.index("udisksctl") > nombres.index("mkfs.vfat")
     assert "udisksctl" not in drives._FORMAT_SCRIPT
     assert "mount " not in drives._FORMAT_SCRIPT
+
+
+def test_udev_reanaliza_la_particion_antes_de_montar(entorno):
+    """En un loop real, sin este `trigger` udisks seguía viendo la
+    partición vacía y `udisksctl mount` decía "is not a mountable
+    filesystem"."""
+    herramientas, device, _punto = entorno()
+    _formatear(herramientas, device)
+    llamadas = herramientas.llamadas()
+    mkfs = next(i for i, c in enumerate(llamadas) if c[0] == "mkfs.vfat")
+    trigger = llamadas.index(["udevadm", "trigger", "--action=change", "/dev/sdb1"])
+    settle = max(i for i, c in enumerate(llamadas) if c[:2] == ["udevadm", "settle"])
+    montaje = next(i for i, c in enumerate(llamadas) if c[0] == "udisksctl")
+    assert mkfs < trigger < settle < montaje
 
 
 def test_montaje_de_otro_usuario_no_se_reporta_como_exito(entorno, monkeypatch):
@@ -24977,6 +25011,166 @@ def test_el_aviso_con_varios_respaldos_suma_el_total(tmp_path):
 
 def test_sin_respaldos_huerfanos_no_hay_aviso():
     assert formatting.format_orphaned_backups([]) == ""
+
+
+# ============================================================
+# FILE: tests/test_markup_gui.py
+# ============================================================
+"""Nombres de juegos, rutas y errores con "&", "<" o ">" en la interfaz.
+
+Origen: al agregar "Ocarina of Time & Master Quest", GTK tiraba
+"Failed to set text ... Error parsing markup: entidad no termina con un
+punto y coma" y el aviso quedaba VACÍO. Los toasts, las filas de
+Adwaita y las descripciones de StatusPage/PreferencesGroup interpretan
+markup por defecto.
+
+Lo que se comprueba es lo que vería el usuario: que el texto que llega al
+`Gtk.Label` de adentro sea exactamente el nombre (con markup roto, GTK lo
+deja vacío; escapado de más, se vería "&amp;").
+
+Los métodos se llaman sobre los widgets reales; donde construir la clase
+entera arrastraría red o la ventana completa, con un `self` mínimo.
+"""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+pytestmark = pytest.mark.gui
+
+NOMBRE = "Ocarina of Time & Master Quest <Rev 1> > copia"
+
+
+@pytest.fixture(scope="module")
+def gtk():
+    if not (os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")):
+        if os.environ.get("WBM_REQUIRE_GUI") == "1":
+            pytest.fail("WBM_REQUIRE_GUI=1 pero no hay display")
+        pytest.skip("sin display")
+    import gi
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Adw", "1")
+    from gi.repository import Adw, Gtk
+    if not Gtk.init_check():
+        pytest.skip("GTK no pudo inicializarse")
+    Adw.init()
+    return Gtk
+
+
+def _textos(gtk, widget) -> list[str]:
+    textos = []
+    hijo = widget.get_first_child()
+    while hijo is not None:
+        if isinstance(hijo, gtk.Label):
+            textos.append(hijo.get_text())
+        textos += _textos(gtk, hijo)
+        hijo = hijo.get_next_sibling()
+    return textos
+
+
+def _procesar_eventos():
+    from gi.repository import GLib
+    contexto = GLib.MainContext.default()
+    for _ in range(100):
+        contexto.iteration(False)
+
+
+def test_el_toast_muestra_el_nombre_tal_cual(gtk):
+    from gi.repository import Adw
+
+    from wiibackup_manager.window import WiiBackupWindow
+
+    ventana = gtk.Window()
+    overlay = Adw.ToastOverlay()
+    ventana.set_child(overlay)
+    ventana.present()
+    try:
+        mensaje = f"3 juego(s) nuevo(s) agregado(s). 2 omitido(s) por ya existir: {NOMBRE}"
+        WiiBackupWindow._show_toast(SimpleNamespace(_toast_overlay=overlay), mensaje)
+        _procesar_eventos()
+        assert mensaje in _textos(gtk, overlay)
+    finally:
+        ventana.destroy()
+
+
+def test_las_filas_del_detalle_del_juego(gtk):
+    from gi.repository import Adw
+
+    from wiibackup_manager.widgets.game_detail_dialog import GameDetailDialog
+
+    falso = SimpleNamespace(info_group=Adw.PreferencesGroup())
+    GameDetailDialog._add_row(falso, "Título", NOMBRE)
+    assert NOMBRE in _textos(gtk, falso.info_group)
+
+
+def test_acceso_rapido_de_transferir(gtk, tmp_path):
+    from wiibackup_manager.widgets.transfer_view import TransferView
+
+    ruta = tmp_path / NOMBRE
+    falso = SimpleNamespace(_is_dest_valid=lambda _p: False)
+    fila = TransferView._build_preset_row(falso, {"name": NOMBRE, "path": str(ruta)})
+    textos = _textos(gtk, fila)
+    assert NOMBRE in textos
+    assert any(str(ruta) in t for t in textos)
+
+
+def test_rutas_de_preferencias(gtk):
+    from wiibackup_manager import config
+    from wiibackup_manager.widgets.preferences_dialog import PreferencesDialog
+
+    ruta = f"/run/media/kendry/{NOMBRE}"
+    dialogo = PreferencesDialog(
+        config.Settings(library_path=ruta, wbfs_drive_path=ruta), lambda _s: None)
+    assert _textos(gtk, dialogo.get_child()).count(ruta) == 2
+
+
+def test_descripcion_del_ticket(gtk):
+    from wiibackup_manager.widgets.ticket_dialog import TicketDialog
+
+    dialogo = TicketDialog(NOMBRE, lambda *_a: None)
+    assert any(NOMBRE in t for t in _textos(gtk, dialogo.get_child()))
+
+
+def test_tarjeta_de_homebrew_no_muestra_entidades(gtk, monkeypatch):
+    """El caso inverso: este label NO usa markup, así que escaparlo
+    mostraba "&amp;" literal."""
+    from wiibackup_manager import oscwii_client
+    from wiibackup_manager.widgets.homebrew_store_view import (
+        HomebrewAppCard, HomebrewStoreView)
+
+    monkeypatch.setattr(oscwii_client, "fetch_icon_async", lambda *_a, **_k: None)
+    tarjeta = HomebrewAppCard()
+    tarjeta.app = oscwii_client.HomebrewApp(slug="x", name=NOMBRE)
+    falso = SimpleNamespace(_install_states={},
+                            _apply_install_state=lambda *_a: None)
+    HomebrewStoreView._render_card(falso, tarjeta)
+    assert tarjeta.name_label.get_text() == NOMBRE
+
+
+def test_error_de_la_tienda_con_url(gtk, monkeypatch):
+    from gi.repository import Adw
+
+    from wiibackup_manager import oscwii_client
+    from wiibackup_manager.widgets import gtk_helpers
+    from wiibackup_manager.widgets.homebrew_store_view import HomebrewStoreView
+
+    monkeypatch.setattr(gtk_helpers, "widget_is_alive", lambda _w: True)
+    error = "HTTP 503 en https://api.oscwii.org/v2/x?a=1&b=<2>"
+    falso = SimpleNamespace(error_status=Adw.StatusPage(title="t"),
+                            state_stack=SimpleNamespace(
+                                set_visible_child_name=lambda _n: None))
+    HomebrewStoreView._on_apps_loaded(falso, oscwii_client.AppListResult(
+        status=oscwii_client.FetchStatus.ERROR, apps=(), error=error))
+    assert error in _textos(gtk, falso.error_status)
+
+
+def test_ruta_de_ejemplo_existe_en_el_test():
+    # Sanidad del propio test: el nombre trae los tres caracteres.
+    assert all(c in NOMBRE for c in "&<>")
+    assert Path(NOMBRE).name == NOMBRE
 
 
 # ============================================================

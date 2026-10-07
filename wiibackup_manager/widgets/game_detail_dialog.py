@@ -104,6 +104,7 @@ class GameDetailDialog(Adw.Dialog):
 
     def _add_row(self, label: str, value: str, wrap: bool = False):
         row = Adw.ActionRow(title=label, subtitle=value)
+        row.set_use_markup(False)
         if wrap:
             # 0 = sin límite de líneas. La lista de controles de un juego
             # como Mario Kart Wii son seis accesorios y no entra en una

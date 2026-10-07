@@ -24,6 +24,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
         page.add(group)
 
         self._library_row = Adw.ActionRow(title=_("Carpeta de la biblioteca"))
+        self._library_row.set_use_markup(False)
         self._library_row.set_subtitle(settings.library_path)
         pick_btn = Gtk.Button(icon_name="folder-open-symbolic", valign=Gtk.Align.CENTER)
         pick_btn.connect("clicked", self._pick_library_folder)
@@ -31,6 +32,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
         group.add(self._library_row)
 
         self._wbfs_row = Adw.ActionRow(title=_("Unidad/carpeta WBFS (USB Loader)"))
+        self._wbfs_row.set_use_markup(False)
         self._wbfs_row.set_subtitle(settings.wbfs_drive_path or _("No configurada"))
         pick_wbfs_btn = Gtk.Button(icon_name="folder-open-symbolic", valign=Gtk.Align.CENTER)
         pick_wbfs_btn.connect("clicked", self._pick_wbfs_folder)

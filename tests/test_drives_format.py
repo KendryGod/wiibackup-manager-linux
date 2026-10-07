@@ -339,6 +339,20 @@ def test_el_montaje_no_corre_dentro_del_paso_privilegiado(entorno):
     assert "mount " not in drives._FORMAT_SCRIPT
 
 
+def test_udev_reanaliza_la_particion_antes_de_montar(entorno):
+    """En un loop real, sin este `trigger` udisks seguía viendo la
+    partición vacía y `udisksctl mount` decía "is not a mountable
+    filesystem"."""
+    herramientas, device, _punto = entorno()
+    _formatear(herramientas, device)
+    llamadas = herramientas.llamadas()
+    mkfs = next(i for i, c in enumerate(llamadas) if c[0] == "mkfs.vfat")
+    trigger = llamadas.index(["udevadm", "trigger", "--action=change", "/dev/sdb1"])
+    settle = max(i for i, c in enumerate(llamadas) if c[:2] == ["udevadm", "settle"])
+    montaje = next(i for i, c in enumerate(llamadas) if c[0] == "udisksctl")
+    assert mkfs < trigger < settle < montaje
+
+
 def test_montaje_de_otro_usuario_no_se_reporta_como_exito(entorno, monkeypatch):
     """Lo que pasaba con /run/media/root/...: el punto de montaje existe,
     pero no es del usuario que corre la app."""

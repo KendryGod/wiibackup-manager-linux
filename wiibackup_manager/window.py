@@ -2827,4 +2827,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self.close()
 
     def _show_toast(self, message: str):
-        self._toast_overlay.add_toast(Adw.Toast(title=message, timeout=3))
+        # Sin markup: los avisos llevan nombres de juegos, rutas y errores
+        # ("Ocarina of Time & Master Quest"); con el markup por defecto del
+        # toast, un "&" o "<" deja el aviso vacío.
+        self._toast_overlay.add_toast(
+            Adw.Toast(title=message, timeout=3, use_markup=False))

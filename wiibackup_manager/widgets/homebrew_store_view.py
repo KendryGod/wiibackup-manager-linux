@@ -387,8 +387,9 @@ class HomebrewStoreView(Gtk.Box):
             return False
 
         if result.status is oscwii_client.FetchStatus.ERROR:
-            self.error_status.set_description(
-                result.error or _("motivo desconocido"))
+            # La descripción de un StatusPage siempre es markup.
+            self.error_status.set_description(GLib.markup_escape_text(
+                result.error or _("motivo desconocido")))
             self.state_stack.set_visible_child_name("error")
             return False
 
@@ -440,7 +441,7 @@ class HomebrewStoreView(Gtk.Box):
 
     def _render_card(self, card: HomebrewAppCard):
         app = card.app
-        card.name_label.set_label(GLib.markup_escape_text(app.name))
+        card.name_label.set_label(app.name)
         card.desc_label.set_label(app.short_description)
         card.desc_label.set_visible(bool(app.short_description))
         meta = [p for p in (app.category, f"v{app.version}" if app.version else "") if p]

@@ -528,6 +528,7 @@ class TransferView(Gtk.Box):
             subtitle = _("{free:.1f} GB libres de {total:.1f} GB · {path}").format(
                 free=drive.free_gb, total=drive.total_gb, path=drive.mount_point)
             row = Adw.ActionRow(title=drive.name, subtitle=subtitle)
+            row.set_use_markup(False)
             row.dest_path = drive.mount_point
             row.is_manual = False
             row.add_prefix(Gtk.Image.new_from_icon_name("drive-removable-media-symbolic"))
@@ -568,6 +569,7 @@ class TransferView(Gtk.Box):
         vuelva."""
         path = Path(preset["path"])
         row = Adw.ActionRow(title=preset["name"])
+        row.set_use_markup(False)
         row.dest_path = path
         row.is_manual = False
         row.is_preset = True
@@ -946,6 +948,7 @@ class TransferView(Gtk.Box):
             return
         path = Path(folder.get_path())
         row = Adw.ActionRow(title=path.name or str(path), subtitle=str(path))
+        row.set_use_markup(False)
         row.dest_path = path
         row.is_manual = True
         row.add_prefix(Gtk.Image.new_from_icon_name("folder-symbolic"))
