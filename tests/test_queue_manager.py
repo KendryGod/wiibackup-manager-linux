@@ -641,3 +641,81 @@ def test_gamecube_no_se_verifica_porque_wit_verify_no_lo_acepta(
     assert job.status is JobStatus.DONE, job.error_msg
     assert "solo acepta" in job.verify_note
     assert log.entries()[0].status == oplog.STATUS_OK
+
+
+# ------------------------------------------------- Tiempos por fase --
+def test_una_transferencia_verificada_anota_cuanto_duro_cada_fase(
+        make_game, tmp_path, monkeypatch, capsys):
+    """Ante una copia que tardó de más, la pregunta es dónde se fue el
+    tiempo. Cada fase queda medida por separado y llega al historial y
+    al log, no solo el total."""
+    monkeypatch.setattr(transfer_plan, "free_space", lambda path: 10 ** 12)
+    _sin_wit_para_copiar(monkeypatch)
+
+    def _verify_lento(path, binary="wit", timeout=None, cancel=None):
+        time.sleep(0.05)
+        return wit_wrapper.VerifyResult(ok=True, timed_out=False, output="")
+    monkeypatch.setattr(queue_manager.wit_wrapper, "verify_result", _verify_lento)
+
+    dest_root = tmp_path / "dest"
+    dest_root.mkdir()
+    cola, log = _cola_con_log(tmp_path)
+    job = cola.add_jobs([_juego_wbfs(make_game)], dest_root,
+                        verify_after_copy=True)[0]
+    esperar_final(job)
+    cola.shutdown(wait=5)
+
+    assert job.status is JobStatus.DONE, job.error_msg
+    assert list(job.phase_times) == ["prepare", "copy", "verify"]
+    assert job.phase_times["verify"] >= 0.05
+    # Las fases no se pisan: juntas no pueden durar más que la tarea.
+    assert sum(job.phase_times.values()) <= job.elapsed + 0.01
+    texto = queue_manager.format_phase_times(job.phase_times)
+    assert texto.startswith("preparación 0s, copia 0s, verificación 0s")
+    assert texto in log.entries()[0].detail
+    assert texto in capsys.readouterr().err
+
+
+def test_sin_verificar_no_aparece_la_fase_de_verificacion(
+        make_game, tmp_path, monkeypatch):
+    monkeypatch.setattr(transfer_plan, "free_space", lambda path: 10 ** 12)
+    _sin_wit_para_copiar(monkeypatch)
+
+    dest_root = tmp_path / "dest"
+    dest_root.mkdir()
+    cola = hacer_cola()
+    job = cola.add_jobs([_juego_wbfs(make_game)], dest_root)[0]
+    esperar_final(job)
+    cola.shutdown(wait=5)
+
+    assert job.status is JobStatus.DONE, job.error_msg
+    assert list(job.phase_times) == ["prepare", "copy"]
+
+
+def test_una_copia_que_falla_igual_dice_cuanto_tardo(
+        make_game, tmp_path, monkeypatch):
+    """La fase de copia se cierra ANTES de que la tarea se dé por
+    terminada, también cuando falla: una copia que se cae a los 9 minutos
+    tiene que decir que tardó 9 minutos."""
+    monkeypatch.setattr(transfer_plan, "free_space", lambda path: 10 ** 12)
+
+    def _falla(*_a, **_k):
+        raise RuntimeError("se cortó")
+    monkeypatch.setattr(queue_manager.library_ops, "send_to_wbfs_drive", _falla)
+
+    dest_root = tmp_path / "dest"
+    dest_root.mkdir()
+    cola, log = _cola_con_log(tmp_path)
+    job = cola.add_jobs([_juego_wbfs(make_game)], dest_root)[0]
+    esperar_final(job)
+    cola.shutdown(wait=5)
+
+    assert job.status is JobStatus.ERROR
+    assert "copy" in job.phase_times
+    assert "copia 0s" in log.entries()[0].detail
+
+
+def test_format_phase_times_respeta_el_orden_y_saltea_lo_que_no_corrio():
+    assert queue_manager.format_phase_times(
+        {"verify": 89.0, "copy": 1041.0}) == "copia 17m 21s, verificación 1m 29s"
+    assert queue_manager.format_phase_times({}) == ""

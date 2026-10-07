@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -254,6 +256,14 @@ ISOSIZE_TIMEOUT = 90.0
 
 def _strip_ansi(text: str) -> str:
     return _ANSI_ESCAPE_RE.sub("", text)
+
+
+def _log_command(args: list[str]) -> None:
+    """Deja en stderr el comando `wit` exacto que se lanza, copiable tal
+    cual a una terminal. Es lo primero que hace falta para diagnosticar
+    una transferencia lenta o rara: qué flags se pasaron de verdad, y no
+    los que uno cree que se pasaron."""
+    print(f"[wiibackup-manager] wit: {shlex.join(args)}", file=sys.stderr)
 
 
 def find_wit(binary_name: str = "wit") -> Optional[str]:
@@ -625,6 +635,7 @@ def convert(
         # lea como otra opción.
         args.append("--psel=-UPDATE")
     args += [str(src), "--dest", str(dest)]
+    _log_command(args)
 
     # UN SOLO camino de ejecución, haya o no callbacks. Antes, sin progreso
     # ni cancelación se caía en un `subprocess.run` con timeout, que al
@@ -756,6 +767,7 @@ def verify_result(
     resultado."""
     if not find_wit(binary):
         raise WitNotFoundError(binary)
+    _log_command([binary, "VERIFY", "--long", str(path)])
     result = _run_cancellable(binary, "VERIFY", "--long", str(path),
                                timeout=timeout, cancel=cancel)
     return VerifyResult(

@@ -15,7 +15,8 @@ from gi.repository import Adw, Gio, Gtk, GLib  # noqa: E402
 
 from .. import config, drives, formatting, gametdb, transfer_plan
 from ..game_model import Game
-from ..queue_manager import JobStatus, TransferJob, TransferQueue
+from ..queue_manager import (JobStatus, TransferJob, TransferQueue,
+                             format_phase_times)
 from ..i18n import _, ngettext
 from . import gtk_helpers
 from .game_row import build_cover_widget
@@ -212,7 +213,13 @@ class JobRow(Adw.ActionRow):
                 elapsed=formatting.format_eta(job.elapsed))
             # La nota de verificación va al final y solo si la hay: sin
             # el switch prendido la fila se ve exactamente como antes.
-            return f"{texto} · {job.verify_note}" if job.verify_note else texto
+            if job.verify_note:
+                texto = f"{texto} · {job.verify_note}"
+            # Y detrás, en qué se fue el tiempo: "copia 9m, verificación
+            # 1m 30s". Con la verificación prendida, el total solo no deja
+            # ver cuál de las dos fue la lenta.
+            tiempos = format_phase_times(job.phase_times)
+            return f"{texto} · {tiempos}" if tiempos else texto
         if job.status is JobStatus.VERIFYING:
             return " · ".join([job.status.label, job.speed_text]) \
                 if job.speed_text else job.status.label

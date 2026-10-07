@@ -7,6 +7,7 @@ matar el proceso al cancelar, limpiar los temporales-.
 """
 from __future__ import annotations
 
+import shlex
 import subprocess
 import sys
 
@@ -259,3 +260,42 @@ def test_el_wit_real_acepta_la_opcion_de_scrubbing(monkeypatch, tmp_path):
     assert real.returncode != 0
     assert "SYNTAX ERROR" not in salida
     assert "CAN'T OPEN FILE" in salida
+
+
+# ------------------------------------------- Log del comando exacto --
+# Ante una transferencia lenta, lo primero que hay que saber es qué flags
+# se le pasaron a `wit` de verdad. Se comprueba sobre el comando ya armado
+# (el que recibe el proceso), no sobre una reconstrucción aparte.
+def test_convert_deja_en_stderr_el_comando_exacto(monkeypatch, tmp_path, capsys):
+    lanzado = {}
+
+    def _run_espia(args, dest, cb, cancel, **_k):
+        lanzado["args"] = args
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(wit_wrapper, "find_wit", lambda b: "/usr/bin/wit")
+    monkeypatch.setattr(wit_wrapper, "_run_with_progress", _run_espia)
+
+    wit_wrapper.convert(tmp_path / "origen con espacios.wbfs",
+                        tmp_path / "RSBE01.wbfs", "WBFS",
+                        split=True, overwrite=True, scrub_update=False)
+
+    stderr = capsys.readouterr().err
+    assert shlex.split(stderr.split("wit: ", 1)[1]) == lanzado["args"]
+    assert "--split-size" in lanzado["args"]
+
+
+def test_verify_deja_en_stderr_el_comando_exacto(monkeypatch, tmp_path, capsys):
+    lanzado = {}
+
+    def _run_espia(binary, *args, timeout=None, cancel=None):
+        lanzado["args"] = [binary, *args]
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(wit_wrapper, "find_wit", lambda b: "/usr/bin/wit")
+    monkeypatch.setattr(wit_wrapper, "_run_cancellable", _run_espia)
+
+    wit_wrapper.verify_result(tmp_path / "RSBE01.wbfs")
+
+    stderr = capsys.readouterr().err
+    assert shlex.split(stderr.split("wit: ", 1)[1]) == lanzado["args"]

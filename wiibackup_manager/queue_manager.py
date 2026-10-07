@@ -41,6 +41,7 @@ de aplicarla desde la interfaz.
 from __future__ import annotations
 
 import itertools
+import sys
 import threading
 import time
 from collections import deque
@@ -168,6 +169,12 @@ class TransferJob:
     bytes_done: int = 0
     started_at: float = 0.0
     finished_at: float = 0.0
+    # Cuánto duró cada fase, en segundos y en el orden en que pasaron (ver
+    # `PHASE_LABELS`). Es diagnóstico puro: sirve para saber, ante una
+    # transferencia que tardó de más, si el tiempo se fue en copiar o en
+    # releer. Una fase que no llegó a correr (copia cancelada, juego de
+    # GameCube que no se verifica) simplemente no está.
+    phase_times: dict = field(default_factory=dict)
 
     @property
     def title(self) -> str:
@@ -223,6 +230,51 @@ class QueueSummary:
 # son 10 refrescos por segundo: más fluido de lo que el ojo distingue en
 # una barra de progreso.
 _PROGRESS_INTERVAL = 0.1
+
+# Fases de una transferencia, en orden, con el texto con que se muestran.
+#
+# - "prepare": medir cuánto va a ocupar y mirar el espacio libre.
+# - "copy": la escritura, de punta a punta (`wit COPY` o la copia directa),
+#   hasta que el proceso termina.
+# - "verify": `wit VERIFY` releyendo lo que quedó en la unidad.
+#
+# No hay fase de sincronización porque la cola no fuerza ningún `sync`
+# después de copiar: `wit` termina cuando le entregó todo al kernel, y lo
+# que todavía estaba en la caché de escritura (en una máquina con 16 GB,
+# hasta ~2.5 GB) se sigue bajando a la unidad DURANTE la verificación. Por
+# eso el log anota también cuánto quedaba pendiente al terminar la copia
+# (ver `_pending_writeback_bytes`): sin ese dato, "copia" se lee más corta
+# y "verificación" más larga de lo que fueron de verdad.
+PHASE_LABELS = (
+    ("prepare", N_("preparación {t}")),
+    ("copy", N_("copia {t}")),
+    ("verify", N_("verificación {t}")),
+)
+
+
+def format_phase_times(times: dict) -> str:
+    """"preparación 0s, copia 17m 21s, verificación 1m 29s": las fases que
+    corrieron, en orden, con duración corta. Vacío si no corrió ninguna."""
+    return ", ".join(_(etiqueta).format(t=formatting.format_eta(times[fase]))
+                     for fase, etiqueta in PHASE_LABELS if fase in times)
+
+
+def _pending_writeback_bytes() -> Optional[int]:
+    """Cuántos bytes había en la caché de escritura del kernel (Dirty +
+    Writeback de /proc/meminfo) todavía sin bajar a ningún disco, o None
+    si no se pudo leer. Es el total de la máquina, no solo de la unidad de
+    destino, pero mientras la cola copia es casi todo de ella."""
+    try:
+        total = 0
+        with open("/proc/meminfo", encoding="ascii") as f:
+            for linea in f:
+                clave, _sep, valor = linea.partition(":")
+                if clave in ("Dirty", "Writeback"):
+                    total += int(valor.split()[0]) * 1024
+        return total
+    except (OSError, ValueError, IndexError):
+        return None
+
 
 # Cuánto espera la cola antes de volver a intentar arrancar una tarea que
 # choca con otra operación (una conversión, una importación). No es un
@@ -696,6 +748,7 @@ class TransferQueue:
         # armó la cola y le toca el turno a esta tarea se escribieron todas
         # las anteriores, así que el número de hace un minuto no sirve.
         libres = transfer_plan.free_space(job.dest_root)
+        inicio_copia = self._end_phase(job, "prepare", job.started_at)
         if libres is not None and job.output_bytes > libres:
             self._finish_job(
                 job, JobStatus.ERROR,
@@ -721,13 +774,24 @@ class TransferQueue:
         raiz_era_montaje = drives.is_mount_point(job.dest_root)
 
         try:
-            dest = library_ops.send_to_wbfs_drive(
-                job.game, job.dest_root, job.wit_binary,
-                bytes_progress_cb=on_bytes,
-                overwrite=job.overwrite,
-                cancel=job.cancel_token,
-                scrub_update=job.scrub_update,
-            )
+            try:
+                dest = library_ops.send_to_wbfs_drive(
+                    job.game, job.dest_root, job.wit_binary,
+                    bytes_progress_cb=on_bytes,
+                    overwrite=job.overwrite,
+                    cancel=job.cancel_token,
+                    scrub_update=job.scrub_update,
+                )
+            finally:
+                # Antes que los `except` de abajo, que ya cierran la tarea:
+                # una copia que falla a los 9 minutos también tiene que
+                # decir que tardó 9 minutos.
+                self._end_phase(job, "copy", inicio_copia)
+                pendiente = _pending_writeback_bytes()
+                if pendiente is not None:
+                    print(f"[wiibackup-manager] «{job.title}»: al terminar la "
+                          f"copia quedaban {formatting.format_size(pendiente)} "
+                          "en caché sin bajar a disco", file=sys.stderr)
         except wit_wrapper.OperationCancelled:
             self._finish_job(job, JobStatus.CANCELLED, "", oplog.STATUS_CANCELLED,
                              op=op)
@@ -820,8 +884,12 @@ class TransferQueue:
             # corresponde a VERIFY -releer un dual-layer entero tarda de
             # verdad, y no hay progreso que medir para poder usar un
             # límite por inactividad.
-            resultado = wit_wrapper.verify_result(
-                dest, job.wit_binary, cancel=job.cancel_token)
+            inicio_verificacion = time.monotonic()
+            try:
+                resultado = wit_wrapper.verify_result(
+                    dest, job.wit_binary, cancel=job.cancel_token)
+            finally:
+                self._end_phase(job, "verify", inicio_verificacion)
         except wit_wrapper.OperationCancelled:
             # La copia YA había terminado bien cuando se canceló. Marcar
             # la tarea como cancelada sería mentir sobre el archivo, que
@@ -888,6 +956,14 @@ class TransferQueue:
             return False
         return True
 
+    @staticmethod
+    def _end_phase(job: TransferJob, fase: str, desde: float) -> float:
+        """Anota en `job.phase_times` cuánto duró `fase` (desde `desde`
+        hasta ahora) y devuelve ahora, que es donde arranca la siguiente."""
+        ahora = time.monotonic()
+        job.phase_times[fase] = max(0.0, ahora - desde)
+        return ahora
+
     def _report_progress(self, job: TransferJob, escritos: int, ahora: float) -> None:
         total = job.output_bytes or 1
         # Tope en 0.99: ver el comentario de `TransferJob.progress`.
@@ -916,6 +992,10 @@ class TransferQueue:
             # cosas, qué pasó con la copia y qué pasó con la relectura.
             if job.verify_note:
                 detalle = f"{detalle} · {job.verify_note}"
+            # Lo mismo con los tiempos por fase: ante una transferencia que
+            # tardó de más, el historial tiene que poder decir dónde.
+            if job.phase_times:
+                detalle = f"{detalle} · {format_phase_times(job.phase_times)}"
             self.ops.finish(op, OperationOutcome(
                 status=log_status, target=job.game.title,
                 detail=detalle))
@@ -935,6 +1015,10 @@ class TransferQueue:
                 self._tally["disconnected"] += 1
             elif status is JobStatus.CANCELLED:
                 self._tally["cancelled"] += 1
+
+        if job.phase_times:
+            print(f"[wiibackup-manager] «{job.title}»: {status.value} · "
+                  f"{format_phase_times(job.phase_times)}", file=sys.stderr)
 
         self._update(job, status=status, error_msg=error_msg,
                      progress=1.0 if status is JobStatus.DONE else job.progress,
