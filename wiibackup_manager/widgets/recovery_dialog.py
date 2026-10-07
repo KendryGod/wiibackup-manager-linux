@@ -113,7 +113,8 @@ class RecoveryDialog(Adw.Dialog):
         self._intro = Adw.PreferencesGroup(
             description=_(
                 "Son archivos que quedaron de operaciones que no llegaron a "
-                "terminar (por ejemplo, si se apagó la PC en el medio). Los "
+                "terminar (por ejemplo, si se apagó la PC o se desconectó "
+                "la unidad en el medio). Los "
                 "procesos que los dejaron ya no están corriendo, así que se "
                 "pueden limpiar sin interrumpir nada."))
         self._page.add(self._intro)
@@ -131,7 +132,7 @@ class RecoveryDialog(Adw.Dialog):
         grupo = Adw.PreferencesGroup(title=leftover.kind.label,
                                      description=leftover.kind.description)
 
-        fila = Adw.ActionRow(title=leftover.original.name)
+        fila = Adw.ActionRow(title=leftover.title)
         # Sin markup: los nombres de archivo del usuario pueden traer `&` o
         # `<`, y con markup activado (el default de las filas de Adwaita)
         # eso rompe el renderizado de la fila entera.

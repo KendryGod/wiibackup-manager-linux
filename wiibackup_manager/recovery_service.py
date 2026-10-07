@@ -48,6 +48,21 @@ puede hacer:
   llenar. Mismo caso: no es la versión vieja de nada, es la nueva a
   medias. Solo se puede descartar.
 
+Y dos que no tienen el formato de `atomicfs`, porque no los escribe esta
+app pero sí quedan por culpa de una copia suya que se cortó:
+
+- el temporal de `wit` (`.{juego}.{azar}.tmp`, `.tmp.1`…, ver
+  `wit_wrapper._wbfs_temp_files`): `wit` escribe ahí y renombra al final,
+  así que una copia cortada lo deja con GB a medias. Solo se descarta.
+- un juego en la PAPELERA de la propia unidad (`.Trash-<uid>`), con un
+  temporal de copia cortada donde estaba: es el original de alguien que
+  lo mandó a la papelera para "reemplazarlo" y después la copia no llegó.
+  Se puede restaurar. Sin esa señal no se ofrece -un juego que alguien
+  borró a propósito no es asunto de esta app-.
+
+Las partes de un mismo juego (`RSBE01.wbfs` + `RSBE01.wbf1`) se ofrecen
+JUNTAS: restaurar una sola dejaría un juego que no arranca.
+
 El filtro que hace que esto sea seguro
 --------------------------------------
 Un resto y una operación en curso se ven IGUAL en el disco: los dos son un
@@ -76,6 +91,7 @@ from __future__ import annotations
 import os
 import re
 import time
+import urllib.parse
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -83,7 +99,7 @@ from typing import Callable, Iterable, Iterator, Optional
 
 from . import atomicfs, drives, library_ops, oscwii_installer
 from .fsutil import path_size
-from .i18n import _
+from .i18n import _, ngettext
 
 
 class LeftoverKind(Enum):
@@ -102,6 +118,12 @@ class LeftoverKind(Enum):
     HOMEBREW_STAGING = oscwii_installer.MARCA_STAGING
     #: Temporal de escritura de `atomicfs`, a medio llenar.
     PARTIAL = atomicfs.MARCA_PARCIAL
+    #: Temporal de `wit` de una copia cortada. No es una marca de
+    #: `atomicfs`: se reconoce por otro patrón (`_PATRON_WIT`).
+    WIT_TEMP = "wit-tmp"
+    #: Juego en la papelera de la unidad, con una copia cortada donde
+    #: estaba. Tampoco es una marca: sale de `.Trash-<uid>/info`.
+    TRASHED = "papelera"
 
     @property
     def restorable(self) -> bool:
@@ -112,7 +134,8 @@ class LeftoverKind(Enum):
         IBA A HABER y quedó a medias -no hay ningún estado anterior
         guardado ahí adentro-, y ofrecer restaurarlos sería ofrecer poner
         un archivo incompleto en el lugar del bueno."""
-        return self in (LeftoverKind.BACKUP, LeftoverKind.HOMEBREW_BACKUP)
+        return self in (LeftoverKind.BACKUP, LeftoverKind.HOMEBREW_BACKUP,
+                        LeftoverKind.TRASHED)
 
     @property
     def has_pid(self) -> bool:
@@ -123,7 +146,8 @@ class LeftoverKind(Enum):
         temporales salen de `tempfile.mkstemp`, que garantiza unicidad
         real con un sufijo al azar; el precio es que no se puede saber
         quién los dejó."""
-        return self is not LeftoverKind.PARTIAL
+        return self in (LeftoverKind.BACKUP, LeftoverKind.HOMEBREW_BACKUP,
+                        LeftoverKind.HOMEBREW_STAGING)
 
     @property
     def label(self) -> str:
@@ -132,10 +156,12 @@ class LeftoverKind(Enum):
         Se nombra por lo que el usuario perdió o ganaría, no por el
         mecanismo: "respaldo de un juego" y no "SetAside sin descartar"."""
         return {
-            LeftoverKind.BACKUP: _("Respaldo de un juego"),
+            LeftoverKind.BACKUP: _("Tu juego original, guardado aparte"),
             LeftoverKind.HOMEBREW_BACKUP: _("Respaldo de una app de Homebrew"),
             LeftoverKind.HOMEBREW_STAGING: _("Instalación de Homebrew a medias"),
             LeftoverKind.PARTIAL: _("Archivo temporal incompleto"),
+            LeftoverKind.WIT_TEMP: _("Archivo temporal incompleto"),
+            LeftoverKind.TRASHED: _("Tu juego original, en la papelera de la unidad"),
         }[self]
 
     @property
@@ -143,9 +169,8 @@ class LeftoverKind(Enum):
         """Por qué está ahí y qué implica, para el diálogo de detalles."""
         return {
             LeftoverKind.BACKUP: _(
-                "Copia del archivo original que se apartó antes de "
-                "sobrescribirlo. Está completa: se puede devolver a su "
-                "lugar."),
+                "La copia se cortó y tu juego original quedó guardado "
+                "aparte, completo. ¿Querés restaurarlo?"),
             LeftoverKind.HOMEBREW_BACKUP: _(
                 "Versión anterior de la app, apartada antes de instalar la "
                 "nueva. Está completa: se puede devolver a su lugar."),
@@ -155,6 +180,13 @@ class LeftoverKind(Enum):
             LeftoverKind.PARTIAL: _(
                 "Archivo a medio escribir de una copia que se cortó. No es "
                 "una versión anterior de nada: solo se puede eliminar."),
+            LeftoverKind.WIT_TEMP: _(
+                "Archivo a medio escribir de una copia que se cortó. No es "
+                "una versión anterior de nada: solo se puede eliminar."),
+            LeftoverKind.TRASHED: _(
+                "La copia se cortó y tu juego original quedó en la papelera "
+                "de la unidad (que en un pendrive no libera espacio). "
+                "¿Querés restaurarlo?"),
         }[self]
 
 
@@ -162,7 +194,9 @@ class LeftoverKind(Enum):
 # la alternancia del regex se queda con la primera que coincide. El punto
 # que va delante en el patrón ya las separa (`.wbm-respaldo-` no es
 # `.respaldo-`), pero ordenarlas hace que eso no dependa de un detalle.
-_MARCAS = sorted((k.value for k in LeftoverKind), key=len, reverse=True)
+_MARCAS = sorted((k.value for k in LeftoverKind
+                  if k not in (LeftoverKind.WIT_TEMP, LeftoverKind.TRASHED)),
+                 key=len, reverse=True)
 
 # `.{nombre}.{marca}-{sufijo}`, el formato que arma `atomicfs`. El nombre
 # se captura codicioso y con backtracking porque puede tener puntos adentro
@@ -172,6 +206,17 @@ _PATRON = re.compile(
     r"^\.(?P<nombre>.+)\.(?P<marca>" + "|".join(re.escape(m) for m in _MARCAS)
     + r")-(?P<sufijo>.+)$"
 )
+
+# El temporal de `wit`: `.{juego}.{azar}.tmp` y, si divide, `.tmp.1`,
+# `.tmp.2`... Más estricto que el glob de `wit_wrapper` (`.{nombre}.*`) a
+# propósito: acá se OFRECE BORRAR, así que solo entra lo que tiene nombre
+# de imagen de juego adelante y `.tmp` atrás.
+_PATRON_WIT = re.compile(
+    r"^\.(?P<nombre>.+\.(?:wbfs|iso|ciso|wdf))\.(?P<azar>[^./]+)\.tmp"
+    r"(?:\.(?P<parte>\d+))?$", re.IGNORECASE)
+
+# Partes de un mismo WBFS dividido: `RSBE01.wbfs`, `RSBE01.wbf1`, ...
+_PARTE_WBFS = re.compile(r"^\.wbf(?:s|\d+)$", re.IGNORECASE)
 
 # Cuánto tiene que hacer que nadie toca un `parcial` para considerarlo
 # abandonado. Es la única defensa que tienen -no traen PID- y por eso el
@@ -188,6 +233,14 @@ PARTIAL_MIN_AGE_SECONDS = 30 * 60
 # optimización menor -sin él, escanear un disco de 2 TB al arrancar la app
 # recorrería el árbol entero del cliente.
 MAX_DEPTH = 3
+
+# Un temporal sin PID (`parcial`, el de `wit`) que NINGÚN proceso tiene
+# abierto y que no cambió en este rato no es una copia en curso: una
+# copia viva tiene el archivo abierto y lo escribe todo el tiempo. Con
+# esto se ofrece al reconectar la unidad, sin esperar la media hora de
+# `PARTIAL_MIN_AGE_SECONDS` -que queda para cuando no se puede mirar
+# /proc-.
+QUIET_SECONDS = 60
 
 
 class RecoveryError(RuntimeError):
@@ -223,10 +276,30 @@ class Leftover:
     #: Si en el nombre original hay algo AHORA. Restaurar encima de eso lo
     #: pisa, así que la interfaz tiene que avisarlo antes de hacerlo.
     original_exists: bool
+    #: Las OTRAS partes del mismo juego, como pares (original, resto):
+    #: `RSBE01.wbf1` junto a `RSBE01.wbfs`. Se restauran y se borran
+    #: juntas; `size_bytes` ya las incluye.
+    parts: tuple = ()
+    #: Para `TRASHED`: el `.trashinfo` que hay que borrar al sacarlo de la
+    #: papelera, para que la papelera no muestre un elemento fantasma.
+    trashinfo: Optional[Path] = None
 
     @property
     def restorable(self) -> bool:
         return self.kind.restorable
+
+    @property
+    def title(self) -> str:
+        """Cómo se nombra en la lista: el archivo original, o la carpeta
+        del juego si vino de la papelera, más cuántas partes son."""
+        nombre = self.original.name
+        if self.parts:
+            n = len(self.parts)
+            nombre += " " + ngettext("(+{n} parte)", "(+{n} partes)", n).format(n=n)
+        return nombre
+
+    def pairs(self) -> list:
+        return [(self.original, self.path)] + list(self.parts)
 
     def age_seconds(self, now: Optional[float] = None) -> float:
         """Cuánto hace que nadie lo toca. Nunca negativo: un reloj que se
@@ -252,7 +325,7 @@ def classify(path: Path) -> Optional[Leftover]:
     path = Path(path)
     m = _PATRON.match(path.name)
     if m is None:
-        return None
+        return _classify_wit_temp(path)
 
     kind = LeftoverKind(m.group("marca"))
     sufijo = m.group("sufijo")
@@ -286,6 +359,125 @@ def classify(path: Path) -> Optional[Leftover]:
         is_dir=path.is_dir(),
         original_exists=existe,
     )
+
+
+def _classify_wit_temp(path: Path) -> Optional[Leftover]:
+    m = _PATRON_WIT.match(path.name)
+    if m is None:
+        return None
+    try:
+        st = path.lstat()
+    except OSError:
+        return None
+    if not path.is_file():
+        return None
+    original = path.with_name(m.group("nombre"))
+    return Leftover(path=path, original=original, kind=LeftoverKind.WIT_TEMP,
+                    pid=None, size_bytes=st.st_size, mtime=st.st_mtime,
+                    is_dir=False, original_exists=_existe(original))
+
+
+def _existe(path: Path) -> bool:
+    try:
+        return path.exists()
+    except OSError:
+        return True
+
+
+# ------------------------------------------------ Juegos en la papelera --
+def _trash_dirs(root: Path) -> list:
+    """Las papeleras de la spec de freedesktop en la raíz de una unidad:
+    `$topdir/.Trash-$uid` y `$topdir/.Trash/$uid`."""
+    uid = os.getuid()
+    return [root / f".Trash-{uid}", root / ".Trash" / str(uid)]
+
+
+def _read_trashinfo(info: Path) -> Optional[str]:
+    try:
+        for linea in info.read_text(encoding="utf-8", errors="replace").splitlines():
+            if linea.startswith("Path="):
+                return linea[len("Path="):].strip()
+    except OSError:
+        return None
+    return None
+
+
+def _hay_copia_cortada(lugar: Path) -> bool:
+    """Si donde estaba el juego hay un temporal de una copia que no
+    terminó: la señal de que el original se mandó a la papelera para
+    reemplazarlo, y no porque alguien lo quisiera borrar."""
+    carpeta = lugar if lugar.is_dir() else lugar.parent
+    try:
+        with os.scandir(carpeta) as it:
+            nombres = [e.name for e in it]
+    except OSError:
+        return False
+    for nombre in nombres:
+        if _PATRON_WIT.match(nombre):
+            return True
+        m = _PATRON.match(nombre)
+        if m is not None and m.group("marca") == atomicfs.MARCA_PARCIAL:
+            return True
+    return False
+
+
+def find_trashed_games(root: Path) -> list:
+    """Juegos que están en la papelera de la unidad `root` y que una copia
+    cortada dejó sin reemplazo (ver el docstring del módulo).
+
+    Solo se miran los que la papelera dice que estaban en `wbfs/` o
+    `games/` de esta misma unidad: es lo que escribe esta app."""
+    root = Path(root)
+    encontrados = []
+    for papelera in _trash_dirs(root):
+        info_dir = papelera / "info"
+        try:
+            infos = sorted(info_dir.glob("*.trashinfo"))
+        except OSError:
+            continue
+        for info in infos:
+            ruta = _read_trashinfo(info)
+            if not ruta:
+                continue
+            ruta = urllib.parse.unquote(ruta)
+            original = Path(ruta) if ruta.startswith("/") else root / ruta
+            try:
+                relativa = original.relative_to(root)
+            except ValueError:
+                continue
+            if not relativa.parts or relativa.parts[0] not in ("wbfs", "games"):
+                continue
+            item = papelera / "files" / info.name[:-len(".trashinfo")]
+            try:
+                st = item.lstat()
+            except OSError:
+                continue
+            if not _hay_copia_cortada(original):
+                continue
+            encontrados.append(Leftover(
+                path=item, original=original, kind=LeftoverKind.TRASHED,
+                pid=None, size_bytes=path_size(item), mtime=st.st_mtime,
+                is_dir=item.is_dir(),
+                original_exists=bool(_choques_al_restaurar(item, original)),
+                trashinfo=info))
+    return encontrados
+
+
+def _choques_al_restaurar(item: Path, original: Path) -> list:
+    """Qué nombres pisaría devolver `item` a `original`. Si la copia
+    cortada volvió a crear la carpeta del juego (`wbfs/RSBE01/`, con solo
+    el temporal adentro) no hay choque: lo de la papelera se mueve adentro.
+    Los temporales de la copia cortada no cuentan: son lo que se viene a
+    reemplazar."""
+    if not _existe(original):
+        return []
+    if not (item.is_dir() and original.is_dir()):
+        return [original]
+    try:
+        hijos = [h.name for h in item.iterdir()]
+    except OSError:
+        return [original]
+    return [original / n for n in hijos if _existe(original / n)]
 
 
 # -------------------------------------------------- ¿Sigue vivo el dueño? --
@@ -325,19 +517,69 @@ def process_is_alive(pid: Optional[int]) -> bool:
     return True
 
 
+def open_file_ids() -> Optional[set]:
+    """(dispositivo, inodo) de cada archivo que algún proceso visible tiene
+    abierto, o None si no se pudo mirar /proc.
+
+    "Visible" es lo que este usuario puede leer en /proc/<pid>/fd: sus
+    propios procesos, que es donde corre `wit` y esta app. Para lo que no
+    se ve (un `wit` lanzado como root) queda el otro requisito de
+    `_esta_abandonado`: que el archivo no haya cambiado en un rato."""
+    abiertos = set()
+    try:
+        procesos = [d for d in os.listdir("/proc") if d.isdigit()]
+    except OSError:
+        return None
+    for pid in procesos:
+        carpeta = f"/proc/{pid}/fd"
+        try:
+            fds = os.listdir(carpeta)
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                st = os.stat(f"{carpeta}/{fd}")
+            except OSError:
+                continue
+            abiertos.add((st.st_dev, st.st_ino))
+    return abiertos
+
+
 def _esta_abandonado(leftover: Leftover, *, now: float,
                      is_alive: Callable[[Optional[int]], bool],
-                     ops, min_age: float) -> bool:
+                     ops, min_age: float,
+                     open_files: Optional[set] = None,
+                     own_pid: Optional[int] = None) -> bool:
     """Los tres filtros del docstring del módulo, en el orden en que
     conviene: primero los que se responden con el nombre y un `stat`, y al
-    final el que toma el candado del `OperationManager`."""
-    if leftover.kind.has_pid:
-        if is_alive(leftover.pid):
+    final el que toma el candado del `OperationManager`.
+
+    Un respaldo con el PID de ESTA app no se descarta por estar "vivo": la
+    app sigue abierta después de que se desenchufó la unidad, y todas sus
+    operaciones están en `ops`. Si ninguna ocupa ese lugar, el respaldo es
+    de una operación que ya terminó (cortada), no de una en curso. Sin
+    `ops` no hay a quién preguntarle, y no se ofrece."""
+    own_pid = os.getpid() if own_pid is None else own_pid
+    if leftover.kind is LeftoverKind.TRASHED:
+        pass
+    elif leftover.kind.has_pid:
+        if leftover.pid == own_pid:
+            if ops is None:
+                return False
+        elif is_alive(leftover.pid):
             return False
     elif leftover.age_seconds(now) < min_age:
-        # Sin PID no hay a quién preguntarle, así que un temporal reciente
+        # Sin PID no hay a quién preguntarle. Se ofrece igual si nadie lo
+        # tiene abierto y no cambió en un rato (ver QUIET_SECONDS); si no,
         # se deja en paz: puede ser una copia escribiendo en este momento.
-        return False
+        try:
+            st = leftover.path.stat()
+            clave = (st.st_dev, st.st_ino)
+        except OSError:
+            return False
+        if (open_files is None or clave in open_files
+                or leftover.age_seconds(now) < QUIET_SECONDS):
+            return False
 
     if ops is not None and is_locked_by_operation(ops, leftover,
                                                  ignore_read_only=True):
@@ -379,7 +621,17 @@ def is_locked_by_operation(ops, leftover: Leftover, *,
     después se niegue a actuar. Es la lectura honesta -"ahora hay algo
     usando esa ubicación"- y es mucho mejor que la anterior, que era no
     mostrar nada y dejar creer que no había restos."""
-    for ruta in (leftover.path, leftover.original):
+    rutas = [leftover.path, leftover.original]
+    for original, resto in leftover.parts:
+        rutas += [resto, original]
+    # Una operación sobre un WBFS dividido declara la PRIMERA parte
+    # (`RSBE01.wbfs`), no `RSBE01.wbf1`: preguntar solo por la parte haría
+    # que el respaldo de la segunda se ofreciera suelto mientras el
+    # reemplazo sigue corriendo. Se pregunta también por la principal.
+    for ruta in list(rutas):
+        if _PARTE_WBFS.match(ruta.suffix):
+            rutas.append(ruta.with_suffix(".wbfs"))
+    for ruta in rutas:
         if ops.is_resource_busy(ruta, skip_read_only=ignore_read_only) is not None:
             return True
         if ops.is_path_busy(ruta, skip_read_only=ignore_read_only):
@@ -424,7 +676,9 @@ def _iter_entries(root: Path, depth: int) -> Iterator:
 def scan(roots: Iterable[Path], *, ops=None,
          now: Optional[float] = None,
          is_alive: Callable[[Optional[int]], bool] = process_is_alive,
-         min_age: float = PARTIAL_MIN_AGE_SECONDS) -> list[Leftover]:
+         min_age: float = PARTIAL_MIN_AGE_SECONDS,
+         open_files: Callable[[], Optional[set]] = open_file_ids,
+         own_pid: Optional[int] = None) -> list[Leftover]:
     """Todos los restos ABANDONADOS bajo `roots`, del más grande al más
     chico.
 
@@ -442,24 +696,72 @@ def scan(roots: Iterable[Path], *, ops=None,
     El orden es por tamaño porque es el que le sirve a quien mira la
     lista: lo primero que quiere ver es qué le está comiendo los GB."""
     ahora = now if now is not None else time.time()
+    abiertos = open_files()
     encontrados: dict = {}
     for root in roots:
         root = Path(root)
+        candidatos = []
         for entry in _iter_entries(root, 0):
             if not entry.name.startswith("."):
                 continue
             leftover = classify(Path(entry.path))
-            if leftover is None:
-                continue
+            if leftover is not None:
+                candidatos.append(leftover)
+        candidatos.extend(find_trashed_games(root))
+        for leftover in candidatos:
             if not _esta_abandonado(leftover, now=ahora, is_alive=is_alive,
-                                    ops=ops, min_age=min_age):
+                                    ops=ops, min_age=min_age,
+                                    open_files=abiertos, own_pid=own_pid):
                 continue
             # Dos raíces se pueden solapar (la biblioteca guardada dentro
             # del USB que también se escanea), y el mismo resto no tiene
             # por qué aparecer dos veces en la lista.
             encontrados[_clave(leftover.path)] = leftover
-    return sorted(encontrados.values(), key=lambda lo: lo.size_bytes,
-                  reverse=True)
+    agrupados = _agrupar_partes(list(encontrados.values()))
+    return sorted(agrupados, key=lambda lo: lo.size_bytes, reverse=True)
+
+
+def _clave_de_juego(leftover: Leftover):
+    """Qué restos son partes del MISMO juego y van juntos: respaldos de la
+    misma operación (mismo PID) o temporales de `wit` del mismo archivo,
+    en la misma carpeta, de las partes de un WBFS (`.wbfs`, `.wbf1`…)."""
+    if leftover.kind is LeftoverKind.BACKUP:
+        if not _PARTE_WBFS.match(leftover.original.suffix):
+            return None
+        return (leftover.kind, leftover.path.parent, leftover.pid,
+                leftover.original.stem.lower())
+    if leftover.kind is LeftoverKind.WIT_TEMP:
+        base = re.sub(r"\.\d+$", "", leftover.path.name)
+        return (leftover.kind, leftover.path.parent, base)
+    return None
+
+
+def _agrupar_partes(leftovers: list) -> list:
+    grupos: dict = {}
+    sueltos = []
+    for lo in leftovers:
+        clave = _clave_de_juego(lo)
+        if clave is None:
+            sueltos.append(lo)
+        else:
+            grupos.setdefault(clave, []).append(lo)
+    for partes in grupos.values():
+        # La principal es la primera parte (`.wbfs`, o el `.tmp` sin
+        # número): es la que da nombre al juego en la lista.
+        partes.sort(key=lambda lo: (not lo.original.suffix.lower() == ".wbfs",
+                                    lo.path.name))
+        principal, resto = partes[0], partes[1:]
+        if not resto:
+            sueltos.append(principal)
+            continue
+        sueltos.append(Leftover(
+            path=principal.path, original=principal.original,
+            kind=principal.kind, pid=principal.pid,
+            size_bytes=sum(p.size_bytes for p in partes),
+            mtime=max(p.mtime for p in partes), is_dir=principal.is_dir,
+            original_exists=any(p.original_exists for p in partes),
+            parts=tuple((p.original, p.path) for p in resto)))
+    return sueltos
 
 
 def _clave(path: Path):
@@ -555,9 +857,11 @@ def restore(leftover: Leftover) -> None:
             _("«{name}» no se puede restaurar: no es una copia de "
               "seguridad, es un archivo que quedó a medio escribir.")
             .format(name=leftover.original.name))
+    if leftover.kind is LeftoverKind.TRASHED:
+        _restore_from_trash(leftover)
+        return
 
-    aside = atomicfs.SetAside.adopt(leftover.kind.value,
-                                    [(leftover.original, leftover.path)])
+    aside = atomicfs.SetAside.adopt(leftover.kind.value, leftover.pairs())
     pendientes = aside.restore()
     if pendientes:
         raise RecoveryError(
@@ -579,13 +883,51 @@ def delete(leftover: Leftover) -> None:
     Levanta `RecoveryError` si no se pudo, con la ruta adentro: sin el
     "dónde", el usuario se queda con una unidad llena por algo que no
     puede ver."""
-    aside = atomicfs.SetAside.adopt(leftover.kind.value,
-                                    [(leftover.original, leftover.path)])
+    aside = atomicfs.SetAside.adopt(leftover.kind.value, leftover.pairs())
     fallidos = aside.discard()
     if fallidos:
         raise RecoveryError(
             _("No se pudo eliminar {ruta}. Puede estar en uso o la unidad "
-              "puede ser de solo lectura.").format(ruta=leftover.path))
+              "puede ser de solo lectura.").format(ruta=fallidos[0]))
+    if leftover.trashinfo is not None:
+        try:
+            leftover.trashinfo.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _restore_from_trash(leftover: Leftover) -> None:
+    """Saca un juego de la papelera de la unidad y lo devuelve a donde
+    estaba. Es un rename dentro de la misma unidad (la papelera vive en su
+    raíz): instantáneo, sin copiar datos.
+
+    Si la copia cortada volvió a crear la carpeta del juego, lo de la
+    papelera se mueve ADENTRO, archivo por archivo, sin pisar nada: un
+    nombre que ya existe ahí es algo que esta función no puede decidir
+    sola, y se informa."""
+    item, original = leftover.path, leftover.original
+    choques = _choques_al_restaurar(item, original)
+    if choques:
+        raise RecoveryError(
+            _("No se pudo restaurar «{name}»: ya hay algo en {ruta}.")
+            .format(name=original.name, ruta=choques[0]))
+    try:
+        if not _existe(original):
+            original.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(item, original)
+        else:
+            for hijo in sorted(item.iterdir()):
+                os.replace(hijo, original / hijo.name)
+            item.rmdir()
+    except OSError as e:
+        raise RecoveryError(
+            _("No se pudo restaurar «{name}»: {detail}")
+            .format(name=original.name, detail=e.strerror or e))
+    if leftover.trashinfo is not None:
+        try:
+            leftover.trashinfo.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def summary(leftovers: list) -> tuple:

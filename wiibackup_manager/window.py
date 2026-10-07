@@ -142,7 +142,17 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
         GLib.timeout_add_seconds(3, self._poll_library_availability)
 
+        self._recovery_scanning = False
+        self._recovery_rescan_pending = False
         self._start_recovery_scan()
+        # Y otra vez cada vez que se monta una unidad: el caso típico es
+        # desenchufar un pendrive a mitad de una copia y volver a
+        # enchufarlo con la app abierta. Lo que quedó apartado ahí (el
+        # juego original de un reemplazo, un temporal cortado) tiene que
+        # aparecer en ese momento, no recién la próxima vez que se abra.
+        self._volume_monitor = Gio.VolumeMonitor.get()
+        self._volume_monitor.connect(
+            "mount-added", lambda *_a: self._schedule_recovery_rescan())
 
     # ---------------------------------------------------------------- UI --
     def _build_ui(self):
@@ -1714,6 +1724,16 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         return True  # seguir sondeando
 
     # ------------------------------------------------- Recovery Manager --
+    def _schedule_recovery_rescan(self):
+        """Un escaneo de restos un momento después de que se montó algo
+        (el montaje recién aparecido todavía puede estar terminando de
+        armarse), y nunca dos a la vez: si ya hay uno corriendo, se repite
+        al terminar."""
+        if self._recovery_scanning:
+            self._recovery_rescan_pending = True
+            return
+        GLib.timeout_add(1500, lambda: (self._start_recovery_scan(), False)[1])
+
     def _start_recovery_scan(self):
         """Busca restos de operaciones interrumpidas, en un hilo de fondo.
 
@@ -1750,6 +1770,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 traceback.print_exc()
             GLib.idle_add(self._on_recovery_scan_done, encontrados, error)
 
+        self._recovery_scanning = True
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_recovery_scan_done(self, leftovers: list, error: str = ""):
@@ -1757,8 +1778,12 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         # un hilo daemon que arrancó al construirla): tocar un widget ya
         # dispuesto por GTK tira la app entera. Mismo cuidado que con las
         # carátulas que llegan tarde, ver `gtk_helpers.widget_is_alive`.
+        self._recovery_scanning = False
         if not gtk_helpers.widget_is_alive(self._recovery_banner):
             return False
+        if self._recovery_rescan_pending:
+            self._recovery_rescan_pending = False
+            self._schedule_recovery_rescan()
         self._recovery_scan_error = error
         self._recovery_leftovers = [lo for lo in leftovers
                                     if lo.path not in self._recovery_ignored]

@@ -742,6 +742,8 @@ class _VentanaDeMentira:
         self._recovery_leftovers: list = []
         self._recovery_ignored: set = set()
         self._recovery_scan_error = ""
+        self._recovery_scanning = False
+        self._recovery_rescan_pending = False
 
 
 def _correr_escaneo_del_arranque(monkeypatch):
