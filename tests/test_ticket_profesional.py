@@ -395,10 +395,16 @@ def test_las_columnas_de_la_ultima_hoja_quedan_parejas():
     assert abs(len(izquierda) - len(derecha)) <= 1
 
 
-def test_solo_la_hoja_nueva_dice_continuacion():
+def test_todo_encabezado_repetido_es_continuacion():
+    """Tanto en la columna de al lado como en la hoja siguiente: el que
+    abre el grupo es el original; los que se repiten dicen
+    "(continuación)"."""
     hojas = pdf_export.paginar(_filas(60), [10, 20])
-    assert not any(f.continuacion for f in hojas[0][1])
-    assert hojas[1][0][0].continuacion
+    columnas = [col for hoja in hojas for col in hoja]
+    assert not columnas[0][0].continuacion
+    for col in columnas[1:]:
+        if col[0].grupo == "wii":
+            assert col[0].continuacion
 
 
 def test_una_primera_hoja_sin_lugar_pasa_la_lista_a_la_siguiente():
@@ -468,7 +474,10 @@ def test_sesenta_y_pico_juegos_siguen_en_otra_hoja(tmp_path):
         assert "02/01/2026" in texto
         assert "CONTINUACIÓN" in _compacto(texto).upper()
         assert f"Página {n} de {paginas}" in texto
-    assert "+504 0000 1111" in textos[-1]
+        # El pie con el WhatsApp va en la primera hoja; las demás llevan
+        # uno de una línea y le dejan ese lugar a la lista.
+        assert "+504 0000 1111" not in texto
+    assert "+504 0000 1111" in textos[0]
 
 
 @requiere_poppler
@@ -722,3 +731,126 @@ def test_prepare_logo_rechaza_una_salida_que_no_es_png(tmp_path):
     with pytest.raises(SystemExit):
         _prepare_logo().main([str(tmp_path / "x.jpg"), str(tmp_path / "y.jpg"),
                               "--caja", "0,0,10,10"])
+
+
+# ================================================== Tamaño adaptable --
+def _plan(datos, taller=None):
+    taller = taller or _taller()
+    base = pdf_export._paleta(taller.theme, taller.accent)
+    fin = (pdf_export.PAGE_HEIGHT - pdf_export.MARGIN
+           - pdf_export._alto_del_pie(taller) - 4)
+    return pdf_export._preparar(datos, taller, base, None,
+                                pdf_export._filas_de_juegos(datos), fin)
+
+
+def test_con_pocos_juegos_la_letra_es_mas_grande_y_va_en_una_columna():
+    estilo, columnas = _plan(_datos(games=_juegos(2)))
+    assert estilo.escala > 1.0
+    assert columnas == 1
+
+
+def test_con_pocos_juegos_lo_que_sobra_se_reparte():
+    estilo, _cols = _plan(_datos(games=_juegos(2)))
+    assert estilo.aire > 0
+
+
+def test_con_muchos_juegos_queda_el_tamano_compacto():
+    estilo, columnas = _plan(_datos(games=_juegos(48, 17)))
+    assert estilo.escala == 1.0
+    assert columnas == pdf_export.LIST_COLUMNS
+    assert estilo.aire == 0
+
+
+@pytest.mark.parametrize("wii,gc", [(20, 0), (25, 5)])
+def test_desde_veinte_juegos_nunca_se_agranda(wii, gc):
+    estilo, _cols = _plan(_datos(games=_juegos(wii, gc)))
+    assert estilo.escala <= 1.0
+
+
+def _layouts_dibujados(monkeypatch):
+    """Registra (texto, ¿cortado con "…"?) de cada texto que se dibuja."""
+    dibujados = []
+    original = pdf_export._mostrar
+
+    def espia(ctx, layout, x, y, color):
+        dibujados.append((layout.get_text(), layout.is_ellipsized()))
+        return original(ctx, layout, x, y, color)
+
+    monkeypatch.setattr(pdf_export, "_mostrar", espia)
+    return dibujados
+
+
+@pytest.mark.parametrize("wii,gc,con_taller", [
+    (0, 0, False), (2, 0, True), (2, 1, True), (11, 4, True), (48, 17, True)])
+@pytest.mark.parametrize("modo", ["dark", "light"])
+def test_ningun_texto_se_corta(tmp_path, monkeypatch, wii, gc, con_taller, modo):
+    """Con letra grande, una etiqueta como "CAPACIDAD TOTAL" no entra en
+    una cuarta parte de la hoja: la grilla tiene que pasar a dos columnas
+    en vez de cortarla con "…". Se le pregunta a cada layout de Pango si
+    quedó cortado, porque `pdftotext` devuelve el texto entero aunque en
+    la hoja se vea el "…"."""
+    dibujados = _layouts_dibujados(monkeypatch)
+    taller = _taller(theme=modo) if con_taller else pdf_export.ShopProfile(theme=modo)
+    pdf_export.render_ticket(_datos(games=_juegos(wii, gc)),
+                             tmp_path / "t.pdf", taller)
+    cortados = [t for t, cortado in dibujados if cortado]
+    assert cortados == []
+
+
+def _palabras(pdf: Path) -> list:
+    """(página, texto, x0, y0, x1, y1) de cada palabra, según poppler."""
+    cajas = subprocess.run(["pdftotext", "-bbox", str(pdf), "-"],
+                           capture_output=True, text=True, timeout=30,
+                           check=True).stdout
+    palabras = []
+    for n, pagina in enumerate(cajas.split("<page ")[1:], start=1):
+        for x0, y0, x1, y1, w in re.findall(
+                r'xMin="([\d.]+)" yMin="([\d.]+)" xMax="([\d.]+)" '
+                r'yMax="([\d.]+)">([^<]*)</word>', pagina):
+            palabras.append((n, w, float(x0), float(y0), float(x1), float(y1)))
+    return palabras
+
+
+@requiere_poppler
+@pytest.mark.parametrize("wii,gc", [(0, 0), (2, 0), (11, 4), (48, 17)])
+def test_nada_se_sale_de_la_hoja_ni_pisa_el_pie(tmp_path, wii, gc):
+    datos = _datos(games=_juegos(wii, gc))
+    pdf = pdf_export.render_ticket(datos, tmp_path / "t.pdf", _taller())
+    palabras = _palabras(pdf)
+    margen = pdf_export.MARGIN - 1
+    for _n, w, x0, y0, x1, y1 in palabras:
+        assert x0 >= margen and x1 <= pdf_export.PAGE_WIDTH - margen, w
+        assert y0 >= 20 and y1 <= pdf_export.PAGE_HEIGHT - 20, w
+    # La lista termina antes de la línea que abre el pie con el WhatsApp.
+    pie = (pdf_export.PAGE_HEIGHT - pdf_export.MARGIN
+           - pdf_export._alto_del_pie(_taller()) + 8)
+    titulos = {g.title.split()[-1] for g in datos.games}
+    for n, w, _x0, _y0, _x1, y1 in palabras:
+        if n == 1 and w in titulos:
+            assert y1 < pie, w
+
+
+@requiere_poppler
+def test_con_dos_juegos_la_hoja_no_queda_vacia_abajo(tmp_path):
+    """El caso que motivó el tamaño adaptable: con dos juegos el contenido
+    ocupaba el tercio de arriba. Ahora la lista termina cerca del pie."""
+    datos = _datos(games=_juegos(2))
+    pdf = pdf_export.render_ticket(datos, tmp_path / "t.pdf", _taller())
+    ultimo = max(y1 for n, w, _x0, _y0, _x1, y1 in _palabras(pdf)
+                 if w == "001")
+    pie = pdf_export.PAGE_HEIGHT - pdf_export.MARGIN - pdf_export._alto_del_pie(
+        _taller())
+    assert pie - ultimo < 80
+
+
+@requiere_poppler
+def test_la_columna_de_al_lado_no_repite_el_total(tmp_path):
+    """Con 15 juegos la lista de Wii sigue en la columna de la derecha:
+    ese encabezado dice "Wii (continuación)" y no vuelve a poner 11."""
+    datos = _datos(games=_juegos(11, 4))
+    pdf = pdf_export.render_ticket(datos, tmp_path / "t.pdf", _taller())
+    texto = _texto(pdf)
+    assert "Wii (continuación)" in texto
+    # El 11 aparece en el resumen ("11 Wii") y en el encabezado original;
+    # una tercera vez sería el total repetido.
+    assert len(re.findall(r"(?<![\w/])11(?![\w/])", texto)) == 2
