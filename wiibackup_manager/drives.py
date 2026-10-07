@@ -610,6 +610,80 @@ def physical_disk_for_path(path) -> Path | None:
     return _whole_disk_path(dispositivo)
 
 
+# ------------------------------------------- Lo escrito en el dispositivo --
+_SYS_BLOCK = Path("/sys/block")
+# /sys/block/<disco>/stat cuenta en sectores de 512 bytes SIEMPRE, sea cual
+# sea el tamaño de sector real del disco (Documentation/block/stat.rst).
+_STAT_SECTOR_BYTES = 512
+# Posición del campo "sectores escritos" en ese archivo (el séptimo).
+_STAT_WRITE_SECTORS = 6
+
+
+def _sectors_written(disk: Path, sys_block: Path = None) -> int | None:
+    stat = (sys_block or _SYS_BLOCK) / Path(disk).name / "stat"
+    try:
+        campos = stat.read_text().split()
+        return int(campos[_STAT_WRITE_SECTORS])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+class DeviceWriteMeter:
+    """Cuántos bytes llegaron AL DISCO destino desde que se creó.
+
+    El progreso de una copia que mide lo que el programa escribió miente
+    con una unidad lenta: `write()` termina cuando los datos están en la
+    caché del kernel, no en el pendrive. Con RAM de sobra la barra saltaba
+    a 70% a 700 MB/s y después se quedaba quieta mientras la unidad bajaba
+    de verdad, y un 100% no garantizaba que se pudiera desenchufar. Esto
+    lee el contador de sectores escritos que el kernel lleva por disco
+    (legible sin root) y descuenta el valor del arranque: lo que mide es lo
+    que el disco recibió durante ESTE trabajo.
+
+    Es del disco entero, así que si otro programa escribe en la misma
+    unidad al mismo tiempo, también se cuenta; por eso quien lo usa lo
+    toma como tope (ver `queue_manager`), nunca como un número que pueda
+    pasar a lo que la copia escribió."""
+
+    def __init__(self, disk: Path, sys_block: Path = None):
+        self.disk = Path(disk)
+        self._sys_block = sys_block
+        base = _sectors_written(self.disk, sys_block)
+        if base is None:
+            raise OSError(f"no se puede leer el contador de {self.disk}")
+        self._base = base
+
+    @classmethod
+    def for_path(cls, path, *, resolve=None, sys_block: Path = None):
+        """El medidor del disco donde está `path`, o None si no hay uno
+        que leer (no es un dispositivo de bloque, `findmnt` no lo conoce,
+        el contador no existe). Con None, quien llama sigue como antes."""
+        try:
+            disk = (resolve or _disk_for_meter)(path)
+            if disk is None:
+                return None
+            return cls(disk, sys_block)
+        except OSError:
+            return None
+
+    def written(self) -> int | None:
+        """Bytes que recibió el disco desde que se creó el medidor, o None
+        si el contador dejó de poder leerse (la unidad se desconectó)."""
+        actual = _sectors_written(self.disk, self._sys_block)
+        if actual is None:
+            return None
+        return max(actual - self._base, 0) * _STAT_SECTOR_BYTES
+
+
+def _disk_for_meter(path) -> Path | None:
+    """Como `physical_disk_for_path`, pero entendiendo el "[/subvolumen]"
+    que `findmnt` agrega al dispositivo de un btrfs (`/dev/sda2[/home]`)."""
+    dispositivo = _block_device_for(Path(path))
+    if dispositivo is None:
+        return None
+    return _whole_disk_path(dispositivo.split("[", 1)[0])
+
+
 def candidate_for_mount_point(mount_point) -> "BlockDevice | None":
     """El `BlockDevice` de la LISTA BLANCA que corresponde al disco físico
     detrás de `mount_point`, o None si no hay ninguno.

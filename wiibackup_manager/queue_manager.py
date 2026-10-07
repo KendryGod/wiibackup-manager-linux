@@ -781,13 +781,36 @@ class TransferQueue:
             return
 
         ultimo = [0.0]
+        # Lo que la barra muestra es lo que llegó AL DISCO, no lo que el
+        # programa escribió (eso puede estar todavía en la caché del
+        # kernel): ver `drives.DeviceWriteMeter`. Uno por tarea, creado
+        # acá, así la base es lo que el disco ya había recibido antes de
+        # este juego -la tarea anterior terminó de bajar lo suyo antes de
+        # cerrarse-. Sin medidor (no es un dispositivo de bloque), la barra
+        # sigue lo escrito, como antes.
+        medidor = drives.DeviceWriteMeter.for_path(job.dest_root)
+        escrito_por_la_app = [0]
 
         def on_bytes(escritos: int) -> None:
+            escrito_por_la_app[0] = escritos
             ahora = time.monotonic()
             if ahora - ultimo[0] < _PROGRESS_INTERVAL:
                 return
             ultimo[0] = ahora
-            self._report_progress(job, escritos, ahora)
+            self._report_progress(job, escritos, ahora, medidor,
+                                  desde=inicio_copia)
+
+        def on_flush() -> None:
+            # `wit` ya terminó y lo que queda es esperar a la unidad: la
+            # app ya escribió todo, lo que avanza es el disco.
+            ahora = time.monotonic()
+            if ahora - ultimo[0] < _PROGRESS_INTERVAL:
+                return
+            ultimo[0] = ahora
+            self._report_progress(job, max(escrito_por_la_app[0],
+                                           job.output_bytes),
+                                  ahora, medidor, desde=inicio_copia,
+                                  escribiendo=True)
 
         # Foto ANTES de escribir: `dest_root` puede ser el punto de montaje
         # (una unidad elegida de la lista) o una carpeta adentro (un
@@ -803,6 +826,7 @@ class TransferQueue:
                     overwrite=job.overwrite,
                     cancel=job.cancel_token,
                     scrub_update=job.scrub_update,
+                    flush_progress_cb=on_flush,
                 )
             finally:
                 # Antes que los `except` de abajo, que ya cierran la tarea:
@@ -1042,11 +1066,27 @@ class TransferQueue:
         job.phase_times[fase] = max(0.0, ahora - desde)
         return ahora
 
-    def _report_progress(self, job: TransferJob, escritos: int, ahora: float) -> None:
+    def _report_progress(self, job: TransferJob, escritos: int, ahora: float,
+                         medidor=None, desde: float = None,
+                         escribiendo: bool = False) -> None:
+        """Actualiza barra, velocidad y tiempo restante.
+
+        `escritos` es lo que el programa ya escribió. Con `medidor` (ver
+        `drives.DeviceWriteMeter`) lo que se muestra es lo que llegó al
+        disco, con `escritos` como tope: el disco puede haber recibido
+        también escrituras de otro programa, o metadatos del filesystem,
+        y eso no es avance de esta copia. Si el contador dejó de leerse,
+        se vuelve a `escritos`.
+
+        `escribiendo` es la fase en que la copia ya terminó y lo que falta
+        es que la unidad baje lo que quedó en la caché."""
+        en_unidad = medidor.written() if medidor is not None else None
+        if en_unidad is not None:
+            escritos = min(en_unidad, escritos)
         total = job.output_bytes or 1
         # Tope en 0.99: ver el comentario de `TransferJob.progress`.
         fraccion = min(escritos / total, 0.99)
-        transcurrido = ahora - (job.started_at or ahora)
+        transcurrido = ahora - (desde or job.started_at or ahora)
         texto = ""
         if transcurrido > 1 and escritos > 0:
             velocidad = escritos / transcurrido
@@ -1055,6 +1095,9 @@ class TransferQueue:
                 faltan = max(total - escritos, 0)
                 texto += _(" · ~{eta} restantes").format(
                     eta=formatting.format_eta(faltan / velocidad))
+        if escribiendo:
+            texto = (_("Escribiendo en la unidad · {detail}").format(detail=texto)
+                     if texto else _("Escribiendo en la unidad…"))
         self._update(job, progress=fraccion, bytes_done=escritos,
                      speed_text=texto)
 

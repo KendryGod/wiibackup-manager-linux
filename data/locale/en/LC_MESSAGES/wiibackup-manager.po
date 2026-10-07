@@ -7,7 +7,7 @@ msgstr ""
 "Project-Id-Version: WiiBackup Manager\n"
 "Report-Msgid-Bugs-To: https://github.com/KendryGod/wiibackup-manager-linux/"
 "issues\n"
-"POT-Creation-Date: 2026-10-07 07:44-0600\n"
+"POT-Creation-Date: 2026-10-07 07:55-0600\n"
 "PO-Revision-Date: 2026-08-30 05:58-0600\n"
 "Last-Translator: GameFix SPS\n"
 "Language-Team: English\n"
@@ -199,7 +199,7 @@ msgstr ""
 "The conversion failed ({motivo}) and the original file could not be fully "
 "restored either: {detalle}"
 
-#: wiibackup_manager/library_ops.py:476
+#: wiibackup_manager/library_ops.py:485
 msgid "Error desconocido al convertir con wit"
 msgstr "Unknown error while converting with wit"
 
@@ -485,7 +485,7 @@ msgid "No entra en el destino: necesita {need} y quedan {free}."
 msgstr ""
 "It does not fit on the destination: it needs {need} and only {free} is left."
 
-#: wiibackup_manager/queue_manager.py:832
+#: wiibackup_manager/queue_manager.py:856
 #, python-brace-format
 msgid ""
 "No se encontró `wit` ({binary}). Instalalo o configurá la ruta en "
@@ -493,66 +493,75 @@ msgid ""
 msgstr ""
 "`wit` was not found ({binary}). Install it or set its path in Preferences."
 
-#: wiibackup_manager/queue_manager.py:892
+#: wiibackup_manager/queue_manager.py:916
 msgid "sin verificar: `wit VERIFY` solo acepta imágenes de Wii"
 msgstr "not verified: `wit VERIFY` only accepts Wii images"
 
-#: wiibackup_manager/queue_manager.py:902
+#: wiibackup_manager/queue_manager.py:926
 msgid "Releyendo lo copiado…"
 msgstr "Reading back what was copied…"
 
-#: wiibackup_manager/queue_manager.py:925
-#: wiibackup_manager/queue_manager.py:994
+#: wiibackup_manager/queue_manager.py:949
+#: wiibackup_manager/queue_manager.py:1018
 msgid "verificación cancelada"
 msgstr "verification cancelled"
 
-#: wiibackup_manager/queue_manager.py:929
+#: wiibackup_manager/queue_manager.py:953
 msgid "no se pudo verificar: no se encontró `wit`"
 msgstr "could not verify: `wit` was not found"
 
-#: wiibackup_manager/queue_manager.py:936
+#: wiibackup_manager/queue_manager.py:960
 #, python-brace-format
 msgid "no se pudo verificar: {detail}"
 msgstr "could not verify: {detail}"
 
-#: wiibackup_manager/queue_manager.py:941
+#: wiibackup_manager/queue_manager.py:965
 msgid "la verificación no terminó a tiempo: el archivo quedó sin comprobar"
 msgstr "verification did not finish in time: the file was left unverified"
 
-#: wiibackup_manager/queue_manager.py:949
+#: wiibackup_manager/queue_manager.py:973
 #, python-brace-format
 msgid "Se copió entero, pero al releerlo no pasó la verificación: {detail}"
 msgstr ""
 "It copied in full, but did not pass verification when read back: {detail}"
 
-#: wiibackup_manager/queue_manager.py:959
+#: wiibackup_manager/queue_manager.py:983
 #, python-brace-format
 msgid "verificado ({n} archivo)"
 msgid_plural "verificado ({n} archivos)"
 msgstr[0] "verified ({n} file)"
 msgstr[1] "verified ({n} files)"
 
-#: wiibackup_manager/queue_manager.py:961
+#: wiibackup_manager/queue_manager.py:985
 msgid "verificado"
 msgstr "verified"
 
-#: wiibackup_manager/queue_manager.py:986
+#: wiibackup_manager/queue_manager.py:1010
 msgid "Sincronizando…"
 msgstr "Syncing…"
 
-#: wiibackup_manager/queue_manager.py:1006
+#: wiibackup_manager/queue_manager.py:1030
 #, python-brace-format
 msgid "La unidad no terminó de guardar la copia: {detail}"
 msgstr "The drive did not finish saving the copy: {detail}"
 
-#: wiibackup_manager/queue_manager.py:1025
+#: wiibackup_manager/queue_manager.py:1049
 msgid "Calculando tamaño…"
 msgstr "Calculating size…"
 
-#: wiibackup_manager/queue_manager.py:1056 wiibackup_manager/window.py:1314
+#: wiibackup_manager/queue_manager.py:1096 wiibackup_manager/window.py:1314
 #, python-brace-format
 msgid " · ~{eta} restantes"
 msgstr " · ~{eta} remaining"
+
+#: wiibackup_manager/queue_manager.py:1099
+#, python-brace-format
+msgid "Escribiendo en la unidad · {detail}"
+msgstr "Writing to the drive · {detail}"
+
+#: wiibackup_manager/queue_manager.py:1100
+msgid "Escribiendo en la unidad…"
+msgstr "Writing to the drive…"
 
 #: wiibackup_manager/recovery_service.py:135
 msgid "Respaldo de un juego"

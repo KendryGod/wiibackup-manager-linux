@@ -13,7 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import atomicfs, drives, wit_wrapper
+from . import atomicfs, drives, fileops, wit_wrapper
 from .fileops import _copy_with_progress, free_variant, rename_no_replace
 from .game_model import Game, standard_filename
 from .i18n import _
@@ -359,6 +359,7 @@ def send_to_wbfs_drive(
     overwrite: bool = False,
     cancel: Optional["wit_wrapper.CancellationToken"] = None,
     scrub_update: bool = True,
+    flush_progress_cb: Optional[Callable[[], None]] = None,
 ) -> Path:
     """Copia `game` a la estructura estándar 'wbfs/<ID6>/<ID6>.wbfs' que
     reconocen los USB Loaders de Wii (USB Loader GX, CFG USB Loader, etc.)
@@ -402,7 +403,15 @@ def send_to_wbfs_drive(
     `scrub_update` se le pasa tal cual a `wit_wrapper.convert` (ver ahí):
     solo importa cuando el camino termina pasando por `wit` -una copia
     directa de un WBFS que ya entra entero no convierte nada, así que no
-    hay partición de actualización que descartar."""
+    hay partición de actualización que descartar.
+
+    Vuelve recién cuando lo copiado está EN LA UNIDAD, no en la caché del
+    kernel: la copia directa lo baja mientras escribe
+    (`fileops._copy_with_progress`), y lo que escribe `wit` -que termina
+    en cuanto los datos llegan a la caché- se baja después, de a ventanas
+    y antes de dar por buena la conversión, así que cancelar en esa espera
+    devuelve el destino a como estaba. `flush_progress_cb()` se llama
+    durante esa espera, para quien muestre el progreso."""
     if cancel is not None and cancel.cancelled:
         raise wit_wrapper.OperationCancelled("Transferencia cancelada por el usuario.")
 
@@ -474,5 +483,12 @@ def send_to_wbfs_drive(
         if result.returncode != 0:
             raise RuntimeError(
                 result.stderr.strip() or _("Error desconocido al convertir con wit"))
+        # `wit` terminó, pero con una unidad lenta casi todo lo que
+        # escribió sigue en la caché. Se baja ANTES de `commit`: si se
+        # cancela acá, el guard borra lo nuevo y devuelve lo anterior; si
+        # se diera por bueno primero, un 100% en pantalla no significaría
+        # que la unidad ya se pueda desenchufar.
+        fileops.flush_and_drop_cache(wbfs_group(dest), cancel=cancel,
+                                     on_progress=flush_progress_cb)
         guard.commit()
     return dest

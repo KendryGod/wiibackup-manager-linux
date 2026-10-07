@@ -219,7 +219,7 @@ def copy_no_replace(src: Path, dest: Path) -> None:
         raise
 
 
-def flush_and_drop_cache(paths, cancel=None) -> None:
+def flush_and_drop_cache(paths, cancel=None, on_progress=None) -> None:
     """Baja a la unidad lo que quede en caché de cada archivo de `paths` y
     después le pide al kernel que olvide sus páginas.
 
@@ -241,13 +241,15 @@ def flush_and_drop_cache(paths, cancel=None) -> None:
     (`fsutil.flush_in_windows`) mirando el token entre una y otra, y si lo
     cancelaron levanta `OperationCancelled`: un `fsync` de una sola vez
     sobre lo que dejó `wit` puede tardar minutos en un pendrive lento, y
-    mientras tanto no hay forma de cortarlo."""
+    mientras tanto no hay forma de cortarlo. `on_progress()` se llama
+    después de cada ventana (ver `fsutil.flush_in_windows`)."""
     cancelado = (lambda: cancel is not None and cancel.cancelled)
     for path in paths:
         fd = os.open(path, os.O_RDONLY)
         try:
             if not fsutil.flush_in_windows(fd, os.fstat(fd).st_size,
-                                           cancelado):
+                                           cancelado,
+                                           on_progress=on_progress):
                 raise wit_wrapper.OperationCancelled(
                     "Transferencia cancelada por el usuario.")
             os.fsync(fd)

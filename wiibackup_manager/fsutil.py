@@ -219,14 +219,18 @@ class BoundedWriteback:
 
 
 def flush_in_windows(fd: int, size: int, cancelled=lambda: False,
-                              window: int = WRITEBACK_WINDOW) -> bool:
+                     window: int = WRITEBACK_WINDOW,
+                     on_progress=None) -> bool:
     """Baja a la unidad un archivo ya escrito, de a una ventana por vez,
     preguntando `cancelled()` entre ventanas. Devuelve False si lo
     cancelaron antes de terminar (lo que faltaba sigue en la caché).
 
     Es la versión interrumpible de un `fsync` sobre un archivo que otro
     -`wit`, por ejemplo- dejó entero en la caché: el `fsync` de una sola vez
-    no se puede cortar, y en un pendrive lento puede tardar minutos."""
+    no se puede cortar, y en un pendrive lento puede tardar minutos.
+
+    `on_progress()`, si se pasa, se llama después de cada ventana: es el
+    pulso con el que quien muestra el progreso vuelve a medir la unidad."""
     hecho = 0
     while hecho < size:
         if cancelled():
@@ -238,4 +242,6 @@ def flush_in_windows(fd: int, size: int, cancelled=lambda: False,
         except (OSError, AttributeError):
             pass
         hecho += tramo
+        if on_progress is not None:
+            on_progress()
     return not cancelled()
