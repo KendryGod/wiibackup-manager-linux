@@ -8,11 +8,11 @@ loop device) es el formateo de punta a punta, y eso vive aparte en
 `tools/manual_factory_mode_e2e.py` porque necesita root -no corresponde
 en la suite automática.
 
-Los comandos externos (`umount`, `mkfs.vfat`, `udisksctl`) se prueban acá
-con un `run` falso inyectado (mismo patrón que `dispatch` en
-`queue_manager`): confirma que `format_as_wii_usb` arma bien los
-argumentos y respeta el orden blindajes -> desmontar -> formatear ->
-montar, sin ejecutar un solo comando real.
+Los comandos externos se prueban acá con un `run` inyectado (mismo patrón
+que `dispatch` en `queue_manager`): para los blindajes que frenan antes de
+tocar nada alcanza con uno que falle si se lo llama; para los caminos que
+llegan a formatear se usa `fake_disk_tools`, que corre el script
+privilegiado real contra wipefs/parted/mkfs.vfat falsos, sin root.
 """
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from fake_disk_tools import crear_disco_falso
 from wiibackup_manager import drives
 
 
@@ -390,59 +391,52 @@ def test_format_as_wii_usb_aborta_por_blindaje_4_sin_ejecutar_mkfs(
     assert llamadas == []
 
 
+def _herramientas(tmp_path, nombre="sdb", **kwargs):
+    """Herramientas de disco falsas (ver `fake_disk_tools`) sobre el
+    /proc/mounts de juguete del fixture `proc_mounts`: el script
+    privilegiado de `format_fat32` corre de verdad, sin root."""
+    punto = tmp_path / "run_media" / "kendry" / "USB"
+    return crear_disco_falso(tmp_path / "herramientas", _dev(nombre),
+                             proc_mounts=drives._PROC_MOUNTS,
+                             punto_montaje=punto, **kwargs), punto
+
+
+def _mkfs_cmd(herramientas) -> list[str]:
+    return next(c for c in herramientas.llamadas() if c[0] == "mkfs.vfat")
+
+
 def test_format_as_wii_usb_feliz_llama_mkfs_y_crea_carpetas(
         sys_block, proc_mounts, tmp_path):
-    """Camino feliz con `run` falso (sin tocar ningún disco real): los
-    dos blindajes pasan, se llama a mkfs.vfat con los flags esperados
-    (con o sin `pkexec` adelante, según con qué usuario corra la suite) y
-    se crean apps/games/wbfs en el punto que reporta el `udisksctl mount`
-    simulado."""
+    """Camino feliz sin tocar ningún disco real: los blindajes pasan,
+    `mkfs.vfat` corre sobre la PARTICIÓN nueva con los flags esperados y
+    se crean apps/games/wbfs en el punto que reporta `udisksctl mount`."""
     _make_block_device(sys_block, "sdb", removable=True, size_sectors=1000)
     proc_mounts([])  # nada montado: blindaje 4 pasa limpio
-
-    punto_montaje = tmp_path / "run_media" / "WII_USB"
-    punto_montaje.mkdir(parents=True)
-
-    comandos = []
-
-    def _fake_run(cmd, **_k):
-        comandos.append(cmd)
-        if cmd[0] == "umount":
-            return subprocess.CompletedProcess(cmd, 0, "", "")
-        if "mkfs.vfat" in cmd:
-            return subprocess.CompletedProcess(cmd, 0, "", "")
-        if cmd[0] == "udisksctl" and cmd[1] == "mount":
-            return subprocess.CompletedProcess(
-                cmd, 0, f"Mounted /dev/sdb at {punto_montaje}.\n", "")
-        raise AssertionError(f"comando inesperado: {cmd}")
+    herramientas, punto_montaje = _herramientas(tmp_path)
 
     device = drives.BlockDevice(path=_dev("sdb"), model="X", size_bytes=1000 * 512)
-    resultado = drives.format_as_wii_usb(device, run=_fake_run, label="WII_USB")
+    resultado = drives.format_as_wii_usb(device, run=herramientas.run,
+                                         label="WII_USB", mount_timeout=2.0)
 
     assert resultado == punto_montaje
     for carpeta in drives.FACTORY_FOLDERS:
         assert (punto_montaje / carpeta).is_dir()
 
-    mkfs_cmd = next(c for c in comandos if "mkfs.vfat" in c)
-    assert "-F" in mkfs_cmd and "32" in mkfs_cmd
-    assert "-n" in mkfs_cmd and "WII_USB" in mkfs_cmd
-    assert str(device.path) in mkfs_cmd
+    mkfs_cmd = _mkfs_cmd(herramientas)
+    assert mkfs_cmd[1:3] == ["-F", "32"]
+    assert mkfs_cmd[mkfs_cmd.index("-n") + 1] == "WII_USB"
+    assert mkfs_cmd[-1] == "/dev/sdb1"
 
 
-def test_format_as_wii_usb_propaga_error_de_mkfs(sys_block, proc_mounts):
+def test_format_as_wii_usb_propaga_error_de_mkfs(sys_block, proc_mounts, tmp_path):
     _make_block_device(sys_block, "sdb", removable=True, size_sectors=1000)
     proc_mounts([])
-
-    def _fake_run(cmd, **_k):
-        if cmd[0] == "umount":
-            return subprocess.CompletedProcess(cmd, 0, "", "")
-        if "mkfs.vfat" in cmd:
-            return subprocess.CompletedProcess(cmd, 1, "", "mkfs.vfat: dispositivo ocupado")
-        raise AssertionError(f"no debería llegar a llamar a {cmd}")
+    herramientas, _punto = _herramientas(tmp_path)
+    herramientas.hacer_fallar_mkfs("mkfs.vfat: dispositivo ocupado")
 
     device = drives.BlockDevice(path=_dev("sdb"), model="X", size_bytes=1000 * 512)
     with pytest.raises(RuntimeError, match="ocupado"):
-        drives.format_as_wii_usb(device, run=_fake_run)
+        drives.format_as_wii_usb(device, run=herramientas.run, mount_timeout=2.0)
 
 
 def test_format_as_wii_usb_aborta_si_la_identidad_cambia_entre_desmontar_y_mkfs(
@@ -515,22 +509,6 @@ def test_normalize_fat_label_nunca_pasa_del_limite_en_bytes():
 
 
 # ----------------------- format_fat32: el mecanismo blindado compartido --
-def _fake_run_formateo(punto_montaje, comandos):
-    """`run` falso para el camino feliz: registra los comandos en
-    `comandos` y simula umount/mkfs.vfat/udisksctl sin ejecutar nada."""
-    def _run(cmd, **_k):
-        comandos.append(cmd)
-        if cmd[0] == "umount":
-            return subprocess.CompletedProcess(cmd, 0, "", "")
-        if "mkfs.vfat" in cmd:
-            return subprocess.CompletedProcess(cmd, 0, "", "")
-        if cmd[0] == "udisksctl" and cmd[1] == "mount":
-            return subprocess.CompletedProcess(
-                cmd, 0, f"Mounted /dev/sdb at {punto_montaje}.\n", "")
-        raise AssertionError(f"comando inesperado: {cmd}")
-    return _run
-
-
 def test_format_fat32_no_crea_la_estructura_de_wii(sys_block, proc_mounts, tmp_path):
     """La razón de ser de que `format_fat32` exista aparte: es un formateo
     de propósito general. Formatea y monta, y ahí termina -apps/games/wbfs
@@ -538,13 +516,10 @@ def test_format_fat32_no_crea_la_estructura_de_wii(sys_block, proc_mounts, tmp_p
     no tiene por qué quedar con tres carpetas de un loader de Wii."""
     _make_block_device(sys_block, "sdb", removable=True, size_sectors=1000)
     proc_mounts([])
-    punto_montaje = tmp_path / "run_media" / "SIN_ETIQUETA"
-    punto_montaje.mkdir(parents=True)
+    herramientas, punto_montaje = _herramientas(tmp_path)
 
-    comandos = []
     device = drives.BlockDevice(path=_dev("sdb"), model="X", size_bytes=1000 * 512)
-    resultado = drives.format_fat32(
-        device, run=_fake_run_formateo(punto_montaje, comandos))
+    resultado = drives.format_fat32(device, run=herramientas.run, mount_timeout=2.0)
 
     assert resultado == punto_montaje
     assert sorted(p.name for p in punto_montaje.iterdir()) == []
@@ -558,16 +533,12 @@ def test_format_fat32_sin_etiqueta_no_le_pasa_n_a_mkfs(
     string vacío, así el volumen queda como NO NAME."""
     _make_block_device(sys_block, "sdb", removable=True, size_sectors=1000)
     proc_mounts([])
-    punto_montaje = tmp_path / "run_media" / "disco"
-    punto_montaje.mkdir(parents=True)
+    herramientas, _punto = _herramientas(tmp_path)
 
-    comandos = []
     device = drives.BlockDevice(path=_dev("sdb"), model="X", size_bytes=1000 * 512)
-    drives.format_fat32(device, run=_fake_run_formateo(punto_montaje, comandos),
-                        label="   ")
+    drives.format_fat32(device, run=herramientas.run, label="   ", mount_timeout=2.0)
 
-    mkfs_cmd = next(c for c in comandos if "mkfs.vfat" in c)
-    assert "-n" not in mkfs_cmd
+    assert "-n" not in _mkfs_cmd(herramientas)
 
 
 def test_format_fat32_normaliza_la_etiqueta_antes_de_pasarla(
@@ -577,15 +548,13 @@ def test_format_fat32_normaliza_la_etiqueta_antes_de_pasarla(
     de más harían fallar el formateo recién al final."""
     _make_block_device(sys_block, "sdb", removable=True, size_sectors=1000)
     proc_mounts([])
-    punto_montaje = tmp_path / "run_media" / "disco"
-    punto_montaje.mkdir(parents=True)
+    herramientas, _punto = _herramientas(tmp_path)
 
-    comandos = []
     device = drives.BlockDevice(path=_dev("sdb"), model="X", size_bytes=1000 * 512)
-    drives.format_fat32(device, run=_fake_run_formateo(punto_montaje, comandos),
-                        label="Fotos Mamá")
+    drives.format_fat32(device, run=herramientas.run, label="Fotos Mamá",
+                        mount_timeout=2.0)
 
-    mkfs_cmd = next(c for c in comandos if "mkfs.vfat" in c)
+    mkfs_cmd = _mkfs_cmd(herramientas)
     assert mkfs_cmd[mkfs_cmd.index("-n") + 1] == "FOTOS MAMA"
 
 
@@ -599,17 +568,15 @@ def test_format_fat32_deja_el_cluster_a_mkfs_por_defecto(
     que no tiene sentido en un formateo de propósito general."""
     _make_block_device(sys_block, "sdb", removable=True, size_sectors=1000)
     proc_mounts([])
-    punto_montaje = tmp_path / "run_media" / "disco"
-    punto_montaje.mkdir(parents=True)
+    herramientas, _punto = _herramientas(tmp_path)
 
-    comandos = []
     device = drives.BlockDevice(path=_dev("sdb"), model="X", size_bytes=1000 * 512)
-    drives.format_fat32(device, run=_fake_run_formateo(punto_montaje, comandos))
+    drives.format_fat32(device, run=herramientas.run, mount_timeout=2.0)
 
-    mkfs_cmd = next(c for c in comandos if "mkfs.vfat" in c)
+    mkfs_cmd = _mkfs_cmd(herramientas)
     assert "-s" not in mkfs_cmd
-    assert "-F" in mkfs_cmd and "32" in mkfs_cmd
-    assert str(device.path) in mkfs_cmd
+    assert mkfs_cmd[1:3] == ["-F", "32"]
+    assert mkfs_cmd[-1] == "/dev/sdb1"
 
 
 def test_format_as_wii_usb_sigue_pidiendo_clusters_de_32kb(
@@ -619,14 +586,12 @@ def test_format_as_wii_usb_sigue_pidiendo_clusters_de_32kb(
     porque los USB Loaders esperan 32 KB (64 sectores de 512 B)."""
     _make_block_device(sys_block, "sdb", removable=True, size_sectors=1000)
     proc_mounts([])
-    punto_montaje = tmp_path / "run_media" / "WII_USB"
-    punto_montaje.mkdir(parents=True)
+    herramientas, _punto = _herramientas(tmp_path)
 
-    comandos = []
     device = drives.BlockDevice(path=_dev("sdb"), model="X", size_bytes=1000 * 512)
-    drives.format_as_wii_usb(device, run=_fake_run_formateo(punto_montaje, comandos))
+    drives.format_as_wii_usb(device, run=herramientas.run, mount_timeout=2.0)
 
-    mkfs_cmd = next(c for c in comandos if "mkfs.vfat" in c)
+    mkfs_cmd = _mkfs_cmd(herramientas)
     assert mkfs_cmd[mkfs_cmd.index("-s") + 1] == str(drives.WII_USB_SECTORS_PER_CLUSTER)
     assert mkfs_cmd[mkfs_cmd.index("-n") + 1] == drives.WII_USB_LABEL
 
@@ -719,24 +684,18 @@ def test_format_fat32_revisa_la_identidad_dos_veces(sys_block, proc_mounts):
     assert len(llamadas_udevadm) == 2
 
 
-def test_format_fat32_propaga_el_error_de_mkfs(sys_block, proc_mounts):
+def test_format_fat32_propaga_el_error_de_mkfs(sys_block, proc_mounts, tmp_path):
     """Un disco demasiado grande para FAT32, o cualquier otro rechazo de
     `mkfs.vfat`, llega tal cual a quien llama: es el mensaje que la
     interfaz le muestra al usuario."""
     _make_block_device(sys_block, "sdb", removable=True, size_sectors=1000)
     proc_mounts([])
-
-    def _fake_run(cmd, **_k):
-        if cmd[0] == "umount":
-            return subprocess.CompletedProcess(cmd, 0, "", "")
-        if "mkfs.vfat" in cmd:
-            return subprocess.CompletedProcess(
-                cmd, 1, "", "mkfs.vfat: Device is too big for FAT32")
-        raise AssertionError(f"no debería llegar a llamar a {cmd}")
+    herramientas, _punto = _herramientas(tmp_path)
+    herramientas.hacer_fallar_mkfs("mkfs.vfat: Device is too big for FAT32")
 
     device = drives.BlockDevice(path=_dev("sdb"), model="X", size_bytes=1000 * 512)
     with pytest.raises(RuntimeError, match="too big"):
-        drives.format_fat32(device, run=_fake_run)
+        drives.format_fat32(device, run=herramientas.run, mount_timeout=2.0)
 
 
 # ------------------- candidate_for_mount_point: el puente a la lista blanca --

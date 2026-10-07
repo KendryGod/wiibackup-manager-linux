@@ -28,10 +28,12 @@ Los "blindajes" a los que se refieren los docstrings de acá son:
 - BLINDAJE 3 (`verify_still_safe`): re-chequeo, ya en el hilo de fondo,
   de que el dispositivo sigue siendo removible, pesa lo mismo y tiene la
   misma identidad física (serie/WWN vía udev) que cuando se armó el
-  diálogo. `format_fat32` lo corre DOS veces -antes de desmontar y
-  otra vez justo antes de `mkfs.vfat`- porque ahí en el medio hay una
-  ventana real: el desmontaje puede tardar, y es el momento en que menos
-  se está mirando el dispositivo.
+  diálogo. `format_fat32` lo corre antes de desmontar, otra vez antes de
+  pedir la contraseña con `pkexec`, y la ÚLTIMA vez adentro del script
+  privilegiado, justo antes de `wipefs` -el primer comando que destruye
+  algo-, porque entre una cosa y la otra hay ventanas reales: el
+  desmontaje puede tardar, y el diálogo de contraseña puede quedar
+  abierto todo lo que el usuario quiera.
 - BLINDAJE 4 (`check_no_critical_mounts` / `mounted_critical_paths`):
   última línea de defensa. Se corre siempre, pase lo que pase con los
   blindajes anteriores: si alguna partición del disco está montada en
@@ -449,6 +451,16 @@ class StillMountedError(FormatGuardError):
     tenga esa partición."""
 
 
+class MountNotWritableError(RuntimeError):
+    """El formateo terminó, pero el punto de montaje resultante no es del
+    usuario que corre la app o no se puede escribir en él (por ejemplo,
+    quedó montado por root en /run/media/root/...). En FAT no hay dueños
+    por archivo -`chown`/`chmod` no sirven-: el dueño lo fija el montaje,
+    así que la única salida es volver a montarlo como el usuario. Se
+    levanta en vez de devolver un punto de montaje en el que después
+    fallaría cualquier copia."""
+
+
 def _device_name(device_path) -> str:
     """'/dev/sdb' -> 'sdb'. Nombre tal como aparece bajo /sys/block."""
     return Path(device_path).name
@@ -803,10 +815,12 @@ def verify_still_safe(device: BlockDevice, *, run=subprocess.run) -> None:
     """BLINDAJE 3: re-chequeo, ya en el hilo de fondo, de que
     `device.path` sigue siendo removible, pesa lo mismo y tiene la misma
     identidad física que cuando se armó el diálogo de confirmación.
-    `format_fat32` la llama DOS veces: acá y otra vez justo antes de
-    `mkfs.vfat`, así que esta función no asume en qué momento del flujo
-    está -siempre vuelve a preguntarle al kernel/udev, nunca confía en
-    una llamada anterior, ni siquiera una hecha un segundo antes.
+    `format_fat32` la llama DOS veces (antes de desmontar y antes de
+    lanzar `pkexec`), y el script privilegiado repite el mismo chequeo
+    una última vez justo antes de `wipefs` (ver `_FORMAT_SCRIPT`), así que
+    esta función no asume en qué momento del flujo está -siempre vuelve a
+    preguntarle al kernel/udev, nunca confía en una llamada anterior, ni
+    siquiera una hecha un segundo antes.
 
     Entre que el usuario ve el diálogo (con el modelo y el tamaño
     impresos) y aprieta el botón -o entre que se desmonta el disco y se
@@ -865,31 +879,222 @@ def _unmount_all(device_path, *, run=subprocess.run) -> None:
         run(["umount", origen], capture_output=True, text=True, timeout=30)
 
 
-def _mount_after_format(device_path, *, run=subprocess.run,
-                        timeout: float = 15.0) -> Path:
-    """Monta `device_path` recién formateado y devuelve dónde quedó. Se
-    pide el montaje explícito con `udisksctl` en vez de esperar a que
-    gvfs lo autodetecte (más rápido y determinista); si igual se
-    adelantó y ya está montado, o si `udisksctl` no está disponible, se
-    cae a sondear /proc/mounts un rato."""
-    try:
-        resultado = run(["udisksctl", "mount", "-b", str(device_path)],
-                        capture_output=True, text=True, timeout=timeout)
-    except (OSError, subprocess.TimeoutExpired):
-        resultado = None
-    if resultado is not None and resultado.returncode == 0:
-        match = re.search(r" at (/\S.*)\.\s*$", resultado.stdout.strip())
-        if match:
-            return Path(match.group(1))
+def _mount_points_now(device_path) -> list[Path]:
+    return [Path(punto) for _origen, punto in _mount_points_of(device_path)]
 
+
+def _mount_as_user(partition, *, run=subprocess.run,
+                   timeout: float = 15.0) -> Path:
+    """Monta `partition` con `udisksctl` -como el usuario que corre la app,
+    NUNCA dentro del paso privilegiado- y devuelve dónde quedó.
+
+    Montado así, udisks le pone `uid=`/`gid=` del usuario al montaje FAT y
+    lo deja en /run/media/<usuario>/: es lo que permite escribir ahí
+    después. Montado por root, en cambio, todo queda de root y FAT no
+    tiene cómo cambiarlo después.
+
+    Se reintenta hasta `timeout`: udisks se entera del filesystem nuevo
+    por un evento de udev que puede llegar un instante después de que
+    termina `mkfs.vfat`, y mientras tanto `udisksctl mount` responde que
+    no hay nada montable. Si en el medio gvfs se adelantó y lo automontó,
+    se toma ese montaje (la postcondición de `format_fat32` igual
+    confirma que sea del usuario)."""
     inicio = time.monotonic()
-    while time.monotonic() - inicio < timeout:
-        puntos = _mount_points_of(device_path)
+    ultimo_error = ""
+    while True:
+        try:
+            resultado = run(["udisksctl", "mount", "-b", str(partition)],
+                            capture_output=True, text=True, timeout=timeout)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            resultado = None
+            ultimo_error = str(e)
+        puntos = _mount_points_now(partition)
         if puntos:
-            return Path(puntos[0][1])
-        time.sleep(0.2)
+            return puntos[0]
+        if resultado is not None and resultado.returncode == 0:
+            # /proc/mounts es la fuente de verdad; el texto de udisksctl
+            # ("Mounted X at Y", con o sin punto final según la versión)
+            # es el respaldo si el montaje todavía no se ve ahí.
+            match = re.search(r" at (/.*?)\.?\s*$", resultado.stdout.strip())
+            if match:
+                return Path(match.group(1))
+        elif resultado is not None:
+            ultimo_error = (resultado.stderr or resultado.stdout).strip()
+        if time.monotonic() - inicio >= timeout:
+            break
+        time.sleep(0.5)
     raise RuntimeError(
-        f"{device_path} se formateó pero no se pudo montar después.")
+        f"{partition} se formateó pero no se pudo montar después"
+        + (f": {ultimo_error}" if ultimo_error else "."))
+
+
+def _check_mount_writable(mount_point: Path) -> None:
+    """Postcondición de `format_fat32`: el punto de montaje es del usuario
+    que corre la app y se puede escribir. Si no, `MountNotWritableError`:
+    nunca se reporta éxito sobre una unidad en la que la app no va a poder
+    copiar nada."""
+    try:
+        info = os.stat(mount_point)
+    except OSError as e:
+        raise MountNotWritableError(
+            f"No se pudo revisar el punto de montaje {mount_point}: {e}") from e
+    uid = os.getuid()
+    if info.st_uid != uid or not os.access(mount_point, os.W_OK):
+        raise MountNotWritableError(
+            f"La unidad quedó montada en {mount_point}, pero ese montaje "
+            f"pertenece al usuario {info.st_uid} (la app corre como {uid}) "
+            "o no admite escritura. En FAT32 los permisos los fija el "
+            "montaje: desmontala y volvé a montarla desde el gestor de "
+            "archivos como tu usuario.")
+
+
+def partitions_of(device_path, *, run=subprocess.run) -> list[Path]:
+    """Las particiones de `device_path` según `lsblk` (filas TYPE=part).
+
+    El nombre de la partición NO se arma pegándole "1" al disco: en
+    SD/NVMe/loop es `p1` (`mmcblk0p1`, `nvme0n1p1`, `loop0p1`) y en SCSI/USB
+    no (`sda1`). `lsblk -p` devuelve la ruta real que creó el kernel, sea
+    cual sea la convención del bus."""
+    try:
+        resultado = run(["lsblk", "-nrpo", "NAME,TYPE", str(device_path)],
+                        capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if resultado.returncode != 0:
+        return []
+    particiones = []
+    for linea in resultado.stdout.splitlines():
+        partes = linea.split()
+        if len(partes) == 2 and partes[1] == "part":
+            particiones.append(Path(partes[0]))
+    return particiones
+
+
+# El paso privilegiado entero, en UN solo script para UNA sola llamada a
+# `pkexec` (una sola contraseña). Argumentos posicionales:
+#   $1 disco  $2 /sys/block  $3 tamaño en sectores de 512 B
+#   $4 identidad esperada ("" = no se pudo capturar, no se chequea)
+#   $5 etiqueta ("" = sin -n)  $6 sectores por clúster ("" = sin -s)
+#
+# `verificar` repite el BLINDAJE 3 de `verify_still_safe` (removible,
+# tamaño, identidad con la misma precedencia ID_SERIAL > ID_SERIAL_SHORT >
+# ID_WWN que `device_identity`) porque es lo único que puede correr DESPUÉS
+# de que el usuario escribió la contraseña: entre el último chequeo en
+# Python y este, el diálogo de `pkexec` puede haber quedado abierto minutos.
+#
+# Los códigos 90-95 son de los blindajes (ver `_FORMAT_EXIT_ERRORS`); se
+# eligieron lejos de los que devuelven wipefs/parted/mkfs.vfat.
+_FORMAT_SCRIPT = r"""
+set -eu
+dev=$1 sys_block=$2 sectores=$3 identidad=$4 etiqueta=$5 cluster=$6
+nombre=${dev##*/}
+
+abortar() {
+    codigo=$1; shift
+    printf 'wbm-format: %s
+' "$*" >&2
+    exit "$codigo"
+}
+
+identidad_actual() {
+    props=$(udevadm info --query=property --name="$dev" 2>/dev/null) || return 0
+    for clave in ID_SERIAL ID_SERIAL_SHORT ID_WWN; do
+        valor=$(printf '%s
+' "$props" | sed -n "s/^$clave=//p" | head -n 1)
+        if [ -n "$valor" ]; then
+            printf '%s' "$valor"
+            return 0
+        fi
+    done
+}
+
+verificar() {
+    removible=$(cat "$sys_block/$nombre/removable" 2>/dev/null || true)
+    [ "$removible" = 1 ] || abortar 90 "$dev ya no es removible (o desapareció)"
+    tamano=$(cat "$sys_block/$nombre/size" 2>/dev/null || true)
+    [ "$tamano" = "$sectores" ] || abortar 91 "el tamaño de $dev cambió ($sectores -> $tamano sectores)"
+    if [ -n "$identidad" ]; then
+        actual=$(identidad_actual)
+        [ "$actual" = "$identidad" ] || abortar 92 "la identidad de $dev cambió ($identidad -> $actual)"
+    fi
+}
+
+sin_montajes() {
+    if lsblk -nrpo MOUNTPOINT "$dev" | grep -q .; then
+        abortar 93 "$dev tiene algo montado"
+    fi
+}
+
+particiones() {
+    lsblk -nrpo NAME,TYPE "$dev" | awk '$2 == "part" { print $1 }'
+}
+
+verificar
+sin_montajes
+
+for vieja in $(particiones); do
+    wipefs -a "$vieja" >&2
+done
+wipefs -a "$dev" >&2
+parted -s "$dev" mklabel msdos
+parted -s "$dev" mkpart primary fat32 1MiB 100%
+
+udevadm settle --timeout=10 || true
+intentos=0
+while :; do
+    lista=$(particiones)
+    [ -n "$lista" ] && break
+    intentos=$((intentos + 1))
+    if [ "$intentos" -ge 50 ]; then
+        abortar 94 "no apareció la partición nueva de $dev"
+    fi
+    sleep 0.2
+done
+cantidad=$(printf '%s
+' "$lista" | grep -c .)
+[ "$cantidad" -eq 1 ] || abortar 95 "$dev quedó con $cantidad particiones en vez de 1"
+particion=$lista
+
+verificar
+sin_montajes
+wipefs -a "$particion" >&2
+
+set -- -F 32
+if [ -n "$cluster" ]; then set -- "$@" -s "$cluster"; fi
+if [ -n "$etiqueta" ]; then set -- "$@" -n "$etiqueta"; fi
+mkfs.vfat "$@" "$particion" >&2
+udevadm settle --timeout=10 || true
+printf 'PARTICION=%s
+' "$particion"
+"""
+
+_FORMAT_EXIT_ERRORS = {
+    90: (UnsafeDeviceError,
+         "{dev} ya no es un dispositivo removible (o desapareció)"),
+    91: (DeviceChangedError,
+         "El tamaño de {dev} cambió desde que se confirmó. Puede ser otro "
+         "dispositivo"),
+    92: (DeviceIdentityMismatchError,
+         "La identidad física de {dev} cambió mientras se pedía la "
+         "contraseña. Puede ser otro dispositivo del mismo tamaño "
+         "reconectado en el mismo puerto"),
+    93: (StillMountedError,
+         "{dev} volvió a tener algo montado antes de formatear"),
+}
+
+# Lo que devuelve `pkexec` cuando no llegó a ejecutar nada: 126 = el
+# usuario cerró el diálogo de contraseña, 127 = no autorizado.
+_PKEXEC_NOT_AUTHORIZED = {126, 127}
+
+
+def _privileged_format_command(device: BlockDevice, label: str,
+                               sectors_per_cluster: int | None) -> list[str]:
+    argumentos = ["/bin/sh", "-c", _FORMAT_SCRIPT, "wbm-format",
+                  str(device.path), str(_SYS_BLOCK),
+                  str(device.size_bytes // 512), device.identity or "",
+                  label,
+                  "" if sectors_per_cluster is None else str(sectors_per_cluster)]
+    return argumentos if os.geteuid() == 0 else ["pkexec", *argumentos]
 
 
 def normalize_fat_label(label: str | None) -> str:
@@ -931,8 +1136,9 @@ def format_fat32(device: BlockDevice, *, run=subprocess.run,
                  label: str | None = None,
                  sectors_per_cluster: int | None = None,
                  mount_timeout: float = 15.0) -> Path:
-    """Formatea `device` entero como FAT32, con todos los blindajes
-    puestos, y devuelve el punto de montaje donde quedó.
+    """Formatea `device` como FAT32 (tabla MBR con una sola partición que
+    ocupa todo el disco), con todos los blindajes puestos, y devuelve el
+    punto de montaje donde quedó.
 
     Este es EL mecanismo de formateo de la app: no hay otro. Modo Fábrica
     (`format_as_wii_usb`) y el formateo de propósito general que se ofrece
@@ -949,41 +1155,47 @@ def format_fat32(device: BlockDevice, *, run=subprocess.run,
        (`check_no_critical_mounts`).
     2. Desmonta todo lo que tenga montado y confirma con el blindaje 5
        que el desmontaje surtió efecto de verdad.
-    3. Blindaje 3 OTRA VEZ, ya con el disco desmontado: ahí en el medio
-       está la ventana real (desmontar puede tardar) entre "confirmamos
-       que era el dispositivo correcto" y "empezamos a escribir".
-    4. `mkfs.vfat -F 32` sobre el disco entero.
-    5. Lo monta de vuelta y devuelve dónde quedó.
+    3. Blindaje 3 otra vez, ya desmontado y antes de pedir la contraseña:
+       si el dispositivo cambió, que el usuario ni la tenga que escribir.
+    4. UNA llamada a `pkexec` con `_FORMAT_SCRIPT`, que repite el blindaje
+       3 (y el 5) justo antes de `wipefs` -el primer comando destructivo,
+       que corre recién cuando el usuario terminó de escribir la
+       contraseña- y otra vez entre `parted` y `mkfs.vfat`; borra firmas
+       viejas, crea una tabla MBR con una partición FAT32 desde 1 MiB y
+       corre `mkfs.vfat` sobre esa PARTICIÓN.
+    5. Monta la partición como el usuario (`_mount_as_user`, nunca como
+       root) y confirma que el montaje es suyo y escribible
+       (`_check_mount_writable`).
+
+    Por qué tabla de particiones y no el disco entero: los USB reales
+    vienen de fábrica con una tabla, y `mkfs.vfat` se niega a formatear un
+    disco que la tiene ("Partitions or virtual mappings on device"). Una
+    MBR con una partición FAT32 es además lo que esperan USB Loader GX y
+    Nintendont, y lo que lee cualquier sistema operativo.
 
     `label` es opcional: se normaliza con `normalize_fat_label` y, si
     queda vacío, no se le pasa `-n` a `mkfs.vfat` (el volumen queda como
     NO NAME). `sectors_per_cluster` en None deja que `mkfs.vfat` elija el
-    tamaño de clúster según el tamaño real del dispositivo, que es lo
+    tamaño de clúster según el tamaño real de la partición, que es lo
     correcto para un formateo genérico; Modo Fábrica sí lo fija, porque
     los USB Loaders esperan clústeres de 32 KB.
-
-    Formatea el DISCO ENTERO sin tabla de particiones (`mkfs.vfat` sobre
-    `/dev/sdX`, no sobre `/dev/sdX1`), igual que hace Modo Fábrica desde
-    siempre: es lo que leen sin quejarse tanto los USB Loaders como
-    Windows y Linux en un pendrive o una SD.
 
     Pensada para correr en un hilo de fondo: no toca GTK ni nada de la
     interfaz -quien la llama es responsable de reportar
     progreso/resultado con `GLib.idle_add`, igual que hace
     `queue_manager`.
 
-    `mkfs.vfat` se lanza vía `pkexec`, salvo que el proceso YA sea root
-    (`os.geteuid() == 0`): eso es lo que pasa en el script de pruebas
-    manual, corrido con `sudo`, y pedirle a `pkexec` que lance un agente
-    gráfico de autenticación ahí no tendría sentido (y probablemente ni
-    funcione sin sesión gráfica). Con un usuario normal desde la app, en
-    cambio, `pkexec` es el que muestra el diálogo de contraseña del
-    sistema.
+    El script privilegiado se lanza vía `pkexec`, salvo que el proceso YA
+    sea root (`os.geteuid() == 0`): eso es lo que pasa en el script de
+    pruebas manual, corrido con `sudo`, y pedirle a `pkexec` que lance un
+    agente gráfico de autenticación ahí no tendría sentido.
 
     Levanta la subclase de `FormatGuardError` que corresponda si algún
-    blindaje no pasa, o `RuntimeError` si `mkfs.vfat` (o el montaje
-    posterior) fallan -incluido el caso de un disco demasiado grande para
-    FAT32, que rechaza el propio `mkfs.vfat` con su mensaje."""
+    blindaje no pasa (también los que corren adentro del script),
+    `MountNotWritableError` si el montaje final no es escribible por el
+    usuario, o `RuntimeError` si falla algún comando o el montaje
+    -incluido el caso de un disco demasiado grande para FAT32, que
+    rechaza el propio `mkfs.vfat` con su mensaje."""
     verify_still_safe(device, run=run)
     check_no_critical_mounts(device)
 
@@ -998,37 +1210,47 @@ def format_fat32(device: BlockDevice, *, run=subprocess.run,
             "por permisos u otro motivo). Se aborta el formateo por "
             "seguridad.")
 
-    # BLINDAJE 3 otra vez, ya con el disco desmontado: el desmontaje puede
-    # haber tardado (discos lentos, `udisksctl` reintentando), y esta es
-    # la ventana real entre "confirmamos que era el dispositivo correcto"
-    # y "empezamos a escribir sobre él" -no alcanza con haberlo chequeado
-    # antes de desmontar.
     verify_still_safe(device, run=run)
 
-    comando = ["mkfs.vfat", "-F", "32"]
-    if sectors_per_cluster is not None:
-        comando += ["-s", str(sectors_per_cluster)]
-    etiqueta = normalize_fat_label(label)
-    if etiqueta:
-        comando += ["-n", etiqueta]
-    comando.append(str(device.path))
-
-    prefijo = [] if os.geteuid() == 0 else ["pkexec"]
-    resultado = run(prefijo + comando, capture_output=True, text=True, timeout=300)
+    comando = _privileged_format_command(device, normalize_fat_label(label),
+                                         sectors_per_cluster)
+    resultado = run(comando, capture_output=True, text=True, timeout=600)
     if resultado.returncode != 0:
+        detalle = resultado.stderr.strip()
+        guardia = _FORMAT_EXIT_ERRORS.get(resultado.returncode)
+        if guardia is not None:
+            clase, mensaje = guardia
+            raise clase(mensaje.format(dev=device.path)
+                        + ": se aborta el formateo por seguridad, sin haber "
+                        "escrito nada." + (f" ({detalle})" if detalle else ""))
+        if comando[0] == "pkexec" and resultado.returncode in _PKEXEC_NOT_AUTHORIZED:
+            raise RuntimeError(
+                "No se obtuvo autorización para formatear (se canceló o "
+                "falló la contraseña). No se tocó el dispositivo."
+                + (f" ({detalle})" if detalle else ""))
         raise RuntimeError(
-            resultado.stderr.strip() or "mkfs.vfat terminó con error desconocido.")
+            detalle or "El formateo terminó con un error desconocido.")
 
-    return _mount_after_format(device.path, run=run, timeout=mount_timeout)
+    particiones = partitions_of(device.path, run=run)
+    reportada = next((linea.partition("=")[2] for linea in resultado.stdout.splitlines()
+                      if linea.startswith("PARTICION=")), None)
+    if len(particiones) != 1 or (reportada and Path(reportada) != particiones[0]):
+        raise RuntimeError(
+            f"{device.path} se formateó, pero no se encontró la partición "
+            f"nueva (lsblk: {[str(p) for p in particiones]}, script: {reportada}).")
+
+    punto_montaje = _mount_as_user(particiones[0], run=run, timeout=mount_timeout)
+    _check_mount_writable(punto_montaje)
+    return punto_montaje
 
 
 def format_as_wii_usb(device: BlockDevice, *, run=subprocess.run,
                       label: str = WII_USB_LABEL,
                       sectors_per_cluster: int = WII_USB_SECTORS_PER_CLUSTER,
                       mount_timeout: float = 15.0) -> Path:
-    """Modo Fábrica: `format_fat32` (todos los blindajes + mkfs + montar)
-    y encima la estructura de carpetas que esperan USB Loader GX y
-    Nintendont.
+    """Modo Fábrica: `format_fat32` (todos los blindajes + particionar +
+    mkfs + montar como el usuario) y encima la estructura de carpetas que
+    esperan USB Loader GX y Nintendont, creada ya sin privilegios.
 
     Todo lo peligroso pasa en `format_fat32`; lo único propio de Modo
     Fábrica que queda acá es lo específico de Wii: el clúster de 32 KB, la
