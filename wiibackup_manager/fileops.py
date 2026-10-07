@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import atomicfs, wit_wrapper
+from . import atomicfs, fsutil, wit_wrapper
 
 
 def free_variant(path: Path) -> Path:
@@ -126,27 +126,47 @@ def _copy_with_progress(
     intercambio (una copia de varios GB a un USB sí necesita durabilidad,
     a diferencia de una carátula que se puede volver a bajar) y el
     `copystat`, que es lo que la hace equivalente a `shutil.copy2` -y lo
-    que fija los permisos del resultado, copiados del origen."""
+    que fija los permisos del resultado, copiados del origen.
+
+    La escritura va acotada con `fsutil.BoundedWriteback`: nunca hay más
+    de ~16 MiB en la caché sin bajar a la unidad. Sin eso, con RAM de
+    sobra el bucle terminaba en un segundo (todo quedaba en la caché) y el
+    tiempo real -minutos, en un pendrive lento- se iba en el `fsync`
+    final, que no se puede interrumpir: cancelar no hacía nada y la copia
+    terminaba como "Completado". Así, la cancelación se mira mientras la
+    unidad trabaja, y un temporal cancelado se borra con lo que no llegó a
+    bajar todavía descartado de la caché en vez de escrito."""
+    def cortar_si_cancelaron() -> None:
+        if cancel is not None and cancel.cancelled:
+            raise wit_wrapper.OperationCancelled(
+                "Transferencia cancelada por el usuario."
+            )
+
     written = 0
     last_report = time.monotonic()
     with atomicfs.atomic_write_stream(
             dest, fsync=True,
             before_replace=lambda tmp: shutil.copystat(src, tmp)) as (fdst, _tmp):
+        bajada = fsutil.BoundedWriteback(fdst.fileno())
         with open(src, "rb") as fsrc:
             while True:
-                if cancel is not None and cancel.cancelled:
-                    raise wit_wrapper.OperationCancelled(
-                        "Transferencia cancelada por el usuario."
-                    )
+                cortar_si_cancelaron()
                 buf = fsrc.read(_COPY_CHUNK_BYTES)
                 if not buf:
                     break
                 fdst.write(buf)
                 written += len(buf)
+                fdst.flush()
+                bajada.advance(written)
                 now = time.monotonic()
                 if now - last_report >= 1.0:
                     progress_cb(written)
                     last_report = now
+        # Lo que queda sin bajar es, como mucho, dos ventanas: esperar esto
+        # es corto. Recién después se mira por última vez si cancelaron, y
+        # el `fsync` de `atomic_write_stream` ya no tiene datos que bajar.
+        bajada.finish()
+        cortar_si_cancelaron()
     progress_cb(written)
 
 
@@ -199,7 +219,7 @@ def copy_no_replace(src: Path, dest: Path) -> None:
         raise
 
 
-def flush_and_drop_cache(paths) -> None:
+def flush_and_drop_cache(paths, cancel=None) -> None:
     """Baja a la unidad lo que quede en caché de cada archivo de `paths` y
     después le pide al kernel que olvide sus páginas.
 
@@ -215,10 +235,21 @@ def flush_and_drop_cache(paths) -> None:
     Un error del `fsync` se propaga: es la unidad diciendo que no pudo
     guardar lo que se le mandó, y eso no se puede tragar en silencio. Que
     el kernel no haga caso del `fadvise` no rompe nada -VERIFY lee de la
-    caché como antes-, así que ese sí se ignora."""
+    caché como antes-, así que ese sí se ignora.
+
+    Con `cancel`, cada archivo se baja de a una ventana por vez
+    (`fsutil.flush_in_windows`) mirando el token entre una y otra, y si lo
+    cancelaron levanta `OperationCancelled`: un `fsync` de una sola vez
+    sobre lo que dejó `wit` puede tardar minutos en un pendrive lento, y
+    mientras tanto no hay forma de cortarlo."""
+    cancelado = (lambda: cancel is not None and cancel.cancelled)
     for path in paths:
         fd = os.open(path, os.O_RDONLY)
         try:
+            if not fsutil.flush_in_windows(fd, os.fstat(fd).st_size,
+                                           cancelado):
+                raise wit_wrapper.OperationCancelled(
+                    "Transferencia cancelada por el usuario.")
             os.fsync(fd)
             try:
                 os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)

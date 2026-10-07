@@ -7,7 +7,7 @@ msgstr ""
 "Project-Id-Version: WiiBackup Manager\n"
 "Report-Msgid-Bugs-To: https://github.com/KendryGod/wiibackup-manager-linux/"
 "issues\n"
-"POT-Creation-Date: 2026-10-07 07:11-0600\n"
+"POT-Creation-Date: 2026-10-07 07:44-0600\n"
 "PO-Revision-Date: 2026-08-30 05:58-0600\n"
 "Last-Translator: GameFix SPS\n"
 "Language-Team: English\n"
@@ -459,28 +459,33 @@ msgstr "sync {t}"
 msgid "verificación {t}"
 msgstr "verification {t}"
 
-#: wiibackup_manager/queue_manager.py:319
+#: wiibackup_manager/queue_manager.py:290
+#: wiibackup_manager/widgets/memory_check_view.py:469
+msgid "Cancelando…"
+msgstr "Cancelling…"
+
+#: wiibackup_manager/queue_manager.py:325
 msgid "`wit` no dio detalle"
 msgstr "`wit` gave no details"
 
-#: wiibackup_manager/queue_manager.py:730
+#: wiibackup_manager/queue_manager.py:750
 #, python-brace-format
 msgid "En espera: {op}"
 msgstr "Waiting: {op}"
 
-#: wiibackup_manager/queue_manager.py:744
+#: wiibackup_manager/queue_manager.py:764
 #: wiibackup_manager/widgets/homebrew_store_view.py:536
 #: wiibackup_manager/widgets/memory_check_view.py:370
 msgid "Preparando…"
 msgstr "Preparing…"
 
-#: wiibackup_manager/queue_manager.py:757
+#: wiibackup_manager/queue_manager.py:777
 #, python-brace-format
 msgid "No entra en el destino: necesita {need} y quedan {free}."
 msgstr ""
 "It does not fit on the destination: it needs {need} and only {free} is left."
 
-#: wiibackup_manager/queue_manager.py:812
+#: wiibackup_manager/queue_manager.py:832
 #, python-brace-format
 msgid ""
 "No se encontró `wit` ({binary}). Instalalo o configurá la ruta en "
@@ -488,62 +493,63 @@ msgid ""
 msgstr ""
 "`wit` was not found ({binary}). Install it or set its path in Preferences."
 
-#: wiibackup_manager/queue_manager.py:872
+#: wiibackup_manager/queue_manager.py:892
 msgid "sin verificar: `wit VERIFY` solo acepta imágenes de Wii"
 msgstr "not verified: `wit VERIFY` only accepts Wii images"
 
-#: wiibackup_manager/queue_manager.py:882
+#: wiibackup_manager/queue_manager.py:902
 msgid "Releyendo lo copiado…"
 msgstr "Reading back what was copied…"
 
-#: wiibackup_manager/queue_manager.py:905
+#: wiibackup_manager/queue_manager.py:925
+#: wiibackup_manager/queue_manager.py:994
 msgid "verificación cancelada"
 msgstr "verification cancelled"
 
-#: wiibackup_manager/queue_manager.py:909
+#: wiibackup_manager/queue_manager.py:929
 msgid "no se pudo verificar: no se encontró `wit`"
 msgstr "could not verify: `wit` was not found"
 
-#: wiibackup_manager/queue_manager.py:916
+#: wiibackup_manager/queue_manager.py:936
 #, python-brace-format
 msgid "no se pudo verificar: {detail}"
 msgstr "could not verify: {detail}"
 
-#: wiibackup_manager/queue_manager.py:921
+#: wiibackup_manager/queue_manager.py:941
 msgid "la verificación no terminó a tiempo: el archivo quedó sin comprobar"
 msgstr "verification did not finish in time: the file was left unverified"
 
-#: wiibackup_manager/queue_manager.py:929
+#: wiibackup_manager/queue_manager.py:949
 #, python-brace-format
 msgid "Se copió entero, pero al releerlo no pasó la verificación: {detail}"
 msgstr ""
 "It copied in full, but did not pass verification when read back: {detail}"
 
-#: wiibackup_manager/queue_manager.py:939
+#: wiibackup_manager/queue_manager.py:959
 #, python-brace-format
 msgid "verificado ({n} archivo)"
 msgid_plural "verificado ({n} archivos)"
 msgstr[0] "verified ({n} file)"
 msgstr[1] "verified ({n} files)"
 
-#: wiibackup_manager/queue_manager.py:941
+#: wiibackup_manager/queue_manager.py:961
 msgid "verificado"
 msgstr "verified"
 
-#: wiibackup_manager/queue_manager.py:966
+#: wiibackup_manager/queue_manager.py:986
 msgid "Sincronizando…"
 msgstr "Syncing…"
 
-#: wiibackup_manager/queue_manager.py:978
+#: wiibackup_manager/queue_manager.py:1006
 #, python-brace-format
 msgid "La unidad no terminó de guardar la copia: {detail}"
 msgstr "The drive did not finish saving the copy: {detail}"
 
-#: wiibackup_manager/queue_manager.py:997
+#: wiibackup_manager/queue_manager.py:1025
 msgid "Calculando tamaño…"
 msgstr "Calculating size…"
 
-#: wiibackup_manager/queue_manager.py:1028 wiibackup_manager/window.py:1314
+#: wiibackup_manager/queue_manager.py:1056 wiibackup_manager/window.py:1314
 #, python-brace-format
 msgid " · ~{eta} restantes"
 msgstr " · ~{eta} remaining"
@@ -1122,10 +1128,6 @@ msgstr "{eta} left"
 msgid "Verificación cancelada."
 msgstr "Check cancelled."
 
-#: wiibackup_manager/widgets/memory_check_view.py:469
-msgid "Cancelando…"
-msgstr "Cancelling…"
-
 #: wiibackup_manager/widgets/memory_check_view.py:510
 msgid "Se desconectó la memoria"
 msgstr "The memory was disconnected"
@@ -1563,7 +1565,9 @@ msgstr "Generate"
 msgid ""
 "Todavía no cargaste los datos de tu taller: el ticket va a salir sin nombre, "
 "logo ni WhatsApp. Se cargan en Ajustes → General → Mi taller."
-msgstr "You haven't entered your shop details yet: the receipt will come out without a name, logo or WhatsApp. Enter them in Settings → General → My shop."
+msgstr ""
+"You haven't entered your shop details yet: the receipt will come out without "
+"a name, logo or WhatsApp. Enter them in Settings → General → My shop."
 
 #: wiibackup_manager/widgets/ticket_dialog.py:65
 msgid "Datos del ticket"

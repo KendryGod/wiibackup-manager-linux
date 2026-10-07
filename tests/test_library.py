@@ -939,9 +939,15 @@ def test_flush_and_drop_cache_hace_fsync_y_despues_descarta(tmp_path, monkeypatc
 
     fileops.flush_and_drop_cache(partes)
 
-    assert [c[0] for c in llamadas] == ["fsync", "fadvise"] * 2
-    for _fsync, fadvise in zip(llamadas[::2], llamadas[1::2]):
-        assert fadvise[1:] == (_fsync[1], 0, 0, os.POSIX_FADV_DONTNEED)
+    # Cada archivo termina con su `fsync` y, recién después, el DONTNEED
+    # del archivo entero. Antes de eso puede haber DONTNEED por tramos
+    # (`fsutil.flush_in_windows`), pero cada uno va DESPUÉS de esperar a
+    # que ese tramo esté en la unidad, o sea sobre páginas ya limpias.
+    fsyncs = [i for i, c in enumerate(llamadas) if c[0] == "fsync"]
+    assert len(fsyncs) == 2
+    for i in fsyncs:
+        fd = llamadas[i][1]
+        assert llamadas[i + 1] == ("fadvise", fd, 0, 0, os.POSIX_FADV_DONTNEED)
 
 
 def test_flush_and_drop_cache_no_se_traga_un_fsync_que_falla(tmp_path, monkeypatch):

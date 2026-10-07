@@ -284,6 +284,12 @@ def _pending_writeback_bytes() -> Optional[int]:
 _BUSY_RETRY_SECONDS = 0.5
 
 
+def _CANCELANDO() -> str:
+    """Texto de una tarea cancelada que todavía se está cerrando. Función y
+    no constante para que se traduzca en el idioma activo al mostrarse."""
+    return _("Cancelando…")
+
+
 def _format_speed(bytes_per_second: float) -> str:
     """Velocidad legible.
 
@@ -559,6 +565,12 @@ class TransferQueue:
                 job.speed_text = ""
                 job.finished_at = time.monotonic()
                 self._tally["cancelled"] += 1
+            else:
+                # En curso: el hilo de fondo la cierra apenas pueda (entre
+                # dos ventanas de escritura, al morir `wit`), pero eso puede
+                # tardar un momento. La fila lo dice YA, para que el botón
+                # no parezca no haber hecho nada.
+                job.speed_text = _CANCELANDO()
             self._wake.notify_all()
         self._emit(job)
         return True
@@ -600,7 +612,15 @@ class TransferQueue:
         """Único lugar donde se le escribe a un `TransferJob`, y único lugar
         desde donde sale un aviso a la interfaz. Que sea uno solo es lo que
         garantiza la regla del módulo: no hay cambio de estado sin
-        `GLib.idle_add`."""
+        `GLib.idle_add`.
+
+        Una tarea cancelada que todavía no terminó de cerrarse sigue
+        diciendo "Cancelando…": un aviso de progreso que llega tarde (la
+        velocidad, "Sincronizando…") no puede taparlo y hacer parecer que
+        la cancelación no se tomó."""
+        if ("speed_text" in cambios and job.cancel_token.cancelled
+                and not cambios.get("status", job.status).is_final):
+            cambios["speed_text"] = _CANCELANDO()
         with self._lock:
             for campo, valor in cambios.items():
                 setattr(job, campo, valor)
@@ -966,7 +986,15 @@ class TransferQueue:
         self._update(job, speed_text=_("Sincronizando…"))
         inicio = time.monotonic()
         try:
-            fileops.flush_and_drop_cache(archivos)
+            fileops.flush_and_drop_cache(archivos, cancel=job.cancel_token)
+        except wit_wrapper.OperationCancelled:
+            # Igual que cancelar la relectura (ver `_verify_copy`): la
+            # copia ya había terminado y el juego está en la unidad, así
+            # que lo que se cancela es la verificación, no la copia.
+            job.verify_note = _("verificación cancelada")
+            self._finish_job(job, JobStatus.DONE, "", oplog.STATUS_PARTIAL,
+                             op=op)
+            return False
         except OSError as e:
             if drives.device_is_gone(known_dir=job.dest_root, exc=e):
                 self._finish_job(job, JobStatus.DEVICE_DISCONNECTED,

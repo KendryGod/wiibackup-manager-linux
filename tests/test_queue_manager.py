@@ -818,7 +818,7 @@ def test_antes_de_verificar_se_baja_y_descarta_cada_parte(
 
     eventos = []
 
-    def _flush(paths):
+    def _flush(paths, cancel=None):
         paths = list(paths)
         eventos.append(("sync", paths))
         time.sleep(0.05)
@@ -870,7 +870,7 @@ def test_un_fsync_que_falla_no_llega_a_verificar(make_game, tmp_path, monkeypatc
     monkeypatch.setattr(transfer_plan, "free_space", lambda path: 10 ** 12)
     _sin_wit_para_copiar(monkeypatch)
 
-    def _eio(_paths):
+    def _eio(_paths, cancel=None):
         raise OSError(5, "Input/output error")
     monkeypatch.setattr(queue_manager.fileops, "flush_and_drop_cache", _eio)
     monkeypatch.setattr(queue_manager.drives, "device_is_gone",
