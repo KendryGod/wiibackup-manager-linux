@@ -82,7 +82,7 @@ class Settings:
     # Se guardan como lista de diccionarios y no como dataclass propia para
     # que el config.json siga siendo legible y editable a mano.
     dest_presets: list = field(default_factory=list)
-    # Si se inyecta `--rm UPDATE` al convertir con `wit` (descarta la
+    # Si se inyecta `--psel=-UPDATE` al convertir con `wit` (descarta la
     # partición de actualización del disco, que USB Loader GX/Nintendont
     # no usan): ahorra espacio en el destino a costa de que ese juego ya
     # no pueda actualizarse desde el propio disco. Activado por defecto

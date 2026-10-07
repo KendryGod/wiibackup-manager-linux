@@ -595,7 +595,7 @@ def convert(
     sana sigue adelante (ver `WIT_INACTIVITY_TIMEOUT`). `absolute_timeout`
     queda como última red de seguridad.
 
-    `scrub_update=True` (default) agrega `--rm UPDATE`: descarta la
+    `scrub_update=True` (default) agrega `--psel=-UPDATE`: descarta la
     partición de actualización del disco de origen, que USB Loader
     GX/Nintendont no usan para nada y que en algunos juegos pesa varios
     cientos de MB. Es la opción "Optimizar espacio (Scrubbing)" de
@@ -616,7 +616,14 @@ def convert(
     if split:
         args += ["--split-size", _SPLIT_SIZE_ARG]
     if scrub_update:
-        args += ["--rm", "UPDATE"]
+        # `--psel` (selector de particiones) y NO `--rm`: wit acepta
+        # abreviaturas de opciones largas y expande `--rm` a `--rm-files`,
+        # un filtro de ARCHIVOS que exige reglas con prefijo +/-/: y corta
+        # con "ERROR #108 ... => UPDATE" antes de copiar nada. Con una sola
+        # regla DENY, `--psel` habilita todas las demás particiones (datos
+        # y canales). Va pegado con `=` para que el "-" de la regla no se
+        # lea como otra opción.
+        args.append("--psel=-UPDATE")
     args += [str(src), "--dest", str(dest)]
 
     # UN SOLO camino de ejecución, haya o no callbacks. Antes, sin progreso

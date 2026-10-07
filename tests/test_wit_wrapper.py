@@ -212,3 +212,50 @@ def test_isosize_que_se_queda_sin_tiempo_devuelve_none(monkeypatch, tmp_path):
     monkeypatch.setattr(wit_wrapper, "_run", _run_timeout)
 
     assert wit_wrapper.iso_size_bytes(tmp_path / "juego.iso") is None
+
+
+# ------------------------------------------- Scrubbing de la partición UPDATE --
+# Con `--rm UPDATE`, wit expandía `--rm` a `--rm-files` (filtro de archivos)
+# y cortaba con "ERROR #108 ... File pattern rule must begin with '+', '-'
+# or ':' => UPDATE": TODA transferencia de un juego de Wii fallaba con el
+# scrubbing activado, que es el valor por defecto.
+def _args_de_convert(monkeypatch, tmp_path, **kwargs) -> list[str]:
+    visto = {}
+
+    def _espia(args, dest, *_a, **_k):
+        visto["args"] = list(args)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(wit_wrapper, "find_wit", lambda b: "/usr/bin/wit")
+    monkeypatch.setattr(wit_wrapper, "_run_with_progress", _espia)
+    wit_wrapper.convert(tmp_path / "juego.wbfs", tmp_path / "out" / "x.wbfs",
+                        "WBFS", **kwargs)
+    return visto["args"]
+
+
+def test_convert_descarta_update_con_el_selector_de_particiones(monkeypatch, tmp_path):
+    args = _args_de_convert(monkeypatch, tmp_path, scrub_update=True)
+    assert "--psel=-UPDATE" in args
+    assert "--rm" not in args
+    assert not any(a.startswith("--rm") for a in args)
+
+
+def test_convert_sin_scrubbing_no_selecciona_particiones(monkeypatch, tmp_path):
+    args = _args_de_convert(monkeypatch, tmp_path, scrub_update=False)
+    assert not any(a.startswith("--psel") for a in args)
+
+
+@pytest.mark.skipif(wit_wrapper.find_wit("wit") is None, reason="wit no instalado")
+def test_el_wit_real_acepta_la_opcion_de_scrubbing(monkeypatch, tmp_path):
+    """Contra el binario de verdad: con un origen inexistente, wit tiene
+    que llegar a quejarse del ARCHIVO (no poder abrirlo), lo que prueba que
+    pasó el parseo de opciones. Con `--rm UPDATE` cortaba antes, con el
+    error de sintaxis #108."""
+    wit_real = wit_wrapper.find_wit("wit")
+    args = _args_de_convert(monkeypatch, tmp_path, scrub_update=True)
+    args[0] = wit_real
+    real = subprocess.run(args, capture_output=True, text=True, timeout=30)
+    salida = real.stdout + real.stderr
+    assert real.returncode != 0
+    assert "SYNTAX ERROR" not in salida
+    assert "CAN'T OPEN FILE" in salida
