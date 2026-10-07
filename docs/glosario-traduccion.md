@@ -131,6 +131,7 @@ Los casos que hay hoy:
 |---|---|
 | `Use 'Clear finished' to send them again.` | el botón **Clear finished** |
 | `that is what Factory Mode is for` | la sección **Factory Mode** |
+| `Settings → General → My shop` (aviso del Ticket) | la página **Settings**, su pestaña **General** y el grupo **My shop** |
 
 Al agregar un mensaje que mencione otra parte de la interfaz, sumarlo acá.
 

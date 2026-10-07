@@ -785,14 +785,17 @@ class TransferView(Gtk.Box):
 
     def _on_ticket_clicked(self, *_args):
         """Paso 1 de 3: pedirle a la persona el nombre del cliente, los
-        datos de la consola y las notas. Los otros dos pasos son elegir dónde guardar el PDF y
-        generarlo."""
+        datos de la consola y las notas. Los otros dos pasos son elegir
+        dónde guardar el PDF y generarlo."""
         if self._dest_path is None:
             return
+        from .. import pdf_export
         from .ticket_dialog import TicketDialog
 
+        sin_taller = pdf_export.ShopProfile.from_settings(self.settings).is_empty()
         dialog = TicketDialog(self._dest_path.name or str(self._dest_path),
-                              self._on_ticket_details)
+                              self._on_ticket_details,
+                              shop_missing=sin_taller)
         dialog.present(self)
 
     def _on_ticket_details(self, client_name: str, notes: str, console):
@@ -841,13 +844,15 @@ class TransferView(Gtk.Box):
                     console=console,
                     title_lookup=lambda gid: gametdb.cached_title(gid, region))
                 pdf_export.render_ticket(datos, destino, taller)
-                GLib.idle_add(self._on_ticket_done, destino, None)
+                GLib.idle_add(self._on_ticket_done, destino, None,
+                              taller.is_empty())
             except Exception as e:  # noqa: BLE001 - se le muestra al usuario
                 GLib.idle_add(self._on_ticket_done, destino, str(e))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_ticket_done(self, destino: Path, error: str | None):
+    def _on_ticket_done(self, destino: Path, error: str | None,
+                        sin_taller: bool = False):
         self._update_ticket_button()
         if error is not None:
             self._show_toast(
@@ -860,18 +865,24 @@ class TransferView(Gtk.Box):
         # quedó bien guardado y el aviso dice dónde.
         launcher = Gtk.FileLauncher.new(Gio.File.new_for_path(str(destino)))
         launcher.launch(self.get_root(), None,
-                        lambda l, r: self._on_ticket_opened(l, r, destino))
+                        lambda l, r: self._on_ticket_opened(l, r, destino,
+                                                            sin_taller))
         return False
 
-    def _on_ticket_opened(self, launcher, result, destino: Path):
+    def _on_ticket_opened(self, launcher, result, destino: Path,
+                          sin_taller: bool = False):
         try:
             launcher.launch_finish(result)
+            mensaje = _("Ticket guardado en {ruta}").format(ruta=destino)
         except Exception:
-            self._show_toast(
-                _("Ticket guardado en {ruta} (no se pudo abrir el visor de "
-                  "PDF).").format(ruta=destino))
-            return
-        self._show_toast(_("Ticket guardado en {ruta}").format(ruta=destino))
+            mensaje = _("Ticket guardado en {ruta} (no se pudo abrir el visor "
+                        "de PDF).").format(ruta=destino)
+        if sin_taller:
+            # El ticket salió con el encabezado neutro, sin logo ni
+            # WhatsApp: que se sepa dónde cargarlos antes del próximo.
+            mensaje += " " + _("Salió sin los datos del taller: cargalos en "
+                               "Ajustes → General → Mi taller.")
+        self._show_toast(mensaje)
 
     def _update_eject_button(self):
         if self._dest_path is not None and drives.is_mount_point(self._dest_path):

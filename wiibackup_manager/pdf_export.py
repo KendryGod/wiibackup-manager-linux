@@ -201,6 +201,12 @@ class ShopProfile:
     accent: str = config.DEFAULT_ACCENT_COLOR
     theme: str = config.TICKET_THEME_DARK
 
+    def is_empty(self) -> bool:
+        """True si no se cargó NADA del taller: el ticket sale con el
+        encabezado neutro y sin WhatsApp, y vale la pena avisarlo."""
+        return not any((self.name, self.slogan, self.location,
+                        self.whatsapp, self.logo_path))
+
     @classmethod
     def from_settings(cls, settings: config.Settings) -> "ShopProfile":
         accent = settings.shop_accent_color

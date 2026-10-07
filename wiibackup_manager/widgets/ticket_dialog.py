@@ -29,7 +29,8 @@ class TicketDialog(Adw.Dialog):
     de qué lleva la unidad. Ver `pdf_export._dibujar`, que arma la hoja sin
     dejar huecos cuando alguno falta."""
 
-    def __init__(self, drive_label: str, on_generate):
+    def __init__(self, drive_label: str, on_generate,
+                 shop_missing: bool = False):
         super().__init__()
         self.on_generate = on_generate
         self.set_title(_("Ticket de entrega"))
@@ -48,6 +49,16 @@ class TicketDialog(Adw.Dialog):
         header.pack_end(generate_btn)
 
         toolbar.add_top_bar(header)
+
+        # Sin datos del taller el ticket sale igual, pero con un
+        # encabezado neutro y sin WhatsApp ni QR: se avisa ANTES de
+        # generarlo, no cuando el cliente ya lo recibió.
+        self.shop_banner = Adw.Banner(
+            title=_("Todavía no cargaste los datos de tu taller: el ticket va "
+                    "a salir sin nombre, logo ni WhatsApp. Se cargan en "
+                    "Ajustes → General → Mi taller."),
+            revealed=shop_missing)
+        toolbar.add_top_bar(self.shop_banner)
 
         page = Adw.PreferencesPage()
         group = Adw.PreferencesGroup(

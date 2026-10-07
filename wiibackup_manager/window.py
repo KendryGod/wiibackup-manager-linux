@@ -54,6 +54,7 @@ from .widgets.log_view import LogView
 from .widgets.memory_check_view import MemoryCheckView
 from .widgets import gtk_helpers
 from .widgets.preferences_dialog import PreferencesDialog
+from .widgets.shop_settings import ShopSettingsGroup
 from .widgets.recovery_dialog import RecoveryDialog, summary_text
 from .widgets.transfer_view import TransferView
 
@@ -737,6 +738,13 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                                         self._on_verify_switch_toggled)
         group.add(self._verify_switch_row)
         general_page.add(group)
+
+        # Los datos con los que se firma el Ticket de Entrega. Van acá, en
+        # la página que la gente abre para configurar la app, y no en el
+        # diálogo de Preferencias del menú.
+        self._shop_group = ShopSettingsGroup(self.settings,
+                                             self._save_ajustes)
+        general_page.add(self._shop_group)
         self._ajustes_stack.add_titled_with_icon(
             general_page, "general", _("General"), "preferences-system-symbolic")
 
@@ -746,6 +754,13 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
         toolbar_view.set_content(self._ajustes_stack)
         self._content_stack.add_named(toolbar_view, "ajustes")
+
+    def _save_ajustes(self):
+        error = config.try_save(self.settings)
+        if error:
+            self._show_toast(
+                _("No se pudo guardar la configuración: {error}. El cambio "
+                  "vale para esta sesión.").format(error=error))
 
     def _on_scrub_switch_toggled(self, row, _pspec):
         self.settings.scrub_update = row.get_active()

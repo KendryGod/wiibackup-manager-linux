@@ -854,3 +854,41 @@ def test_la_columna_de_al_lado_no_repite_el_total(tmp_path):
     # El 11 aparece en el resumen ("11 Wii") y en el encabezado original;
     # una tercera vez sería el total repetido.
     assert len(re.findall(r"(?<![\w/])11(?![\w/])", texto)) == 2
+
+
+# ================================================== Aviso sin taller --
+def test_un_taller_sin_datos_esta_vacio():
+    assert pdf_export.ShopProfile().is_empty()
+    assert pdf_export.ShopProfile.from_settings(config.Settings()).is_empty()
+    assert not _taller().is_empty()
+    assert not pdf_export.ShopProfile(whatsapp=NUMERO_FICTICIO).is_empty()
+
+
+def _toast_al_terminar(sin_taller: bool, visor_ok: bool = True) -> list:
+    """El handler real de la vista, contra un `self` de mentira."""
+    from wiibackup_manager.widgets import transfer_view
+
+    toasts = []
+    vista = types.SimpleNamespace(_show_toast=toasts.append)
+
+    class Lanzador:
+        def launch_finish(self, _r):
+            if not visor_ok:
+                raise RuntimeError("sin visor")
+
+    transfer_view.TransferView._on_ticket_opened(
+        vista, Lanzador(), None, Path("/x/Ticket.pdf"), sin_taller)
+    return toasts
+
+
+def test_el_aviso_final_dice_si_salio_sin_datos_del_taller():
+    (aviso,) = _toast_al_terminar(sin_taller=True)
+    assert "Ticket guardado en /x/Ticket.pdf" in aviso
+    assert "Ajustes → General → Mi taller" in aviso
+    (aviso,) = _toast_al_terminar(sin_taller=True, visor_ok=False)
+    assert "no se pudo abrir el visor" in aviso and "Mi taller" in aviso
+
+
+def test_con_datos_del_taller_no_hay_aviso():
+    (aviso,) = _toast_al_terminar(sin_taller=False)
+    assert "Mi taller" not in aviso

@@ -4,8 +4,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-gi.require_version("Gdk", "4.0")
-from gi.repository import Adw, Gdk, Gio, Gtk  # noqa: E402
+from gi.repository import Adw, Gtk  # noqa: E402
 
 from .. import config, styles, wit_wrapper
 from ..i18n import _
@@ -82,118 +81,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
         scheme_row.connect("notify::selected", self._on_scheme_changed)
         group4.add(scheme_row)
 
-        self._build_shop_group(page)
-
         self.connect("closed", lambda *_a: self.on_saved(self.settings))
-
-    # ------------------------------------------------------ Mi taller --
-    # Los datos con los que se firma el Ticket de Entrega. Se guardan en la
-    # configuración del usuario como el resto de las preferencias (al
-    # cerrar el diálogo, ver `on_saved`) y nunca en el código: la app la
-    # usan talleres distintos.
-    _TICKET_THEMES = (config.TICKET_THEME_DARK, config.TICKET_THEME_LIGHT)
-
-    def _build_shop_group(self, page):
-        group = Adw.PreferencesGroup(
-            title=_("Mi taller"),
-            description=_("Datos que se imprimen en el Ticket de Entrega."),
-        )
-        page.add(group)
-
-        def entry(title, attr, transform=None):
-            row = Adw.EntryRow(title=title)
-            row.set_text(getattr(self.settings, attr))
-
-            def on_changed(r):
-                texto = r.get_text()
-                setattr(self.settings, attr,
-                        transform(texto) if transform else texto)
-            row.connect("changed", on_changed)
-            group.add(row)
-            return row
-
-        entry(_("Nombre del taller"), "shop_name")
-        entry(_("Eslogan"), "shop_slogan")
-        entry(_("Ubicación"), "shop_location")
-        whatsapp = entry(_("WhatsApp (con código de país, solo números)"),
-                         "shop_whatsapp", config.clean_whatsapp)
-        whatsapp.set_input_purpose(Gtk.InputPurpose.PHONE)
-
-        self._logo_row = Adw.ActionRow(title=_("Logo"))
-        self._logo_row.set_use_markup(False)
-        self._update_logo_subtitle()
-        clear_btn = Gtk.Button(icon_name="edit-clear-symbolic",
-                               valign=Gtk.Align.CENTER,
-                               tooltip_text=_("Quitar el logo"))
-        clear_btn.add_css_class("flat")
-        clear_btn.connect("clicked", self._clear_logo)
-        pick_btn = Gtk.Button(icon_name="document-open-symbolic",
-                              valign=Gtk.Align.CENTER,
-                              tooltip_text=_("Elegir imagen"))
-        pick_btn.connect("clicked", self._pick_logo)
-        self._logo_row.add_suffix(clear_btn)
-        self._logo_row.add_suffix(pick_btn)
-        group.add(self._logo_row)
-
-        color_row = Adw.ActionRow(title=_("Color de acento"))
-        color_btn = Gtk.ColorDialogButton(
-            dialog=Gtk.ColorDialog(with_alpha=False), valign=Gtk.Align.CENTER)
-        rgba = Gdk.RGBA()
-        if not rgba.parse(self.settings.shop_accent_color):
-            rgba.parse(config.DEFAULT_ACCENT_COLOR)
-        color_btn.set_rgba(rgba)
-        color_btn.connect("notify::rgba", self._on_accent_changed)
-        color_row.add_suffix(color_btn)
-        group.add(color_row)
-
-        theme_row = Adw.ComboRow(title=_("Modo del ticket"))
-        theme_row.set_model(Gtk.StringList.new(
-            [_("Oscuro (marca)"), _("Claro (para imprimir)")]))
-        try:
-            theme_row.set_selected(
-                self._TICKET_THEMES.index(self.settings.ticket_theme))
-        except ValueError:
-            theme_row.set_selected(0)
-        theme_row.connect("notify::selected", self._on_ticket_theme_changed)
-        group.add(theme_row)
-
-    def _update_logo_subtitle(self):
-        self._logo_row.set_subtitle(
-            self.settings.shop_logo_path
-            or _("Sin logo: se imprime el nombre del taller"))
-
-    def _pick_logo(self, *_args):
-        dialog = Gtk.FileDialog(title=_("Elegí el logo del taller"))
-        filtro = Gtk.FileFilter()
-        filtro.set_name(_("Imágenes"))
-        filtro.add_mime_type("image/*")
-        filtros = Gio.ListStore.new(Gtk.FileFilter)
-        filtros.append(filtro)
-        dialog.set_filters(filtros)
-        dialog.open(self.get_root(), None, self._on_logo_picked)
-
-    def _on_logo_picked(self, dialog, result):
-        try:
-            archivo = dialog.open_finish(result)
-        except Exception:
-            return
-        if archivo and archivo.get_path():
-            self.settings.shop_logo_path = archivo.get_path()
-            self._update_logo_subtitle()
-
-    def _clear_logo(self, *_args):
-        self.settings.shop_logo_path = ""
-        self._update_logo_subtitle()
-
-    def _on_accent_changed(self, button, _param):
-        c = button.get_rgba()
-        self.settings.shop_accent_color = "#{:02X}{:02X}{:02X}".format(
-            round(c.red * 255), round(c.green * 255), round(c.blue * 255))
-
-    def _on_ticket_theme_changed(self, row, _param):
-        idx = row.get_selected()
-        if 0 <= idx < len(self._TICKET_THEMES):
-            self.settings.ticket_theme = self._TICKET_THEMES[idx]
 
     def _pick_library_folder(self, *_args):
         dialog = Gtk.FileDialog(title=_("Elegí la carpeta de tu biblioteca"))

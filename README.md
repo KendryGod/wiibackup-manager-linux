@@ -75,7 +75,7 @@ todo lo que hizo.
   apps de homebrew, capacidad usada/libre y formato-, con el nombre del
   cliente, los datos de la consola y notas, para mandárselo por WhatsApp al
   entregar el equipo. Lleva la marca de tu taller (nombre, eslogan, logo,
-  color y WhatsApp con código QR), que se carga en **Preferencias → Mi
+  color y WhatsApp con código QR), que se carga en **Ajustes → General → Mi
   taller**; tiene un modo oscuro con la marca y uno claro para imprimir
 - **Verificación después de copiar** (opcional, apagada por defecto): al
   terminar cada juego lo vuelve a leer de la unidad con `wit VERIFY` para

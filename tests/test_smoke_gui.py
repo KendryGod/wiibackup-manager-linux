@@ -106,6 +106,11 @@ def test_la_ventana_se_arma_y_se_muestra(gtk, tmp_path, monkeypatch):
                     if win._content_stack.get_child_by_name(pid) is not None
                 }
                 resultado["filas_sidebar"] = [pid for pid, _icon, _lbl in win._sidebar_items]
+                # "Mi taller" (los datos del Ticket de Entrega) vive en la
+                # página Ajustes, que es la que se abre desde el sidebar.
+                ajustes = win._content_stack.get_child_by_name("ajustes")
+                resultado["mi_taller_en_ajustes"] = (
+                    win._shop_group.is_ancestor(ajustes))
             finally:
                 self.quit()
             return False
@@ -120,6 +125,7 @@ def test_la_ventana_se_arma_y_se_muestra(gtk, tmp_path, monkeypatch):
     assert not resultado.get("colgada"), "la app no terminó de arrancar"
     assert resultado.get("visible") is True
     assert "WiiBackup Manager" in resultado.get("titulo", "")
+    assert resultado.get("mi_taller_en_ajustes") is True
     assert resultado.get("paginas") == {"juegos", "cola", "memoria", "fabrica",
                                         "tienda", "ajustes"}
     assert resultado.get("filas_sidebar") == ["juegos", "cola", "memoria",
