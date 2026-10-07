@@ -70,10 +70,13 @@ todo lo que hizo.
 - Expulsión segura de la unidad desde la app
 - Progreso real, tiempo estimado y cancelación de verdad (corta la copia en
   el momento, no cuando termina el archivo)
-- **Ticket de entrega**: genera un PDF de una página con el resumen de lo
-  que lleva la unidad (juegos de Wii, de GameCube, apps de homebrew,
-  capacidad usada/libre y formato), con el nombre del cliente y notas, para
-  mandárselo por WhatsApp al entregar el equipo
+- **Ticket de entrega**: genera un PDF con el resumen de lo que lleva la
+  unidad -la lista de juegos de Wii y de GameCube con su título e ID, las
+  apps de homebrew, capacidad usada/libre y formato-, con el nombre del
+  cliente, los datos de la consola y notas, para mandárselo por WhatsApp al
+  entregar el equipo. Lleva la marca de tu taller (nombre, eslogan, logo,
+  color y WhatsApp con código QR), que se carga en **Preferencias → Mi
+  taller**; tiene un modo oscuro con la marca y uno claro para imprimir
 - **Verificación después de copiar** (opcional, apagada por defecto): al
   terminar cada juego lo vuelve a leer de la unidad con `wit VERIFY` para
   confirmar que lo que quedó escrito está bien, y no solo que la copia
@@ -134,6 +137,16 @@ todo lo que hizo.
 - **`f3` (Fight Flash Fraud)** — opcional. Hace falta solo para "Verificar
   Memoria"; sin él, esa página avisa que falta instalarlo y el resto de la
   app funciona igual.
+- **Una librería de códigos QR** — opcional. Con ella, el Ticket de Entrega
+  lleva un QR que abre el chat de WhatsApp del taller; sin ella, el ticket
+  sale igual con el número en texto. En Fedora: `sudo dnf install
+  python3-qrcode`. También sirve `segno` (`pip install --user segno`, o
+  `pip install ".[qr]"` al instalar la app), que es la que la app prueba
+  primero. Las dos son Python puro.
+- **Fuentes del ticket** — opcional. El ticket pide Outfit o Lexend para
+  los títulos e Inter para el texto, y si no están cae a Montserrat,
+  Cantarell o la sans del sistema: nunca queda un hueco. Para el aspecto
+  ideal en Fedora: `sudo dnf install rsms-inter-fonts`.
 
 ## Instalación paso a paso
 
@@ -484,7 +497,7 @@ wiibackup_manager/
 ├── oplog.py                      # Historial persistente de operaciones
 ├── ticket_service.py             # Ticket de entrega: qué contiene una unidad preparada
 ├── recovery_service.py           # Restos de operaciones interrumpidas: buscarlos, restaurar, limpiar
-├── pdf_export.py                 # Dibuja el ticket en un PDF (vía cairo, sin dependencias nuevas)
+├── pdf_export.py                 # Dibuja el ticket en un PDF (vía cairo; QR opcional)
 ├── styles.py                     # CSS propio y esquema de color (claro/oscuro)
 └── widgets/
     ├── game_row.py               # Fila de juego en la lista de la Biblioteca
@@ -492,7 +505,7 @@ wiibackup_manager/
     ├── preferences_dialog.py     # Diálogo de Preferencias
     ├── transfer_view.py          # Pestaña Transferir: destinos y copia a WBFS
     ├── memory_check_view.py      # Verificar Memoria: prueba con f3 + formateo FAT32
-    ├── ticket_dialog.py          # Pide cliente y notas antes de generar el ticket
+    ├── ticket_dialog.py          # Pide cliente, datos de la consola y notas antes de generar el ticket
     ├── recovery_dialog.py        # Lista los restos encontrados y sus acciones
     ├── log_view.py               # Pestaña Log: historial de operaciones
     └── gtk_helpers.py            # Utilidades chicas compartidas por diálogos de GTK

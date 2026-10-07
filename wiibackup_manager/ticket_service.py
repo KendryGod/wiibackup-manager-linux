@@ -2,7 +2,7 @@
 
 Para qué existe
 ---------------
-Cuando GameFix SPS entrega una Wii con su USB/SD, el cliente se va con un
+Cuando el taller entrega una Wii con su USB/SD, el cliente se va con un
 pendrive del que no puede ver el contenido por su cuenta: no tiene una PC
 a mano, y aunque la tuviera, "wbfs/RMCP01/RMCP01.wbfs" no le dice nada.
 El ticket es el resumen legible de esa entrega -cuántos juegos, cuánto
@@ -31,20 +31,25 @@ Por la ESTRUCTURA de carpetas que la app ya construye al copiar
 `oscwii_installer`), y no abriendo cada archivo con `wit` como hace
 `scanning.scan_library`. Son dos trabajos distintos: el escaneo identifica
 juego por juego -título, ID, formato- y para eso paga el precio de leer
-headers; el ticket solo necesita CUÁNTOS hay, y hacerlo por estructura es
-inmediato, no depende de que `wit` esté instalado, y funciona sobre una
-unidad llena de juegos grandes sin leer un solo byte de contenido.
+headers; el ticket solo necesita CUÁLES hay (ID y un título legible), y
+hacerlo por estructura es inmediato, no depende de que `wit` esté
+instalado, y funciona sobre una unidad llena de juegos grandes sin leer un
+solo byte de contenido. El ID sale de los nombres que arma la app y el
+título de la caché de GameTDB (ver `collect_ticket_data`).
 """
 from __future__ import annotations
 
 import os
+import re
 import shutil
-from dataclasses import dataclass
+import unicodedata
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
 from . import drives
+from .disc_header import is_valid_game_id
 from .game_model import VALID_EXTENSIONS, sanitize_filename
 
 # Las tres carpetas de primer nivel que la app crea en una unidad
@@ -113,10 +118,76 @@ def _es_archivo_de_juego(entry) -> bool:
         return False
 
 
-def count_wii_games(drive_root: Path) -> int:
-    """Juegos de Wii en `wbfs/`.
+# Consolas de la lista de juegos. Son las mismas claves que usa
+# `game_model.Game.console`, para que el día que el ticket necesite cruzar
+# datos con la biblioteca no haya que traducir de un vocabulario a otro.
+CONSOLE_WII = "wii"
+CONSOLE_GAMECUBE = "gc"
 
-    Se cuentan ARCHIVOS de juego y no carpetas, porque las dos
+# "Título del juego [ID6]": así nombra las carpetas `transfer_plan.gc_dest_path`
+# y así las nombran también USB Loader GX y Nintendont en las unidades que
+# vienen de otras herramientas.
+_ID_EN_CARPETA = re.compile(r"\s*\[([A-Za-z0-9]{6})\]\s*$")
+
+# Nintendont arranca un juego por el `game.iso` (o `game.ciso`) de su
+# carpeta. Una carpeta con solo `disc2.iso` es una entrega a medias -falta
+# el disco que la consola busca primero- y no se lista como juego.
+_GAMECUBE_PRINCIPALES = ("game.iso", "game.ciso")
+
+TitleLookup = Callable[[str], Optional[str]]
+
+
+@dataclass(frozen=True)
+class GameEntry:
+    """Un juego de la lista del ticket: consola, ID6 (vacío si no se pudo
+    averiguar) y el título que se imprime."""
+
+    console: str
+    game_id: str
+    title: str
+
+
+def _sin_id(nombre: str) -> str:
+    """`nombre` sin el sufijo " [ID6]", que en el ticket va en su propia
+    columna y repetirlo al lado del título sería ruido."""
+    return _ID_EN_CARPETA.sub("", nombre).strip()
+
+
+def _id_de_carpeta(nombre: str) -> str:
+    m = _ID_EN_CARPETA.search(nombre)
+    return m.group(1).upper() if m else ""
+
+
+def _orden_alfabetico(entrada: GameEntry):
+    """Clave de orden sin mayúsculas ni acentos: "Épica" va con la E y no
+    después de la Z, que es donde la deja un orden por código Unicode."""
+    base = unicodedata.normalize("NFKD", entrada.title)
+    base = "".join(ch for ch in base if not unicodedata.combining(ch))
+    return (base.casefold(), entrada.game_id)
+
+
+def _titulo(game_id: str, respaldo: str, title_lookup: TitleLookup) -> str:
+    """El título de GameTDB si lo hay; si no, el nombre de la carpeta. Un
+    fallo de la búsqueda no rompe el ticket: el respaldo siempre está."""
+    if game_id:
+        try:
+            titulo = title_lookup(game_id)
+        except Exception:  # noqa: BLE001 - el título es un adorno
+            titulo = None
+        if titulo:
+            return titulo
+    return respaldo or game_id
+
+
+def _sin_titulos(_game_id: str) -> Optional[str]:
+    return None
+
+
+def list_wii_games(drive_root: Path,
+                   title_lookup: TitleLookup = _sin_titulos) -> list:
+    """Juegos de Wii en `wbfs/`, ordenados por título.
+
+    Se listan ARCHIVOS de juego y no carpetas, porque las dos
     disposiciones que se ven en la práctica tienen que dar lo mismo: la
     que arma esta app y esperan los USB Loaders
     (`wbfs/<ID6>/<ID6>.wbfs`, ver `transfer_plan.wbfs_dest_path`) y la plana
@@ -127,45 +198,88 @@ def count_wii_games(drive_root: Path) -> int:
     `transfer_plan.wbfs_group`) cuenta UNA vez sin necesidad de un caso
     especial: las partes tienen extensión `.wbf1`, `.wbf2`... que no está
     en `VALID_EXTENSIONS`, así que solo entra el `.wbfs` que las
-    encabeza."""
+    encabeza.
+
+    El ID sale del nombre del archivo (así lo nombra la app y así lo
+    buscan los USB Loaders) y, si ese nombre no es un ID, del "[ID6]" de
+    la carpeta."""
     raiz = Path(drive_root) / WII_DIR
-    total = 0
+    juegos = []
+
+    def agregar(archivo, carpeta: str = ""):
+        stem = Path(archivo.name).stem
+        game_id = stem.upper() if is_valid_game_id(stem) else _id_de_carpeta(carpeta)
+        respaldo = _sin_id(carpeta) if carpeta else _sin_id(stem)
+        juegos.append(GameEntry(CONSOLE_WII, game_id,
+                                _titulo(game_id, respaldo, title_lookup)))
+
     for entry in _entradas(raiz):
         if _es_archivo_de_juego(entry):
-            total += 1
+            agregar(entry)
             continue
         try:
-            if entry.is_dir():
-                total += sum(1 for sub in _entradas(Path(entry.path))
-                             if _es_archivo_de_juego(sub))
+            if not entry.is_dir():
+                continue
         except OSError:
             continue
-    return total
+        for sub in _entradas(Path(entry.path)):
+            if _es_archivo_de_juego(sub):
+                agregar(sub, entry.name)
+    return sorted(juegos, key=_orden_alfabetico)
 
 
-def count_gamecube_games(drive_root: Path) -> int:
-    """Juegos de GameCube en `games/`.
+def _es_principal_gamecube(entry) -> bool:
+    try:
+        return entry.is_file() and entry.name.lower() in _GAMECUBE_PRINCIPALES
+    except OSError:
+        return False
 
-    Acá se cuentan CARPETAS y no archivos, al revés que en Wii, porque esa
+
+def list_gamecube_games(drive_root: Path,
+                        title_lookup: TitleLookup = _sin_titulos) -> list:
+    """Juegos de GameCube en `games/`, ordenados por título.
+
+    Acá se listan CARPETAS y no archivos, al revés que en Wii, porque esa
     es la estructura de Nintendont: `games/<Título [ID6]>/game.iso`, y un
     juego de dos discos son dos archivos (`game.iso` y `disc2.iso`)
     adentro de LA MISMA carpeta (ver `transfer_plan.gc_dest_path`). Contando
     archivos, un juego multidisco se entregaría como si fueran dos juegos
     distintos.
 
-    Se pide que la carpeta tenga adentro al menos un archivo de juego:
-    una carpeta vacía es un resto de algo borrado, no un juego."""
+    Se pide que la carpeta tenga un `game.iso` o `game.ciso` TERMINADO:
+    una carpeta vacía es un resto de algo borrado, y una copia a medio
+    escribir es un `.game.iso.parcial-*` oculto (ver
+    `atomicfs.MARCA_PARCIAL`) que `_entradas` ya deja afuera, igual que
+    los respaldos de `DestinationGuard`."""
     raiz = Path(drive_root) / GAMECUBE_DIR
-    total = 0
+    juegos = []
     for entry in _entradas(raiz):
         try:
             if not entry.is_dir():
                 continue
         except OSError:
             continue
-        if any(_es_archivo_de_juego(sub) for sub in _entradas(Path(entry.path))):
-            total += 1
-    return total
+        if not any(_es_principal_gamecube(sub)
+                   for sub in _entradas(Path(entry.path))):
+            continue
+        game_id = _id_de_carpeta(entry.name)
+        juegos.append(GameEntry(CONSOLE_GAMECUBE, game_id,
+                                _titulo(game_id, _sin_id(entry.name),
+                                        title_lookup)))
+    return sorted(juegos, key=_orden_alfabetico)
+
+
+def count_wii_games(drive_root: Path) -> int:
+    """Cuántos juegos de Wii hay: los mismos que lista `list_wii_games`,
+    para que el número del ticket y la lista impresa nunca se
+    contradigan."""
+    return len(list_wii_games(drive_root))
+
+
+def count_gamecube_games(drive_root: Path) -> int:
+    """Cuántos juegos de GameCube hay, con el mismo criterio que
+    `list_gamecube_games`."""
+    return len(list_gamecube_games(drive_root))
 
 
 def count_homebrew_apps(drive_root: Path) -> int:
@@ -214,6 +328,25 @@ def collect_contents(drive_root: Path) -> DriveContents:
     )
 
 
+@dataclass(frozen=True)
+class ConsoleInfo:
+    """Lo que el técnico anota de la consola que se entrega. Todo
+    opcional: un campo vacío no se imprime (ver `pdf_export`)."""
+
+    model: str = ""
+    serial: str = ""
+    system_version: str = ""
+    service: str = ""
+
+    def stripped(self) -> "ConsoleInfo":
+        return ConsoleInfo(self.model.strip(), self.serial.strip(),
+                           self.system_version.strip(), self.service.strip())
+
+    def is_empty(self) -> bool:
+        return not any((self.model, self.serial, self.system_version,
+                        self.service))
+
+
 def filesystem_label(fstype: Optional[str]) -> str:
     """Nombre presentable del filesystem. `None` -es lo que devuelve
     `drives.filesystem_of` cuando no pudo determinarlo con confianza- se
@@ -243,6 +376,10 @@ class TicketData:
     free_bytes: int
     filesystem: str
     contents: DriveContents
+    console: ConsoleInfo = ConsoleInfo()
+    # Wii primero y GameCube después, cada grupo en orden alfabético. Tupla
+    # por lo mismo que `frozen`: es una foto y no se edita.
+    games: tuple = field(default_factory=tuple)
 
     @property
     def used_ratio(self) -> Optional[float]:
@@ -257,9 +394,11 @@ def collect_ticket_data(
     *,
     client_name: str = "",
     notes: str = "",
+    console: Optional[ConsoleInfo] = None,
     now: Optional[datetime] = None,
     usage: Callable = shutil.disk_usage,
     filesystem: Callable = drives.filesystem_of,
+    title_lookup: Optional[TitleLookup] = None,
 ) -> TicketData:
     """Reúne todo lo del ticket para la unidad montada en `drive_root`.
 
@@ -279,8 +418,16 @@ def collect_ticket_data(
     Si no se puede leer el espacio (la unidad se desconectó entre que el
     usuario apretó el botón y esto corrió), los tres tamaños quedan en 0
     en vez de fallar: el resto del ticket -que es lo que le importa al
-    cliente- sigue siendo válido."""
+    cliente- sigue siendo válido.
+
+    `title_lookup(game_id)` da el título de cada juego de la lista; por
+    defecto es `gametdb.cached_title`, que mira solo la copia de GameTDB
+    que ya está en la caché y nunca descarga. Sin título, queda el nombre
+    de la carpeta."""
     drive_root = Path(drive_root)
+    if title_lookup is None:
+        from . import gametdb
+        title_lookup = gametdb.cached_title
     try:
         medida = usage(drive_root)
         total_bytes, free_bytes = medida.total, medida.free
@@ -295,6 +442,9 @@ def collect_ticket_data(
     # pendrive NO puede usar.
     used_bytes = max(total_bytes - free_bytes, 0)
 
+    wii = list_wii_games(drive_root, title_lookup)
+    gamecube = list_gamecube_games(drive_root, title_lookup)
+
     return TicketData(
         client_name=client_name.strip(),
         notes=notes.strip(),
@@ -305,7 +455,13 @@ def collect_ticket_data(
         used_bytes=used_bytes,
         free_bytes=free_bytes,
         filesystem=filesystem_label(filesystem(drive_root)),
-        contents=collect_contents(drive_root),
+        contents=DriveContents(
+            wii_games=len(wii),
+            gamecube_games=len(gamecube),
+            homebrew_apps=count_homebrew_apps(drive_root),
+        ),
+        console=(console or ConsoleInfo()).stripped(),
+        games=tuple(wii + gamecube),
     )
 
 

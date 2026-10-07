@@ -428,7 +428,7 @@ def test_un_fallo_al_dibujar_no_deja_un_pdf_cortado(tmp_path, monkeypatch):
     """Se escribe con `atomicfs.atomic_write_target`, así que un error a
     mitad del dibujo no puede dejar media hoja con el nombre del archivo
     definitivo: el cliente no puede recibir un ticket truncado."""
-    def boom(_ctx, _data):
+    def boom(*_args):
         raise RuntimeError("simulado: falló el dibujo")
 
     monkeypatch.setattr(pdf_export, "_dibujar", boom)

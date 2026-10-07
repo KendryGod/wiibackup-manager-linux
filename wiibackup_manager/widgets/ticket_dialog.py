@@ -1,5 +1,6 @@
-"""Diálogo que pide los dos datos que el Ticket de Entrega no puede
-deducir solo: a nombre de quién va y qué aclaración lleva.
+"""Diálogo que pide los datos que el Ticket de Entrega no puede deducir
+solo: a nombre de quién va, qué consola se entrega y qué aclaración
+lleva.
 
 Todo lo demás del ticket -cuántos juegos, cuánto espacio, el formato de la
 unidad- lo averigua `ticket_service` leyendo la unidad. Acá solo se
@@ -15,17 +16,18 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 from ..i18n import _
+from ..ticket_service import ConsoleInfo
 
 
 class TicketDialog(Adw.Dialog):
-    """Pide nombre de cliente y notas, y llama a `on_generate(nombre,
-    notas)` si el usuario confirma.
+    """Pide nombre de cliente, datos de la consola y notas, y llama a
+    `on_generate(nombre, notas, consola)` si el usuario confirma.
 
-    Los dos campos son OPCIONALES a propósito y el botón de generar nunca
+    Todos los campos son OPCIONALES a propósito y el botón de generar nunca
     se apaga: el caso más común en el mostrador es entregar rápido y sin
     cargar nada, y un ticket sin nombre sigue siendo un comprobante útil
     de qué lleva la unidad. Ver `pdf_export._dibujar`, que arma la hoja sin
-    dejar huecos cuando alguno de los dos falta."""
+    dejar huecos cuando alguno falta."""
 
     def __init__(self, drive_label: str, on_generate):
         super().__init__()
@@ -59,6 +61,18 @@ class TicketDialog(Adw.Dialog):
         self.name_row = Adw.EntryRow(title=_("Nombre del cliente"))
         group.add(self.name_row)
 
+        console_group = Adw.PreferencesGroup(
+            title=_("Datos de la consola"),
+            description=_("Opcionales: lo que quede vacío no se imprime."))
+        page.add(console_group)
+        self.model_row = Adw.EntryRow(title=_("Modelo"))
+        self.serial_row = Adw.EntryRow(title=_("Número de serie"))
+        self.system_row = Adw.EntryRow(title=_("Versión del sistema"))
+        self.service_row = Adw.EntryRow(title=_("Servicio realizado"))
+        for row in (self.model_row, self.serial_row, self.system_row,
+                    self.service_row):
+            console_group.add(row)
+
         # Las notas van en un TextView y no en otra EntryRow porque son
         # texto libre de varias líneas ("incluye 2 controles", "revisar
         # lector en 6 meses"), y una fila de una línea invitaría a
@@ -91,7 +105,13 @@ class TicketDialog(Adw.Dialog):
     def _on_generate_clicked(self, *_args):
         nombre = self.name_row.get_text()
         notas = self._notes_text()
+        consola = ConsoleInfo(
+            model=self.model_row.get_text(),
+            serial=self.serial_row.get_text(),
+            system_version=self.system_row.get_text(),
+            service=self.service_row.get_text(),
+        )
         # Cerrar ANTES de avisar: lo que sigue abre un selector de archivo,
         # y dejar este diálogo abierto atrás apilaría dos ventanas modales.
         self.close()
-        self.on_generate(nombre, notas)
+        self.on_generate(nombre, notas, consola)

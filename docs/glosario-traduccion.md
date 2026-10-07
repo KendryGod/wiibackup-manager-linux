@@ -69,6 +69,8 @@ minúscula.
 | trucho | fake |
 | configuración maestra | master configuration |
 | ticket | receipt |
+| taller (Ajustes → Mi taller) | shop (**My shop**) |
+| (continuación) | (continued) |
 | expulsar | eject |
 
 "Memoria" es el único con un matiz: suelto es *memory* ("The memory is
@@ -150,8 +152,9 @@ PO=data/locale/en/LC_MESSAGES/wiibackup-manager.po
 
 # 1. Entradas con msgstr idéntico al msgid: casi todas tienen que ser
 #    nombres propios de la lista de arriba. La excepción son las palabras
-#    que en inglés se escriben igual -Error, General, Log, Publisher,
-#    Developer- y las cadenas que son puro marcador ("{n} ok"). Cualquier
+#    que en inglés se escriben igual -Error, General, Log, Logo, Publisher,
+#    Developer- y las cadenas que son puro marcador ("{n} ok", "{wii} Wii ·
+#    {gc} GameCube · {hb} Homebrew"). Cualquier
 #    OTRA cosa es una cadena que se pasó por alto.
 msgattrib --no-obsolete --translated --no-wrap "$PO" \
   | awk '/^msgid /{id=substr($0,7)}

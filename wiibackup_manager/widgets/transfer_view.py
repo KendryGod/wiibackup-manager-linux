@@ -784,8 +784,8 @@ class TransferView(Gtk.Box):
             )
 
     def _on_ticket_clicked(self, *_args):
-        """Paso 1 de 3: pedirle a la persona el nombre del cliente y las
-        notas. Los otros dos pasos son elegir dónde guardar el PDF y
+        """Paso 1 de 3: pedirle a la persona el nombre del cliente, los
+        datos de la consola y las notas. Los otros dos pasos son elegir dónde guardar el PDF y
         generarlo."""
         if self._dest_path is None:
             return
@@ -795,7 +795,7 @@ class TransferView(Gtk.Box):
                               self._on_ticket_details)
         dialog.present(self)
 
-    def _on_ticket_details(self, client_name: str, notes: str):
+    def _on_ticket_details(self, client_name: str, notes: str, console):
         """Paso 2: dónde guardar el PDF. El nombre propuesto lo arma el
         servicio (lleva cliente y fecha), así que la vista no decide cómo
         se llama el archivo, solo lo ofrece."""
@@ -806,10 +806,10 @@ class TransferView(Gtk.Box):
         dialog.set_initial_folder(gtk_helpers.safe_initial_folder())
         dialog.save(self.get_root(), None,
                     lambda d, r: self._on_ticket_file_chosen(d, r, client_name,
-                                                              notes))
+                                                              notes, console))
 
     def _on_ticket_file_chosen(self, dialog, result, client_name: str,
-                               notes: str):
+                               notes: str, console):
         try:
             archivo = dialog.save_finish(result)
         except Exception:
@@ -821,6 +821,12 @@ class TransferView(Gtk.Box):
 
         destino = Path(archivo.get_path())
         origen = self._dest_path
+        # Se toman AHORA, en el hilo de GTK: el worker no tiene que leer
+        # `self.settings` mientras el diálogo de Ajustes lo puede estar
+        # cambiando.
+        region = self.settings.cover_region
+        from .. import pdf_export
+        taller = pdf_export.ShopProfile.from_settings(self.settings)
         self.ticket_button.set_sensitive(False)
 
         def worker():
@@ -829,10 +835,12 @@ class TransferView(Gtk.Box):
             `findmnt` (un subproceso con timeout), y las dos cosas pueden
             tardar lo suficiente como para congelar la ventana."""
             try:
-                from .. import pdf_export, ticket_service
+                from .. import gametdb, ticket_service
                 datos = ticket_service.collect_ticket_data(
-                    origen, client_name=client_name, notes=notes)
-                pdf_export.render_ticket(datos, destino)
+                    origen, client_name=client_name, notes=notes,
+                    console=console,
+                    title_lookup=lambda gid: gametdb.cached_title(gid, region))
+                pdf_export.render_ticket(datos, destino, taller)
                 GLib.idle_add(self._on_ticket_done, destino, None)
             except Exception as e:  # noqa: BLE001 - se le muestra al usuario
                 GLib.idle_add(self._on_ticket_done, destino, str(e))

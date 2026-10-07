@@ -14,6 +14,12 @@ dependencies = [
     "PyGObject>=3.42",
 ]
 
+[project.optional-dependencies]
+# Código QR del Ticket de Entrega (abre el chat de WhatsApp del taller).
+# Opcional: sin esto el ticket sale igual, con el número en texto. En
+# Fedora también sirve el paquete del sistema `python3-qrcode`.
+qr = ["segno>=1.5"]
+
 [project.scripts]
 wiibackup-manager = "wiibackup_manager.app:main"
 

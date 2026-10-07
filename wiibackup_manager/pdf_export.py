@@ -1,4 +1,4 @@
-"""Dibuja el Ticket de Entrega en un PDF de una página.
+"""Dibuja el Ticket de Entrega en PDF.
 
 Por qué acá y no en `ticket_service`
 ------------------------------------
@@ -18,102 +18,797 @@ acentos y la "ñ" que un generador de PDF hecho a mano tendría que
 resolver a mano. Sumar reportlab o fpdf para esto sería pedirle al
 usuario que instale algo más para imprimir una hoja.
 
-El diseño apunta a WhatsApp
----------------------------
-Una sola página, tipografía grande y bloques separados: el cliente lo va
-a abrir en el celular, no a imprimirlo. Por eso los números que importan
--cuántos juegos, cuánto espacio- van grandes y no en una tabla apretada.
+La marca es del taller, no del código
+-------------------------------------
+Nombre, eslogan, ubicación, WhatsApp, logo y color salen de `ShopProfile`,
+que se arma con lo que cada taller cargó en Ajustes ("Mi taller"). Con
+todo vacío el ticket sale igual, con un encabezado neutro: la app la usan
+talleres distintos y ninguno tiene que imprimir el nombre de otro.
+
+Dos modos
+---------
+"Oscuro" es el de la marca, pensado para abrirse en el celular por
+WhatsApp. "Claro" es para imprimir: fondo blanco, mismos acentos
+(oscurecidos donde son texto, para que se lean sobre blanco), y el nombre
+del taller como texto, porque un logo pensado para fondo oscuro se ve mal
+o directamente no se ve sobre papel.
+
+Tipografía
+----------
+No se empaqueta ninguna fuente: Pango acepta una LISTA de familias y usa
+la primera que esté instalada, así que se piden en orden de preferencia
+(Outfit/Lexend, geométricas y redondeadas, para títulos; Inter para el
+texto) con respaldos que vienen en cualquier escritorio GNOME. Nunca queda
+un hueco: si no hay ninguna, fontconfig cae a "Sans".
+
+QR opcional
+-----------
+El código que abre el chat de WhatsApp se arma con `segno` o, si no está,
+con `qrcode` (`python3-qrcode` en Fedora). Las dos son Python puro y
+ninguna es obligatoria: sin ellas el ticket sale igual, con el número en
+texto. Los módulos se dibujan como vectores (nítidos a cualquier zoom)
+sobre una tarjeta BLANCA: un QR claro sobre fondo oscuro -invertido- no
+lo leen muchas cámaras.
 """
 from __future__ import annotations
 
+import io
+import urllib.parse
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 import cairo
 import gi
 
 gi.require_version("Pango", "1.0")
 gi.require_version("PangoCairo", "1.0")
+gi.require_version("GdkPixbuf", "2.0")
 
-from gi.repository import Pango, PangoCairo  # noqa: E402
+from gi.repository import GdkPixbuf, Pango, PangoCairo  # noqa: E402
 
-from . import atomicfs  # noqa: E402
-from .i18n import _  # noqa: E402
+from . import atomicfs, config  # noqa: E402
 from .formatting import format_size  # noqa: E402
-from .ticket_service import TicketData  # noqa: E402
+from .i18n import _  # noqa: E402
+from .ticket_service import (CONSOLE_GAMECUBE, CONSOLE_WII,  # noqa: E402
+                             TicketData)
 
 # A4 en puntos PostScript (72 por pulgada), que es la unidad en la que
-# trabaja cairo. A4 y no Carta porque es el tamaño de papel de Argentina,
-# donde se entregan estos equipos.
+# trabaja cairo. Es el mismo formato que tuvo siempre el ticket.
 PAGE_WIDTH = 595.276
 PAGE_HEIGHT = 841.89
-MARGIN = 56.0  # ~2 cm
+MARGIN = 40.0
+CONTENT_WIDTH = PAGE_WIDTH - 2 * MARGIN
 
-# Gris de la marca y grises de apoyo. Se definen como constantes y no
-# sueltos en el código para que cambiar el look sea tocar un solo bloque.
-_TINTA = (0.11, 0.12, 0.14)
-_TENUE = (0.45, 0.47, 0.50)
-_LINEA = (0.85, 0.86, 0.88)
-_ACENTO = (0.13, 0.39, 0.71)
+# Familias en orden de preferencia (ver "Tipografía" arriba).
+FONT_TITLE = "Outfit, Lexend, Montserrat, Inter, Cantarell, Sans"
+FONT_BODY = "Inter, Adwaita Sans, Cantarell, Noto Sans, DejaVu Sans, Sans"
+FONT_MONO = "Adwaita Mono, DejaVu Sans Mono, Noto Sans Mono, Monospace"
+
+# Lista de juegos: dos columnas de filas de alto fijo, para que la
+# paginación sea una cuenta y no una prueba y error.
+ROW_HEIGHT = 17.0
+LIST_COLUMNS = 2
+LIST_GUTTER = 14.0
+
+# Caja máxima del logo en el encabezado.
+LOGO_MAX_WIDTH = 340.0
+LOGO_MAX_HEIGHT = 110.0
 
 
-def _texto(ctx, x: float, y: float, texto: str, *, font: str = "Sans 11",
-           color=_TINTA, ancho: float = None) -> float:
-    """Dibuja `texto` con la esquina superior izquierda en (x, y) y
-    devuelve la altura que ocupó, para que quien llama sepa dónde sigue.
+def _hex(value: str) -> tuple:
+    return config.parse_hex_color(value) or (0.0, 0.0, 0.0)
 
-    Devolver la altura -en vez de que cada bloque calcule su propio salto-
-    es lo que permite que las secciones opcionales (cliente, notas) entren
-    o no sin dejar un hueco: el que sigue arranca donde terminó el
-    anterior, midiendo de verdad y no con un número fijo. Las notas, que
-    son texto libre del usuario y pueden ocupar varias líneas, dependen de
-    eso."""
+
+def _mezcla(a: tuple, b: tuple, t: float) -> tuple:
+    """`a` llevado hacia `b` en una fracción `t` (0 = a, 1 = b)."""
+    return tuple(x + (y - x) * t for x, y in zip(a, b))
+
+
+@dataclass(frozen=True)
+class _Paleta:
+    fondo: tuple
+    fondo_arriba: tuple   # degradé sutil del encabezado
+    fondo_abajo: tuple    # resplandor del pie
+    texto: tuple
+    tenue: tuple
+    ubicacion: tuple
+    etiqueta: tuple       # etiquetas de sección
+    eslogan: tuple
+    acento: tuple         # líneas, barra, detalles
+    acento_texto: tuple   # el acento cuando ES texto
+    destacado: tuple      # fondo de los encabezados de grupo
+    fila_alterna: tuple
+    linea: tuple
+    pista: tuple          # fondo de la barra de uso
+
+
+def _paleta(theme: str, accent: str) -> _Paleta:
+    """Colores medidos sobre el flyer de referencia (fondo #00000C con
+    un degradé hacia #0B0720, morado #A97FF8, eslogan #F0B0F0, etiquetas
+    #94DCD6). El acento lo elige cada taller; lo que se deriva de él
+    -el fondo de los encabezados de grupo- se calcula, así cambiar el
+    color en Ajustes cambia todo el ticket de forma coherente."""
+    acento = _hex(accent)
+    if theme == config.TICKET_THEME_LIGHT:
+        blanco = (1.0, 1.0, 1.0)
+        return _Paleta(
+            fondo=blanco, fondo_arriba=blanco, fondo_abajo=blanco,
+            texto=_hex("#15131F"), tenue=_hex("#5E5A70"),
+            ubicacion=_hex("#4A4658"),
+            # Las versiones claras del teal y del eslogan no llegan a 3:1
+            # sobre blanco; estas son el mismo tono, oscurecido.
+            etiqueta=_hex("#1B7A73"), eslogan=_hex("#8C4A9E"),
+            acento=acento, acento_texto=_mezcla(acento, (0, 0, 0), 0.35),
+            destacado=_mezcla(acento, blanco, 0.82),
+            fila_alterna=_hex("#F3F1F8"), linea=_hex("#DCD8E6"),
+            pista=_hex("#E8E5F0"),
+        )
+    fondo = _hex("#02030F")
+    return _Paleta(
+        fondo=fondo, fondo_arriba=_hex("#0B0720"), fondo_abajo=_hex("#0D0826"),
+        texto=_hex("#FFFFFF"), tenue=_hex("#9C98B4"),
+        ubicacion=_hex("#EDEAE0"),
+        etiqueta=_hex("#94DCD6"), eslogan=_hex("#E9A8EE"),
+        acento=acento, acento_texto=acento,
+        destacado=_mezcla(fondo, acento, 0.30),
+        fila_alterna=_hex("#0B0B22"), linea=_hex("#2A2840"),
+        pista=_hex("#1C1A30"),
+    )
+
+
+@dataclass(frozen=True)
+class ShopProfile:
+    """Los datos del taller con los que se firma el ticket. Ver
+    `config.Settings` ("Mi taller")."""
+
+    name: str = ""
+    slogan: str = ""
+    location: str = ""
+    whatsapp: str = ""
+    logo_path: str = ""
+    accent: str = config.DEFAULT_ACCENT_COLOR
+    theme: str = config.TICKET_THEME_DARK
+
+    @classmethod
+    def from_settings(cls, settings: config.Settings) -> "ShopProfile":
+        accent = settings.shop_accent_color
+        if config.parse_hex_color(accent) is None:
+            accent = config.DEFAULT_ACCENT_COLOR
+        theme = settings.ticket_theme
+        if theme not in config.TICKET_THEMES:
+            theme = config.TICKET_THEME_DARK
+        return cls(
+            name=settings.shop_name.strip(),
+            slogan=settings.shop_slogan.strip(),
+            location=settings.shop_location.strip(),
+            whatsapp=config.clean_whatsapp(settings.shop_whatsapp),
+            logo_path=settings.shop_logo_path.strip(),
+            accent=accent,
+            theme=theme,
+        )
+
+
+def format_whatsapp(digits: str) -> str:
+    """"50400001111" -> "+504 0000 1111": bloques de cuatro desde la
+    derecha, que es como se agrupa casi cualquier número local, y el
+    resto adelante como código de país. No pretende saber el formato de
+    cada país; solo que el número se pueda leer y dictar."""
+    digits = config.clean_whatsapp(digits)
+    if not digits:
+        return ""
+    bloques = []
+    while len(digits) > 4:
+        bloques.insert(0, digits[-4:])
+        digits = digits[:-4]
+    bloques.insert(0, digits)
+    return "+" + " ".join(bloques)
+
+
+def whatsapp_url(digits: str, message: str = "") -> str:
+    url = f"https://wa.me/{config.clean_whatsapp(digits)}"
+    if message:
+        url += "?text=" + urllib.parse.quote(message, safe="")
+    return url
+
+
+def qr_matrix(text: str) -> Optional[list]:
+    """Módulos del QR de `text` como filas de booleanos (sin zona de
+    silencio), o None si no hay ninguna librería de QR instalada. Ver
+    "QR opcional" arriba."""
+    try:
+        import segno
+    except ImportError:
+        segno = None
+    if segno is not None:
+        qr = segno.make_qr(text, error="m")
+        return [[bool(m) for m in fila] for fila in qr.matrix]
+    try:
+        import qrcode
+        from qrcode.constants import ERROR_CORRECT_M
+    except ImportError:
+        return None
+    qr = qrcode.QRCode(border=0, error_correction=ERROR_CORRECT_M)
+    qr.add_data(text)
+    qr.make(fit=True)
+    return [[bool(m) for m in fila] for fila in qr.get_matrix()]
+
+
+# ------------------------------------------------------------- Texto --
+def _layout(ctx, texto: str, font: str, *, ancho: float = None,
+            espaciado: float = 0.0, max_lineas: int = 0,
+            alinear=Pango.Alignment.LEFT):
+    """Un layout de Pango listo para medir o dibujar.
+
+    El texto entra con `set_text` y nunca como markup: el nombre del
+    cliente o el título de un juego pueden traer "&" o "<", que en markup
+    rompen el dibujo. `max_lineas` corta con "…" en vez de dejar que el
+    texto invada lo que sigue; con 1, un título largo no se sale de su
+    columna."""
     layout = PangoCairo.create_layout(ctx)
-    layout.set_font_description(Pango.FontDescription(font))
+    # 72 ppp: así "11" en la descripción de fuente son 11 puntos de la
+    # hoja, y no 11 * 96/72 como da el valor por defecto de Pango.
+    PangoCairo.context_set_resolution(layout.get_context(), 72)
+    layout.set_font_description(Pango.FontDescription.from_string(font))
     if ancho is not None:
         layout.set_width(int(ancho * Pango.SCALE))
         layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+        if max_lineas:
+            layout.set_height(-max_lineas)
+            layout.set_ellipsize(Pango.EllipsizeMode.END)
+    layout.set_alignment(alinear)
+    if espaciado:
+        attrs = Pango.AttrList()
+        attrs.insert(Pango.attr_letter_spacing_new(int(espaciado * Pango.SCALE)))
+        layout.set_attributes(attrs)
     layout.set_text(texto, -1)
+    return layout
+
+
+def _medida(layout) -> tuple:
+    _tinta, logica = layout.get_extents()
+    return logica.width / Pango.SCALE, logica.height / Pango.SCALE
+
+
+def _mostrar(ctx, layout, x: float, y: float, color) -> float:
     ctx.set_source_rgb(*color)
     ctx.move_to(x, y)
     PangoCairo.show_layout(ctx, layout)
-    return layout.get_pixel_size().height
+    return _medida(layout)[1]
 
 
-def _linea(ctx, y: float) -> None:
-    ctx.set_source_rgb(*_LINEA)
-    ctx.set_line_width(0.75)
-    ctx.move_to(MARGIN, y)
-    ctx.line_to(PAGE_WIDTH - MARGIN, y)
+def _texto(ctx, x, y, texto, font, color, **kw) -> float:
+    """Dibuja `texto` con la esquina superior izquierda en (x, y) y
+    devuelve la altura que ocupó: cada bloque arranca donde terminó el
+    anterior, así un bloque opcional que falta no deja hueco."""
+    return _mostrar(ctx, _layout(ctx, texto, font, **kw), x, y, color)
+
+
+def _centrado(ctx, y, texto, font, color, espaciado: float = 0.0) -> float:
+    layout = _layout(ctx, texto, font, espaciado=espaciado)
+    ancho, _alto = _medida(layout)
+    # El espaciado de letras también se agrega después de la última, y
+    # sin descontarlo el texto queda corrido a la izquierda.
+    x = (PAGE_WIDTH - (ancho - espaciado)) / 2
+    return _mostrar(ctx, layout, x, y, color)
+
+
+def _etiqueta(ctx, x, y, texto, p: _Paleta, ancho: float = None,
+              color=None) -> float:
+    """Etiqueta: chica, en mayúsculas y espaciada. En el teal de la marca
+    si es de sección; las de los campos de adentro van en el tono tenue,
+    para que se lea qué es título y qué es dato."""
+    return _texto(ctx, x, y, texto.upper(), f"{FONT_BODY} Semi-Bold 7.5",
+                  color or p.etiqueta, espaciado=1.8, ancho=ancho,
+                  max_lineas=1)
+
+
+def _rect_redondeado(ctx, x, y, w, h, r) -> None:
+    r = min(r, w / 2, h / 2)
+    ctx.new_sub_path()
+    ctx.arc(x + w - r, y + r, r, -1.5708, 0)
+    ctx.arc(x + w - r, y + h - r, r, 0, 1.5708)
+    ctx.arc(x + r, y + h - r, r, 1.5708, 3.1416)
+    ctx.arc(x + r, y + r, r, 3.1416, 4.7124)
+    ctx.close_path()
+
+
+# ------------------------------------------------------------- Fondo --
+def _fondo(ctx, p: _Paleta) -> None:
+    ctx.set_source_rgb(*p.fondo)
+    ctx.paint()
+    if p.fondo_arriba != p.fondo:
+        grad = cairo.LinearGradient(0, 0, 0, PAGE_HEIGHT * 0.35)
+        grad.add_color_stop_rgb(0, *p.fondo_arriba)
+        grad.add_color_stop_rgb(1, *p.fondo)
+        ctx.set_source(grad)
+        ctx.rectangle(0, 0, PAGE_WIDTH, PAGE_HEIGHT * 0.35)
+        ctx.fill()
+    if p.fondo_abajo != p.fondo:
+        grad = cairo.LinearGradient(0, PAGE_HEIGHT * 0.82, 0, PAGE_HEIGHT)
+        grad.add_color_stop_rgb(0, *p.fondo)
+        grad.add_color_stop_rgb(1, *p.fondo_abajo)
+        ctx.set_source(grad)
+        ctx.rectangle(0, PAGE_HEIGHT * 0.82, PAGE_WIDTH, PAGE_HEIGHT * 0.18)
+        ctx.fill()
+
+
+def _divisor(ctx, y: float, p: _Paleta, x0=MARGIN, x1=PAGE_WIDTH - MARGIN,
+             centro: bool = True) -> None:
+    """Línea fina de lado a lado con un tramo corto de acento en el
+    medio, como el divisor del flyer."""
+    ctx.set_source_rgb(*p.linea)
+    ctx.set_line_width(0.6)
+    ctx.move_to(x0, y)
+    ctx.line_to(x1, y)
     ctx.stroke()
+    if centro:
+        medio = (x0 + x1) / 2
+        ctx.set_source_rgb(*p.acento)
+        ctx.set_line_width(1.6)
+        ctx.move_to(medio - 40, y)
+        ctx.line_to(medio + 40, y)
+        ctx.stroke()
 
 
-def _barra_de_uso(ctx, y: float, ratio: float) -> float:
-    """La barra de "cuán llena está la unidad". Es el único gráfico del
-    ticket y está para que se entienda de un vistazo, sin leer los
-    números: es la misma lectura que da la barra de la pantalla de
-    Transferir, en papel."""
-    ancho = PAGE_WIDTH - 2 * MARGIN
-    alto = 9.0
-    ctx.set_source_rgb(*_LINEA)
-    ctx.rectangle(MARGIN, y, ancho, alto)
-    ctx.fill()
-    ctx.set_source_rgb(*_ACENTO)
-    ctx.rectangle(MARGIN, y, ancho * max(0.0, min(1.0, ratio)), alto)
-    ctx.fill()
+# -------------------------------------------------------------- Logo --
+def _cargar_logo(path: str) -> Optional[cairo.ImageSurface]:
+    """El logo como superficie de cairo, o None si no se puede usar.
+
+    Se carga con GdkPixbuf -acepta PNG, JPEG, WebP...- y se pasa a cairo
+    como PNG en memoria, que es el único formato que cairo lee solo. Un
+    archivo que se movió o no es una imagen no rompe el ticket: el
+    encabezado cae al nombre en texto."""
+    if not path:
+        return None
+    try:
+        pixbuf = GdkPixbuf.Pixbuf.new_from_file(str(Path(path).expanduser()))
+        ok, data = pixbuf.save_to_bufferv("png", [], [])
+        if not ok:
+            return None
+        return cairo.ImageSurface.create_from_png(io.BytesIO(data))
+    except Exception:  # noqa: BLE001 - cualquier fallo = sin logo
+        return None
+
+
+def _dibujar_logo(ctx, logo, y: float, max_w: float, max_h: float,
+                  centrado: bool = True, x: float = MARGIN) -> float:
+    escala = min(max_w / logo.get_width(), max_h / logo.get_height(), 1.0)
+    w, h = logo.get_width() * escala, logo.get_height() * escala
+    if centrado:
+        x = (PAGE_WIDTH - w) / 2
+    ctx.save()
+    ctx.translate(x, y)
+    ctx.scale(escala, escala)
+    ctx.set_source_surface(logo, 0, 0)
+    ctx.get_source().set_filter(cairo.FILTER_BEST)
+    ctx.paint()
+    ctx.restore()
+    return h
+
+
+def _nombre_en_texto(ctx, nombre: str, y: float, p: _Paleta,
+                     tamano: float = 32, centrado: bool = True,
+                     x: float = MARGIN) -> float:
+    """El nombre del taller como texto, con la ÚLTIMA palabra en el color
+    de acento ("Taller *Pérez*"). Son dos layouts uno al lado del otro y
+    no un markup con colores, para no tener que escapar un nombre que
+    podría traer "&"."""
+    partes = nombre.rsplit(" ", 1)
+    primero = partes[0] + " " if len(partes) == 2 else ""
+    ultimo = partes[-1]
+    font = f"{FONT_TITLE} Bold {tamano}"
+    l1 = _layout(ctx, primero, font)
+    l2 = _layout(ctx, ultimo, font)
+    w1, h1 = _medida(l1) if primero else (0.0, 0.0)
+    w2, h2 = _medida(l2)
+    if centrado:
+        x = (PAGE_WIDTH - (w1 + w2)) / 2
+    if primero:
+        _mostrar(ctx, l1, x, y, p.texto)
+    _mostrar(ctx, l2, x + w1, y, p.acento_texto)
+    return max(h1, h2)
+
+
+# ------------------------------------------------------------ Bloques --
+def _encabezado(ctx, data: TicketData, shop: ShopProfile, p: _Paleta,
+                logo) -> float:
+    """Logo (o nombre), eslogan, ubicación y divisor. Devuelve la `y`
+    donde termina."""
+    y = MARGIN - 6
+    if logo is None and not (shop.name or shop.slogan or shop.location):
+        # Sin datos del taller: el título encabeza la hoja, y el divisor
+        # va debajo de él y no flotando arriba de nada.
+        y += 10
+        y += _centrado(ctx, y, _("Ticket de Entrega").upper(),
+                       f"{FONT_TITLE} Bold 15", p.texto, espaciado=3.0)
+        y += 14
+        _divisor(ctx, y, p)
+        return y + 22
+    if logo is not None:
+        y += _dibujar_logo(ctx, logo, y, LOGO_MAX_WIDTH, LOGO_MAX_HEIGHT)
+        y += 6
+    elif shop.name:
+        y += _nombre_en_texto(ctx, shop.name, y, p)
+        y += 4
+    # Con logo, el eslogan ya está adentro de la imagen (es lo que deja
+    # `tools/prepare_logo.py`): repetirlo en texto lo imprimiría dos veces.
+    if shop.slogan and logo is None:
+        y += _centrado(ctx, y, shop.slogan.upper(), f"{FONT_TITLE} Medium 11",
+                       p.eslogan, espaciado=4.0)
+        y += 6
+    if shop.location:
+        y += _centrado(ctx, y, shop.location.upper(), f"{FONT_BODY} 7.5",
+                       p.ubicacion, espaciado=2.6)
+        y += 4
+    y += 10
+    _divisor(ctx, y, p)
+    y += 18
+    y += _centrado(ctx, y, _("Ticket de Entrega").upper(),
+                   f"{FONT_TITLE} Bold 15", p.texto, espaciado=3.0)
+    return y + 18
+
+
+def _par(ctx, x, y, etiqueta, valor, ancho, p: _Paleta,
+         tamano: float = 12.5, max_lineas: int = 2,
+         color_etiqueta=None) -> float:
+    """Etiqueta arriba, valor grande abajo. Devuelve la altura."""
+    alto = _etiqueta(ctx, x, y, etiqueta, p, ancho=ancho,
+                     color=color_etiqueta)
+    alto += 3
+    alto += _texto(ctx, x, y + alto, valor, f"{FONT_BODY} Semi-Bold {tamano}",
+                   p.texto, ancho=ancho, max_lineas=max_lineas)
     return alto
 
 
-def _dato(ctx, x: float, y: float, etiqueta: str, valor: str,
-          ancho: float) -> float:
-    """Un par etiqueta/valor: la etiqueta chica y tenue arriba, el valor
-    grande abajo. Devuelve la altura total."""
-    alto = _texto(ctx, x, y, etiqueta, font="Sans 9", color=_TENUE, ancho=ancho)
-    alto += 2
-    alto += _texto(ctx, x, y + alto, valor, font="Sans Bold 15", ancho=ancho)
-    return alto
+def _grilla(ctx, y, pares, columnas, p: _Paleta, tamano=12.5,
+            separacion=12.0, de_seccion: bool = False) -> float:
+    """`pares` (etiqueta, valor) repartidos en `columnas`, fila por fila.
+    Cada fila mide lo que mide su celda más alta."""
+    ancho_col = (CONTENT_WIDTH - (columnas - 1) * separacion) / columnas
+    for i in range(0, len(pares), columnas):
+        alto_fila = 0.0
+        for j, (etiqueta, valor) in enumerate(pares[i:i + columnas]):
+            x = MARGIN + j * (ancho_col + separacion)
+            alto_fila = max(alto_fila, _par(
+                ctx, x, y, etiqueta, valor, ancho_col, p, tamano,
+                color_etiqueta=None if de_seccion else p.tenue))
+        y += alto_fila + 12
+    return y
 
 
-def render_ticket(data: TicketData, dest: Path) -> Path:
+def _cabecera_de_seccion(ctx, y, titulo, p: _Paleta, detalle: str = "") -> float:
+    """Título de sección con una línea fina debajo y, opcionalmente, un
+    dato chico a la derecha."""
+    alto = _etiqueta(ctx, MARGIN, y, titulo, p)
+    if detalle:
+        layout = _layout(ctx, detalle, f"{FONT_BODY} 8", ancho=CONTENT_WIDTH * 0.6,
+                         max_lineas=1, alinear=Pango.Alignment.RIGHT)
+        _mostrar(ctx, layout, PAGE_WIDTH - MARGIN - CONTENT_WIDTH * 0.6,
+                 y - 0.5, p.tenue)
+    y += alto + 5
+    _divisor(ctx, y, p, centro=False)
+    return y + 9
+
+
+def _seccion_cliente(ctx, y, data: TicketData, p: _Paleta) -> float:
+    pares = []
+    if data.client_name:
+        pares.append((_("Cliente"), data.client_name))
+    pares.append((_("Fecha de entrega"),
+                  data.generated_at.strftime("%d/%m/%Y · %H:%M")))
+    return _grilla(ctx, y, pares, 2, p, tamano=15, de_seccion=True)
+
+
+def _seccion_consola(ctx, y, data: TicketData, p: _Paleta) -> float:
+    c = data.console
+    pares = [(etiqueta, valor) for etiqueta, valor in (
+        (_("Modelo"), c.model),
+        (_("Número de serie"), c.serial),
+        (_("Versión del sistema"), c.system_version),
+        (_("Servicio realizado"), c.service),
+    ) if valor]
+    if not pares:
+        return y
+    y += 4
+    y = _cabecera_de_seccion(ctx, y, _("Consola"), p)
+    return _grilla(ctx, y, pares, 2, p, tamano=12)
+
+
+def _seccion_unidad(ctx, y, data: TicketData, p: _Paleta) -> float:
+    y += 4
+    y = _cabecera_de_seccion(ctx, y, _("Unidad"), p, detalle=data.drive_label)
+    y = _grilla(ctx, y, [
+        (_("Capacidad total"), format_size(data.total_bytes)),
+        (_("Espacio usado"), format_size(data.used_bytes)),
+        (_("Espacio libre"), format_size(data.free_bytes)),
+        (_("Formato"), data.filesystem),
+    ], 4, p, tamano=12)
+    ratio = data.used_ratio
+    if ratio is not None:
+        alto = 6.0
+        _rect_redondeado(ctx, MARGIN, y, CONTENT_WIDTH, alto, alto / 2)
+        ctx.set_source_rgb(*p.pista)
+        ctx.fill()
+        lleno = CONTENT_WIDTH * max(0.0, min(1.0, ratio))
+        if lleno > 0:
+            _rect_redondeado(ctx, MARGIN, y, max(lleno, alto), alto, alto / 2)
+            ctx.set_source_rgb(*p.acento)
+            ctx.fill()
+        y += alto + 5
+        y += _texto(ctx, MARGIN, y,
+                    _("{percent:.0f}% de la unidad ocupado")
+                    .format(percent=ratio * 100), f"{FONT_BODY} 8", p.tenue)
+        y += 10
+    return y
+
+
+def _seccion_notas(ctx, y, data: TicketData, p: _Paleta) -> float:
+    if not data.notes:
+        return y
+    y += 4
+    y = _cabecera_de_seccion(ctx, y, _("Notas"), p)
+    # Tope de líneas: las notas son texto libre, y unas notas larguísimas
+    # no pueden empujar todo lo demás a otra hoja.
+    y += _texto(ctx, MARGIN, y, data.notes, f"{FONT_BODY} 10", p.texto,
+                ancho=CONTENT_WIDTH, max_lineas=6)
+    return y + 12
+
+
+# ------------------------------------------------- Lista de juegos --
+@dataclass(frozen=True)
+class _Fila:
+    """Una fila de la lista: el encabezado de un grupo o un juego."""
+
+    grupo: str                 # CONSOLE_WII / CONSOLE_GAMECUBE
+    titulo: str = ""
+    game_id: str = ""
+    es_grupo: bool = False
+    continuacion: bool = False
+
+
+def _filas_de_juegos(data: TicketData) -> list:
+    filas = []
+    for consola in (CONSOLE_WII, CONSOLE_GAMECUBE):
+        juegos = [g for g in data.games if g.console == consola]
+        if not juegos:
+            continue
+        filas.append(_Fila(consola, es_grupo=True))
+        filas.extend(_Fila(consola, g.title, g.game_id) for g in juegos)
+    return filas
+
+
+def _llenar(pendientes: list, capacidad: int, columnas: int,
+            hoja_nueva: bool) -> tuple:
+    """Llena hasta `columnas` columnas de `capacidad` filas con las
+    primeras de `pendientes`. Devuelve (columnas, lo que sobró)."""
+    pendientes = list(pendientes)
+    hoja = []
+    for k in range(columnas):
+        if not pendientes:
+            break
+        columna = []
+        if not pendientes[0].es_grupo:
+            # Columna que arranca a mitad de un grupo: se repite el
+            # encabezado. "(continuación)" solo al empezar una hoja nueva;
+            # en la columna de al lado de la misma hoja se ve solo.
+            columna.append(_Fila(pendientes[0].grupo, es_grupo=True,
+                                 continuacion=hoja_nueva and k == 0))
+        while pendientes and len(columna) < capacidad:
+            if pendientes[0].es_grupo and len(columna) == capacidad - 1:
+                break
+            columna.append(pendientes.pop(0))
+        hoja.append(columna)
+    return hoja, pendientes
+
+
+def paginar(filas: list, capacidades: list,
+            columnas: int = LIST_COLUMNS) -> list:
+    """Reparte `filas` en hojas de `columnas` columnas. `capacidades[i]`
+    es cuántas filas entran por columna en la hoja i (la última se repite
+    para las hojas que hagan falta). Devuelve una lista de hojas, cada una
+    una lista de columnas.
+
+    Reglas, para que la lista se lea bien partida:
+    - una fila nunca se parte: cada una ocupa exactamente un lugar;
+    - un encabezado de grupo nunca queda solo al pie de una columna: pasa
+      a la siguiente junto con su primer juego;
+    - una columna que arranca a mitad de un grupo repite el encabezado, así
+      ninguna fila queda sin saber de qué consola es;
+    - en la hoja donde termina la lista, las columnas se EQUILIBRAN (se usa
+      la menor altura con la que todo entra): 15 juegos son dos columnas
+      parejas y no una llena y otra con tres filas."""
+    hojas = []
+    pendientes = list(filas)
+    while pendientes:
+        n = len(hojas)
+        capacidad = capacidades[min(n, len(capacidades) - 1)]
+        if capacidad < 2:
+            # Sin lugar para un encabezado y un juego, esta hoja no lleva
+            # lista; si eso pasa con la capacidad que se repite, la lista
+            # no terminaría nunca.
+            if n >= len(capacidades) - 1:
+                raise ValueError("capacidad de columna insuficiente")
+            hojas.append([])
+            continue
+        hoja, resto = _llenar(pendientes, capacidad, columnas, n > 0)
+        if not resto:
+            # Entra todo: buscar la menor capacidad con la que sigue
+            # entrando, para que las columnas queden parejas.
+            for menor in range(2, capacidad):
+                prueba, sobra = _llenar(pendientes, menor, columnas, n > 0)
+                if not sobra:
+                    hoja = prueba
+                    break
+        hojas.append(hoja)
+        pendientes = resto
+    return hojas
+
+
+def _nombre_de_grupo(consola: str) -> str:
+    return "Wii" if consola == CONSOLE_WII else "GameCube"
+
+
+def _dibujar_columna(ctx, columna: list, x: float, y: float, ancho: float,
+                     data: TicketData, p: _Paleta) -> None:
+    cantidad = {c: sum(1 for g in data.games if g.console == c)
+                for c in (CONSOLE_WII, CONSOLE_GAMECUBE)}
+    alterna = False
+    for fila in columna:
+        if fila.es_grupo:
+            _rect_redondeado(ctx, x, y + 1, ancho, ROW_HEIGHT - 2, 3)
+            ctx.set_source_rgb(*p.destacado)
+            ctx.fill()
+            ctx.set_source_rgb(*p.acento)
+            ctx.rectangle(x, y + 1, 2.5, ROW_HEIGHT - 2)
+            ctx.fill()
+            nombre = _nombre_de_grupo(fila.grupo)
+            if fila.continuacion:
+                nombre = _("{console} (continuación)").format(console=nombre)
+            layout = _layout(ctx, nombre, f"{FONT_TITLE} Bold 9",
+                             ancho=ancho - 60, max_lineas=1)
+            _mostrar(ctx, layout, x + 9, y + (ROW_HEIGHT - _medida(layout)[1]) / 2,
+                     p.texto)
+            cuenta = _layout(ctx, str(cantidad[fila.grupo]),
+                             f"{FONT_BODY} Semi-Bold 8.5", ancho=48,
+                             max_lineas=1, alinear=Pango.Alignment.RIGHT)
+            _mostrar(ctx, cuenta, x + ancho - 54,
+                     y + (ROW_HEIGHT - _medida(cuenta)[1]) / 2, p.etiqueta)
+            alterna = False
+        else:
+            if alterna:
+                ctx.set_source_rgb(*p.fila_alterna)
+                ctx.rectangle(x, y, ancho, ROW_HEIGHT)
+                ctx.fill()
+            alterna = not alterna
+            ancho_id = 46.0
+            titulo = _layout(ctx, fila.titulo, f"{FONT_BODY} 8.5",
+                             ancho=ancho - ancho_id - 18, max_lineas=1)
+            _mostrar(ctx, titulo, x + 9, y + (ROW_HEIGHT - _medida(titulo)[1]) / 2,
+                     p.texto)
+            if fila.game_id:
+                gid = _layout(ctx, fila.game_id, f"{FONT_MONO} 7.5",
+                              ancho=ancho_id, max_lineas=1,
+                              alinear=Pango.Alignment.RIGHT)
+                _mostrar(ctx, gid, x + ancho - ancho_id - 6,
+                         y + (ROW_HEIGHT - _medida(gid)[1]) / 2, p.tenue)
+        y += ROW_HEIGHT
+
+
+def _dibujar_lista(ctx, columnas: list, y: float, data: TicketData,
+                   p: _Paleta) -> None:
+    ancho = (CONTENT_WIDTH - (LIST_COLUMNS - 1) * LIST_GUTTER) / LIST_COLUMNS
+    for j, columna in enumerate(columnas):
+        x = MARGIN + j * (ancho + LIST_GUTTER)
+        _dibujar_columna(ctx, columna, x, y, ancho, data, p)
+
+
+# --------------------------------------------------------------- Pie --
+QR_SIZE = 78.0
+QR_PADDING = 7.0
+
+
+def _alto_del_pie(shop: ShopProfile) -> float:
+    return 112.0 if shop.whatsapp else 30.0
+
+
+def _dibujar_qr(ctx, matriz: list, x: float, y: float, lado: float) -> None:
+    """Tarjeta blanca con esquinas redondeadas y el QR encima, en
+    vectores. Las corridas horizontales de módulos se juntan en un solo
+    rectángulo y cada uno se estira un pelo hacia abajo: sin eso, algunos
+    visores dejan líneas finas entre filas al antialiasear, y un lector
+    puede confundirlas con módulos claros."""
+    _rect_redondeado(ctx, x, y, lado, lado, 8)
+    ctx.set_source_rgb(1, 1, 1)
+    ctx.fill()
+    n = len(matriz)
+    modulo = (lado - 2 * QR_PADDING) / n
+    ox, oy = x + QR_PADDING, y + QR_PADDING
+    ctx.set_source_rgb(0, 0, 0)
+    for r, fila in enumerate(matriz):
+        c = 0
+        while c < n:
+            if not fila[c]:
+                c += 1
+                continue
+            inicio = c
+            while c < n and fila[c]:
+                c += 1
+            ctx.rectangle(ox + inicio * modulo, oy + r * modulo,
+                          (c - inicio) * modulo, modulo * 1.04)
+    ctx.fill()
+
+
+def _pie(ctx, data: TicketData, shop: ShopProfile, p: _Paleta, pagina: int,
+         total: int, qr) -> None:
+    base = PAGE_HEIGHT - MARGIN + 8
+    if shop.whatsapp:
+        arriba = PAGE_HEIGHT - MARGIN - _alto_del_pie(shop) + 18
+        _divisor(ctx, arriba - 10, p)
+        ancho_texto = CONTENT_WIDTH - (QR_SIZE + 16 if qr else 0)
+        y = arriba + 6
+        y += _etiqueta(ctx, MARGIN, y, _("Escríbenos por WhatsApp"), p,
+                       ancho=ancho_texto)
+        y += 2
+        y += _texto(ctx, MARGIN, y, format_whatsapp(shop.whatsapp),
+                    f"{FONT_TITLE} Bold 26", p.texto, ancho=ancho_texto,
+                    max_lineas=1)
+        if qr:
+            _texto(ctx, MARGIN, y + 2,
+                   _("Escaneá el código para abrir el chat."),
+                   f"{FONT_BODY} 8", p.tenue, ancho=ancho_texto, max_lineas=1)
+            _dibujar_qr(ctx, qr, PAGE_WIDTH - MARGIN - QR_SIZE, arriba,
+                        QR_SIZE)
+    else:
+        _divisor(ctx, base - 10, p, centro=False)
+    _texto(ctx, MARGIN, base, _("Generado por WiiBackup Manager"),
+           f"{FONT_BODY} 7", p.tenue)
+    if total > 1:
+        layout = _layout(ctx, _("Página {page} de {total}")
+                         .format(page=pagina, total=total),
+                         f"{FONT_BODY} 7", ancho=150,
+                         alinear=Pango.Alignment.RIGHT)
+        _mostrar(ctx, layout, PAGE_WIDTH - MARGIN - 150, base, p.tenue)
+
+
+def _encabezado_continuacion(ctx, data: TicketData, shop: ShopProfile,
+                             p: _Paleta, logo) -> float:
+    """El encabezado de las hojas 2 en adelante: la marca en chico, de
+    quién es el ticket y de qué fecha, para que una hoja suelta se pueda
+    reconocer."""
+    y = MARGIN - 6
+    if logo is not None:
+        alto = _dibujar_logo(ctx, logo, y, 200, 46, centrado=False)
+    elif shop.name:
+        alto = _nombre_en_texto(ctx, shop.name, y, p, tamano=18,
+                                centrado=False)
+    else:
+        alto = _texto(ctx, MARGIN, y, _("Ticket de Entrega"),
+                      f"{FONT_TITLE} Bold 16", p.texto)
+    partes = [data.client_name] if data.client_name else []
+    partes.append(data.generated_at.strftime("%d/%m/%Y"))
+    detalle = _layout(ctx, " · ".join(partes), f"{FONT_BODY} 9",
+                      ancho=220, max_lineas=1, alinear=Pango.Alignment.RIGHT)
+    _mostrar(ctx, detalle, PAGE_WIDTH - MARGIN - 220,
+             y + (alto - _medida(detalle)[1]) / 2, p.tenue)
+    y += alto + 10
+    _divisor(ctx, y, p)
+    return y + 16
+
+
+def _seccion_juegos_cabecera(ctx, y, data: TicketData, p: _Paleta,
+                             continuacion: bool = False) -> float:
+    titulo = _("Juegos") if not continuacion else _("Juegos (continuación)")
+    c = data.contents
+    detalle = _("{wii} Wii · {gc} GameCube · {hb} Homebrew").format(
+        wii=c.wii_games, gc=c.gamecube_games, hb=c.homebrew_apps)
+    y += 4
+    return _cabecera_de_seccion(ctx, y, titulo, p, detalle=detalle)
+
+
+# ------------------------------------------------------------- Hoja --
+def render_ticket(data: TicketData, dest: Path,
+                  shop: Optional[ShopProfile] = None) -> Path:
     """Escribe el ticket de `data` como PDF en `dest` y devuelve `dest`.
 
     Se escribe a través de `atomicfs.atomic_write_target` -la primitiva
@@ -127,10 +822,13 @@ def render_ticket(data: TicketData, dest: Path) -> Path:
     `mkparents=True` porque el destino habitual es una carpeta de
     documentos que puede no existir todavía."""
     dest = Path(dest)
+    shop = shop or ShopProfile()
     with atomicfs.atomic_write_target(dest, mkparents=True) as tmp:
         surface = cairo.PDFSurface(str(tmp), PAGE_WIDTH, PAGE_HEIGHT)
         try:
-            _dibujar(cairo.Context(surface), data)
+            surface.set_metadata(cairo.PDFMetadata.TITLE, _("Ticket de Entrega"))
+            surface.set_metadata(cairo.PDFMetadata.CREATOR, "WiiBackup Manager")
+            _dibujar(cairo.Context(surface), data, shop)
         finally:
             # `finish()` es lo que vuelca el PDF al archivo. Va en un
             # `finally` para que un error a mitad del dibujo no deje el
@@ -140,92 +838,59 @@ def render_ticket(data: TicketData, dest: Path) -> Path:
     return dest
 
 
-def _dibujar(ctx, data: TicketData) -> None:
-    """Todo el contenido de la hoja, de arriba hacia abajo.
+def _dibujar(ctx, data: TicketData, shop: ShopProfile) -> None:
+    """Todas las hojas, de arriba hacia abajo.
 
     `y` va bajando a medida que se dibuja y cada bloque devuelve lo que
-    ocupó. Escrito así -y no con posiciones fijas- porque hay dos bloques
-    que pueden no estar (cliente y notas) y uno que crece según lo que
-    escriba el usuario (notas): con coordenadas fijas, un ticket sin
-    cliente dejaría un hueco y uno con notas largas escribiría encima del
-    pie."""
-    ancho_util = PAGE_WIDTH - 2 * MARGIN
-    y = MARGIN
+    ocupó, porque casi todo es opcional (cliente, consola, notas) y no
+    puede quedar un hueco donde falta algo. La lista de juegos va al
+    final: es lo único que puede no entrar, y así lo que no cabe sigue en
+    la hoja siguiente sin mover nada de lo de arriba."""
+    p = _paleta(shop.theme, shop.accent)
+    # El logo es para fondo oscuro; en el modo claro el nombre va en texto.
+    logo = (_cargar_logo(shop.logo_path)
+            if shop.theme != config.TICKET_THEME_LIGHT else None)
+    qr = None
+    if shop.whatsapp:
+        mensaje = _("Hola, tengo una consulta sobre mi entrega del {date}") \
+            .format(date=data.generated_at.strftime("%d/%m/%Y"))
+        qr = qr_matrix(whatsapp_url(shop.whatsapp, mensaje))
 
-    # ------------------------------------------------------- Encabezado --
-    y += _texto(ctx, MARGIN, y, _("Ticket de Entrega"), font="Sans Bold 24")
-    y += 4
-    y += _texto(ctx, MARGIN, y, _("GameFix SPS"), font="Sans 12", color=_ACENTO)
-    y += 18
-    _linea(ctx, y)
-    y += 18
+    _fondo(ctx, p)
+    y = _encabezado(ctx, data, shop, p, logo)
+    y = _seccion_cliente(ctx, y, data, p)
+    y = _seccion_consola(ctx, y, data, p)
+    y = _seccion_unidad(ctx, y, data, p)
+    y = _seccion_notas(ctx, y, data, p)
+    y = _seccion_juegos_cabecera(ctx, y, data, p)
 
-    # ------------------------------------------------ Cliente y fecha --
-    # El nombre del cliente es opcional: si no se cargó, el ticket sale
-    # igual -sirve como comprobante del contenido de la unidad aunque no
-    # esté a nombre de nadie- y la fecha ocupa su lugar sin dejar hueco.
-    if data.client_name:
-        y += _dato(ctx, MARGIN, y, _("Cliente"), data.client_name, ancho_util)
-        y += 14
-    y += _dato(ctx, MARGIN, y, _("Fecha de entrega"),
-               data.generated_at.strftime("%d/%m/%Y %H:%M"), ancho_util)
-    y += 22
+    fin_de_lista = PAGE_HEIGHT - MARGIN - _alto_del_pie(shop) - 4
+    filas = _filas_de_juegos(data)
+    if not filas:
+        _texto(ctx, MARGIN, y + 2,
+               _("No se encontraron juegos de Wii ni de GameCube en la unidad."),
+               f"{FONT_BODY} 10", p.tenue, ancho=CONTENT_WIDTH)
+        _pie(ctx, data, shop, p, 1, 1, qr)
+        return
 
-    # ------------------------------------------------------- Contenido --
-    y += _texto(ctx, MARGIN, y, _("Contenido de la unidad"),
-                font="Sans Bold 13")
-    y += 12
+    # Cuánto entra en cada hoja: la primera, lo que quedó libre debajo de
+    # las secciones; las siguientes, todo menos el encabezado chico.
+    # Se mide el encabezado de continuación dibujándolo en una superficie
+    # descartable, que es la única forma de saber su alto real con la
+    # fuente que de verdad está instalada.
+    borrador = cairo.Context(cairo.RecordingSurface(cairo.CONTENT_COLOR_ALPHA,
+                                                    None))
+    y_cont = _encabezado_continuacion(borrador, data, shop, p, logo)
+    y_cont = _seccion_juegos_cabecera(borrador, y_cont, data, p, True)
+    primera = int((fin_de_lista - y) // ROW_HEIGHT)
+    siguientes = int((fin_de_lista - y_cont) // ROW_HEIGHT)
+    hojas = paginar(filas, [primera, siguientes])
 
-    columnas = [
-        (_("Juegos de Wii"), str(data.contents.wii_games)),
-        (_("Juegos de GameCube"), str(data.contents.gamecube_games)),
-        (_("Apps de Homebrew"), str(data.contents.homebrew_apps)),
-    ]
-    ancho_col = ancho_util / len(columnas)
-    alto_fila = 0.0
-    for i, (etiqueta, valor) in enumerate(columnas):
-        alto_fila = max(alto_fila, _dato(ctx, MARGIN + i * ancho_col, y,
-                                         etiqueta, valor, ancho_col - 8))
-    y += alto_fila + 22
-
-    # ---------------------------------------------------------- Unidad --
-    y += _texto(ctx, MARGIN, y, _("Unidad"), font="Sans Bold 13")
-    y += 12
-
-    unidad = [
-        (_("Capacidad total"), format_size(data.total_bytes)),
-        (_("Espacio usado"), format_size(data.used_bytes)),
-        (_("Espacio libre"), format_size(data.free_bytes)),
-        (_("Formato"), data.filesystem),
-    ]
-    ancho_col = ancho_util / len(unidad)
-    alto_fila = 0.0
-    for i, (etiqueta, valor) in enumerate(unidad):
-        alto_fila = max(alto_fila, _dato(ctx, MARGIN + i * ancho_col, y,
-                                         etiqueta, valor, ancho_col - 8))
-    y += alto_fila + 14
-
-    ratio = data.used_ratio
-    if ratio is not None:
-        y += _barra_de_uso(ctx, y, ratio) + 6
-        y += _texto(ctx, MARGIN, y,
-                    _("{percent:.0f}% de la unidad ocupado")
-                    .format(percent=ratio * 100),
-                    font="Sans 9", color=_TENUE)
-    y += 22
-
-    # ----------------------------------------------------------- Notas --
-    if data.notes:
-        y += _texto(ctx, MARGIN, y, _("Notas"), font="Sans Bold 13")
-        y += 8
-        y += _texto(ctx, MARGIN, y, data.notes, font="Sans 11",
-                    ancho=ancho_util)
-
-    # ------------------------------------------------------------- Pie --
-    # Anclado abajo y no después del último bloque: es el pie de la hoja,
-    # y con notas cortas quedaría flotando en el medio.
-    pie = PAGE_HEIGHT - MARGIN - 12
-    _linea(ctx, pie - 10)
-    _texto(ctx, MARGIN, pie,
-           _("Generado por WiiBackup Manager · GameFix SPS"),
-           font="Sans 9", color=_TENUE)
+    for n, hoja in enumerate(hojas, start=1):
+        if n > 1:
+            ctx.show_page()
+            _fondo(ctx, p)
+            y = _encabezado_continuacion(ctx, data, shop, p, logo)
+            y = _seccion_juegos_cabecera(ctx, y, data, p, True)
+        _dibujar_lista(ctx, hoja, y, data, p)
+        _pie(ctx, data, shop, p, n, len(hojas), qr)

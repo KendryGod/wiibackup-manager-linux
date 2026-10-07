@@ -629,6 +629,36 @@ def _ensure_wiitdb_index() -> dict[str, ET.Element]:
         return _wiitdb_index
 
 
+def cached_title(game_id: str, language: str = DEFAULT_LANGUAGE) -> Optional[str]:
+    """Título de `game_id` según la copia de wiitdb.xml que YA está en la
+    caché, o None si no está ahí.
+
+    A diferencia de `get_game_extra_info`, esto nunca descarga: lo usa el
+    Ticket de Entrega, que se genera en el mostrador y no puede quedarse
+    esperando una descarga de 8 MB (ni fallar porque no hay internet). Si
+    la caché todavía no existe, el ticket cae al nombre de la carpeta.
+
+    Se prefiere el título en `language` y se cae al inglés, que es el que
+    GameTDB trae para casi todos los juegos."""
+    global _wiitdb_index
+    if not is_valid_game_id(game_id):
+        return None
+    with _wiitdb_lock:
+        if not _wiitdb_index:
+            path = wiitdb_cache_path()
+            index = _build_index(path) if path.exists() else None
+            if not index:
+                return None
+            # Se deja armado para el resto de la app: es el mismo índice
+            # que arma `_ensure_wiitdb_index` a partir del mismo archivo.
+            _wiitdb_index = index
+        game_el = _wiitdb_index.get(game_id.upper())
+    if game_el is None:
+        return None
+    titles = _locale_texts(game_el, "title")
+    return titles.get(language_for_region(language)) or titles.get(DEFAULT_LANGUAGE)
+
+
 def wiitdb_index_available() -> bool:
     """True si el índice está armado y tiene juegos, o sea si una consulta
     que devuelve None significa de verdad "GameTDB no lo tiene"."""

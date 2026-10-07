@@ -68,6 +68,32 @@ def write_text_atomic(path: Path, payload: str, encoding: str = "utf-8") -> None
         raise
 
 
+TICKET_THEME_DARK = "dark"
+TICKET_THEME_LIGHT = "light"
+TICKET_THEMES = (TICKET_THEME_DARK, TICKET_THEME_LIGHT)
+# Morado medido sobre el flyer de referencia de la primera marca que usó
+# el ticket; cada taller lo cambia por el suyo en Ajustes.
+DEFAULT_ACCENT_COLOR = "#AB85F4"
+
+
+def clean_whatsapp(raw: str) -> str:
+    """Solo los dígitos de `raw`. La gente escribe el número como lo ve en
+    una tarjeta ("+504 8888-0000") y wa.me no acepta ni el "+" ni los
+    separadores."""
+    return "".join(ch for ch in raw if ch.isascii() and ch.isdigit())
+
+
+def parse_hex_color(value: str) -> Optional[tuple]:
+    """"#RRGGBB" -> (r, g, b) en 0..1, o None si no tiene esa forma."""
+    value = (value or "").strip().lstrip("#")
+    if len(value) != 6:
+        return None
+    try:
+        return tuple(int(value[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    except ValueError:
+        return None
+
+
 @dataclass
 class Settings:
     library_path: str = str(Path.home() / "WiiGames")
@@ -97,6 +123,21 @@ class Settings:
     # sorpresa -alguien que copia 40 juegos y de golpe tarda el doble sin
     # haberlo pedido va a pensar que la app se colgó.
     verify_after_copy: bool = False
+    # "Mi taller": los datos con los que se firma el Ticket de Entrega. Van
+    # acá, en la configuración de cada usuario, y no en el código: la app
+    # la usan talleres distintos y cada uno imprime su propia marca. Vacíos
+    # por defecto -el ticket sale con un encabezado neutro-.
+    shop_name: str = ""
+    shop_slogan: str = ""
+    shop_location: str = ""
+    # Número internacional SOLO con dígitos (código de país incluido, sin
+    # "+"), que es lo que pide https://wa.me/<número>. Ver `clean_whatsapp`.
+    shop_whatsapp: str = ""
+    shop_logo_path: str = ""
+    shop_accent_color: str = DEFAULT_ACCENT_COLOR
+    # "dark" (con la marca, para mandar por WhatsApp) o "light" (fondo
+    # blanco, para imprimir sin gastar tinta). Ver `TICKET_THEMES`.
+    ticket_theme: str = TICKET_THEME_DARK
 
     @classmethod
     def load(cls) -> "Settings":
@@ -142,6 +183,13 @@ class Settings:
 
         if "dest_presets" in values:
             values["dest_presets"] = clean_presets(values["dest_presets"])
+        if "shop_whatsapp" in values:
+            values["shop_whatsapp"] = clean_whatsapp(values["shop_whatsapp"])
+        if values.get("shop_accent_color") is not None \
+                and parse_hex_color(values["shop_accent_color"]) is None:
+            del values["shop_accent_color"]
+        if values.get("ticket_theme") not in (None, *TICKET_THEMES):
+            del values["ticket_theme"]
 
         return cls(**values)
 
