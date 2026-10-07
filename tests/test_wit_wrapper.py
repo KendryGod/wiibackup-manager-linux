@@ -68,6 +68,80 @@ def test_console_for_id(game_id, esperado):
     assert wit_wrapper.console_for_id(game_id) == esperado
 
 
+# Salida real de `wit` v3.05a (`LIST --sections`) sobre el Ocarina of Time /
+# Master Quest que la cola copió como WBFS. Recortada a lo que importa.
+_SECTIONS_D43E01 = """\
+
+[summary]
+total-discs=1
+total-size=1130364928
+
+[disc-0]
+id=D43E01
+name=ZELDA OCARINA MULTI PACK
+title=The Legend of Zelda: Ocarina of Time / Master Quest
+region=USA
+filetype=WBFS/GC
+container=WBFS
+disctype=1 GameCube
+n-partitions=1
+"""
+
+_SECTIONS_RSBE01 = """\
+[summary]
+total-discs=1
+
+[disc-0]
+id=RSBE01
+title=Super Smash Bros. Brawl
+filetype=WBFS/WII
+disctype=2 Wii
+"""
+
+
+def test_parse_sections_gamecube_cuyo_id_no_empieza_con_g():
+    """El caso real: D43E01 es GameCube aunque su ID no empiece con 'G'.
+    Por el prefijo se lo tomaba por Wii, se lo copiaba como WBFS y
+    `wit VERIFY` lo daba por "verificado" en 0 s sin leer nada."""
+    assert wit_wrapper._parse_list_sections(_SECTIONS_D43E01) == (
+        "D43E01", "The Legend of Zelda: Ocarina of Time / Master Quest", "gc")
+
+
+def test_parse_sections_wii():
+    assert wit_wrapper._parse_list_sections(_SECTIONS_RSBE01) == (
+        "RSBE01", "Super Smash Bros. Brawl", "wii")
+
+
+def test_parse_sections_sin_disctype_cae_al_prefijo():
+    salida = "[disc-0]\nid=GZ2E01\ntitle=Twilight Princess\n"
+    assert wit_wrapper._parse_list_sections(salida) == (
+        "GZ2E01", "Twilight Princess", "gc")
+
+
+def test_parse_sections_rechaza_un_id_que_no_es_id6():
+    assert wit_wrapper._parse_list_sections(
+        "[disc-0]\nid=../../\ntitle=falso\ndisctype=2 Wii\n") is None
+    assert wit_wrapper._parse_list_sections("") is None
+
+
+def test_identify_toma_la_consola_del_disco(monkeypatch, tmp_path):
+    visto = {}
+
+    def _run_espia(binary, *args, timeout=None):
+        visto["args"] = args
+        return subprocess.CompletedProcess(args, 0, stdout=_SECTIONS_D43E01,
+                                           stderr="")
+
+    monkeypatch.setattr(wit_wrapper, "find_wit", lambda b: "/usr/bin/wit")
+    monkeypatch.setattr(wit_wrapper, "_run", _run_espia)
+
+    info = wit_wrapper.identify(tmp_path / "zelda.ciso")
+
+    assert visto["args"][:2] == ("LIST", "--sections")
+    assert info.game_id == "D43E01"
+    assert info.console == "gc"
+
+
 # ------------------------------------------------------- Cancelación --
 def test_token_arranca_sin_cancelar():
     assert not wit_wrapper.CancellationToken().cancelled

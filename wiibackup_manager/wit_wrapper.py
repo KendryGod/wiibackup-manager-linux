@@ -514,16 +514,17 @@ def _run_with_progress(
 
 
 def console_for_id(game_id: str) -> str:
-    """"wii" o "gc" según el primer carácter del Game ID.
+    """"wii" o "gc" según el primer carácter del Game ID. Es SOLO un
+    respaldo, y no es confiable.
 
-    Nintendo reservó 'G' como primer carácter de ID4 para GameCube (ej.
-    "GZ2E01", Twilight Princess GC); los discos de Wii arrancan con otras
-    letras ('R', 'S', 'W', ...). `wit LIST` no expone la consola como
-    columna propia (se confirmó corriendo `wit LIST --long`: solo trae
-    ID6/MiB/Región/Título), así que para lo que identifica `wit` -formatos
-    envueltos como WBFS/CISO/WDF- esta es la señal disponible. Para ISO
-    plana no hace falta: `disc_header.read_plain_iso_header` ya lee el
-    magic word real del disco, que es la fuente de verdad."""
+    La mayoría de los GameCube arrancan con 'G' (ej. "GZ2E01"), pero no
+    todos: discos especiales y de promoción usan otras letras (ej.
+    "D43E01", Ocarina of Time / Master Quest), y esta función los da por
+    Wii. La fuente de verdad es el disco: el magic word para ISO plana
+    (`disc_header.read_plain_iso_header`) y `disctype=` de
+    `wit LIST --sections` para lo demás (`_parse_list_sections`). Esto
+    queda para cuando `wit` no trae esa línea, y para
+    `list_wbfs_container`."""
     return "gc" if game_id[:1].upper() == "G" else "wii"
 
 
@@ -555,26 +556,68 @@ def _find_id6_line(output: str) -> Optional[tuple[str, str]]:
     return None
 
 
-def identify(path: Path, binary: str = "wit") -> Optional[DiscInfo]:
-    """Usa `wit LIST --long` para identificar un juego (ISO o WBFS).
+def _parse_list_sections(output: str) -> Optional[tuple[str, str, str]]:
+    """Del primer `[disc-N]` de `wit LIST --sections`, devuelve
+    (game_id, title, console), o None si no hay un disco con ID6 válido.
 
-    Sin --long, `wit LIST` cambia de formato (a veces omite las columnas
-    MiB/Región) según detecte o no una terminal, lo que corre el título de
-    lugar. Con --long el formato de 4 columnas (ID6, MiB, Región, Título)
-    es estable tanto en terminal como redirigido a una pipe."""
+    La consola sale de `disctype=` ("1 GameCube" / "2 Wii"), que es lo que
+    `wit` leyó del disco de verdad. Comprobado contra `wit` v3.05a con un
+    GameCube metido en un WBFS (`disctype=1 GameCube`) y un Wii
+    (`disctype=2 Wii`). Solo si falta esa línea se cae a `console_for_id`."""
+    campos: dict[str, str] = {}
+    en_disco = False
+    for raw_line in output.splitlines():
+        line = _strip_ansi(raw_line).strip()
+        if line.startswith("["):
+            if en_disco:
+                break  # ya se leyó el primer disco entero
+            en_disco = line.startswith("[disc-")
+            continue
+        if en_disco and "=" in line:
+            clave, valor = line.split("=", 1)
+            campos[clave.strip()] = valor.strip()
+
+    game_id = campos.get("id", "")
+    # `is_valid_game_id`: este ID termina formando parte de rutas del
+    # filesystem, ver disc_header.
+    if not is_valid_game_id(game_id):
+        return None
+    game_id = validate_game_id(game_id)
+    title = campos.get("title") or campos.get("name") or game_id
+
+    disctype = campos.get("disctype", "").lower()
+    if "gamecube" in disctype:
+        console = "gc"
+    elif "wii" in disctype:
+        console = "wii"
+    else:
+        console = console_for_id(game_id)
+    return game_id, title, console
+
+
+def identify(path: Path, binary: str = "wit") -> Optional[DiscInfo]:
+    """Usa `wit LIST --sections` para identificar un juego (WBFS, CISO,
+    WDF, o una ISO que el parseo directo no reconoció).
+
+    `--sections` y no `--long`: el formato `clave=valor` no depende de si
+    hay terminal, y es el único que trae el tipo de disco (`disctype=`).
+    Con `--long` la consola había que adivinarla por el primer carácter
+    del ID, y eso clasificaba como Wii a GameCube cuyo ID no empieza con
+    'G' -p. ej. D43E01, Ocarina of Time / Master Quest-, que terminaban
+    copiados como WBFS en `wbfs/` y "verificados" por un `wit VERIFY` que
+    no revisó nada (ver `verify_result`)."""
     if not find_wit(binary):
         raise WitNotFoundError(binary)
 
-    result = _run(binary, "LIST", "--long", str(path))
+    result = _run(binary, "LIST", "--sections", str(path))
     if result.returncode != 0 or not result.stdout.strip():
         return None
 
-    found = _find_id6_line(result.stdout)
+    found = _parse_list_sections(result.stdout)
     if found is None:
         return None
-    game_id, title = found
-    return DiscInfo(game_id=game_id, title=title, source="wit",
-                     console=console_for_id(game_id))
+    game_id, title, console = found
+    return DiscInfo(game_id=game_id, title=title, source="wit", console=console)
 
 
 def convert(
@@ -791,8 +834,11 @@ def verify_result(
     para imágenes de Wii**. Con una de GameCube contesta
     `ERROR #30 [WRONG FILE TYPE] ... Wii ISO image expected` y sale con
     returncode 4, o sea que se vería igual que "este archivo está
-    corrupto". Quien llame tiene que filtrar GameCube ANTES; acá no se
-    adivina la consola a partir de la ruta.
+    corrupto". Y con un GameCube metido en un WBFS es PEOR: contesta
+    `+OK` con returncode 0 al instante, sin haber leído nada (no hay
+    particiones cifradas con hashes que revisar). Quien llame tiene que
+    filtrar GameCube ANTES; acá no se adivina la consola a partir de la
+    ruta.
 
     Para un WBFS dividido alcanza con pasar la PRIMERA parte (`.wbfs`):
     `wit` sigue solo la cadena `.wbf1`, `.wbf2`… Comprobado partiendo un

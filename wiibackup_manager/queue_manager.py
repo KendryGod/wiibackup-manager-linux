@@ -865,7 +865,10 @@ class TransferQueue:
             # ante una imagen de GameCube. Correrlo igual marcaría como
             # corrupto TODO juego de GameCube copiado, que es peor que no
             # verificar: la única lectura honesta es decir que acá no hay
-            # nada que verificar.
+            # nada que verificar. Y si el GameCube quedó dentro de un WBFS,
+            # VERIFY sale con 0 sin leer nada: un "verificado" falso. Por
+            # eso este filtro depende de que `console` venga del disco y no
+            # del prefijo del ID (ver `wit_wrapper.identify`).
             job.verify_note = _("sin verificar: `wit VERIFY` solo acepta "
                                 "imágenes de Wii")
             self._finish_job(job, JobStatus.DONE, "", oplog.STATUS_OK, op=op)
