@@ -48,6 +48,7 @@ por la barra de progreso, definidas en `_find_conflict`.
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -186,6 +187,49 @@ INTERRUPT_UNSAFE_KINDS = frozenset(
 # cancelación que no existe.
 UNCANCELLABLE_KINDS = frozenset({OperationKind.FORMATTING})
 
+# Cuánto espera la app, al cerrarse después de cancelar, a que lo
+# cancelado termine de cerrarse. No es para que `wit` muera (eso ya lo
+# garantiza el SIGKILL): es para que el hilo de la operación llegue a
+# devolver a su nombre el juego que un reemplazo había apartado. Medido en
+# una USB real: entre cancelar y tener el original de vuelta, 0.6 s.
+CLOSE_WAIT_SECONDS = 3.0
+_CLOSE_POLL_MS = 100
+
+
+def close_when_settled(ops: "OperationManager", close: Callable[[], None],
+                       schedule: Callable[[int, Callable[[], bool]], object],
+                       clock: Callable[[], float] = time.monotonic,
+                       timeout: float = CLOSE_WAIT_SECONDS) -> bool:
+    """Llama a `close()` cuando ya no quede nada cancelable en curso, o a
+    los `timeout` segundos, lo que pase primero. Devuelve True si cerró en
+    el acto.
+
+    No bloquea: vuelve a mirar cada `_CLOSE_POLL_MS` con
+    `schedule(ms, fn)` -`GLib.timeout_add` en la app, que repite `fn`
+    mientras devuelva True-, así la ventana sigue respondiendo mientras
+    espera. Sin esto, cerrar la app a mitad de un reemplazo terminaba el
+    proceso con el hilo de la copia todavía a mitad de camino, y el juego
+    original quedaba con su nombre de respaldo.
+
+    Lo que no se puede cancelar (`UNCANCELLABLE_KINDS`) no se espera: no
+    va a terminar en 3 segundos por más que se lo espere. Y vencido el
+    plazo se cierra igual: lo que haya quedado apartado lo ofrece el
+    Recovery Manager al volver a abrir."""
+    limite = clock() + timeout
+
+    def revisar() -> bool:
+        pendientes = [op for op in ops.unsafe_to_interrupt()
+                      if op.kind not in UNCANCELLABLE_KINDS]
+        if pendientes and clock() < limite:
+            return True     # seguir mirando
+        close()
+        return False
+
+    if not revisar():
+        return True
+    schedule(_CLOSE_POLL_MS, revisar)
+    return False
+
 
 def _uses_progress_bar(kind: OperationKind, declared: bool) -> bool:
     """Si esta operación ocupa la barra de progreso: por ser de un tipo
@@ -306,6 +350,11 @@ class OperationManager:
         self._next_id = 1
         self._listeners: list = []
         self._log = log
+
+    @property
+    def log(self):
+        """El historial donde se anotan los resultados, o None."""
+        return self._log
 
     # ------------------------------------------------------------ Estado --
     def active_operations(self) -> list:

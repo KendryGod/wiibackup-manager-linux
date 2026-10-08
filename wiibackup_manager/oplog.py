@@ -64,6 +64,9 @@ MAX_ENTRIES = 500
 # Nombre (sin traducir, mismo criterio que `OperationKind.value`) de la
 # entrada que avisa que un respaldo temporal quedó ocupando espacio.
 ORPHANED_BACKUP_OPERATION = "Respaldo temporal no eliminado"
+# Y la que avisa que un reemplazo se cortó y el original NO volvió a su
+# nombre: sigue entero, apartado con un nombre oculto.
+UNRESTORED_BACKUP_OPERATION = "Original sin restaurar"
 
 
 @dataclass(frozen=True)
@@ -132,6 +135,22 @@ def record_orphaned_backup(op_log: "Optional[OperationLog]", target: str,
     if op_log is None:
         return
     op_log.record(ORPHANED_BACKUP_OPERATION, target, STATUS_PARTIAL, detail)
+
+
+def record_unrestored_backup(op_log: "Optional[OperationLog]", target: str,
+                             detail: str) -> None:
+    """Anota que un reemplazo falló o se canceló y el original no se pudo
+    devolver a su nombre (USB desconectada, error de E/S).
+
+    Entrada propia por el mismo motivo que `record_orphaned_backup`, y
+    con una razón más: se anota en el momento en que falla la
+    restauración, no cuando la operación termina de cerrarse. Si eso pasa
+    mientras la app se está cerrando, el hilo de la operación puede no
+    llegar nunca a anotar su resultado, y esta es la única constancia de
+    que el juego quedó apartado. Tolera `op_log=None`."""
+    if op_log is None:
+        return
+    op_log.record(UNRESTORED_BACKUP_OPERATION, target, STATUS_ERROR, detail)
 
 
 def _coerce_entry(raw) -> Optional[LogEntry]:

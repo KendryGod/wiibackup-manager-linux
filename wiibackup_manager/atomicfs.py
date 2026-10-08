@@ -38,6 +38,7 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -242,11 +243,22 @@ class SetAside:
     Cada módulo decide qué significa eso -`DestinationGuard` levanta
     `library_ops.RollbackFailedError` con un mensaje para el usuario, el
     instalador de Homebrew reporta los respaldos huérfanos en su
-    `InstallResult`- y esta clase no tiene por qué saberlo."""
+    `InstallResult`- y esta clase no tiene por qué saberlo.
+
+    `restore()` y `discard()` se pueden llamar desde dos hilos a la vez
+    (el de la operación y el del cierre de la app): cada par lo toma UNA
+    sola llamada, bajo el lock, y la otra no lo ve. Sin eso, la segunda
+    encontraba el respaldo ya devuelto, su `os.replace` fallaba y
+    reportaba como "no restaurado" algo que estaba en su lugar."""
 
     def __init__(self, marca: str) -> None:
         self.marca = marca
         self._pairs: list = []
+        # Originales que `restore()` ya devolvió a su nombre, para que la
+        # limpieza que viene después no los confunda con algo a medio
+        # escribir.
+        self.restored: list = []
+        self._lock = threading.Lock()
 
     @classmethod
     def adopt(cls, marca: str, pairs) -> "SetAside":
@@ -276,7 +288,14 @@ class SetAside:
     @property
     def pairs(self) -> list:
         """Los pares `(original, respaldo)` todavía apartados."""
-        return list(self._pairs)
+        with self._lock:
+            return list(self._pairs)
+
+    def _take(self) -> list:
+        """Saca TODOS los pares pendientes y se los queda quien llama."""
+        with self._lock:
+            tomados, self._pairs = self._pairs, []
+        return tomados
 
     def move_aside(self, original: Path) -> Path:
         """Aparta `original` y devuelve la ruta del respaldo. Deja
@@ -287,7 +306,8 @@ class SetAside:
         original = Path(original)
         respaldo = hidden_sibling(original, self.marca)
         os.replace(original, respaldo)
-        self._pairs.append((original, respaldo))
+        with self._lock:
+            self._pairs.append((original, respaldo))
         return respaldo
 
     def restore(self) -> list:
@@ -298,15 +318,25 @@ class SetAside:
         tiene sentido dejar dos partes sin restaurar porque la tercera se
         atoró- y se restaura en orden inverso al que se apartaron. Los que
         fallaron quedan en `pairs` (en el orden en que se apartaron, no en
-        el que se intentaron): son exactamente lo que sigue pendiente."""
+        el que se intentaron): son exactamente lo que sigue pendiente.
+
+        Si otro hilo ya está restaurando, esta llamada no encuentra nada
+        que tomar y devuelve lo pendiente sin tocar ningún archivo."""
+        tomados = self._take()
         fallidos: list = []
-        for original, respaldo in reversed(self._pairs):
+        for original, respaldo in reversed(tomados):
             try:
                 os.replace(respaldo, original)
             except OSError:
                 fallidos.append((original, respaldo))
-        self._pairs = [par for par in self._pairs if par in fallidos]
-        return list(self._pairs)
+            else:
+                with self._lock:
+                    self.restored.append(original)
+        with self._lock:
+            # Delante de lo que se haya apartado mientras tanto, en el
+            # orden en que se apartaron.
+            self._pairs = [par for par in tomados if par in fallidos] + self._pairs
+            return list(self._pairs)
 
     def discard(self) -> list:
         """Borra los respaldos -ya no hacen falta- y devuelve los que no
@@ -318,7 +348,7 @@ class SetAside:
         unidad llena por algo que no puede ver ni encontrar. Quien llama
         decide cómo avisarlo."""
         huerfanos: list = []
-        for _original, respaldo in self._pairs:
+        for _original, respaldo in self._take():
             try:
                 if respaldo.is_dir():
                     shutil.rmtree(respaldo)
@@ -326,7 +356,6 @@ class SetAside:
                     respaldo.unlink(missing_ok=True)
             except OSError:
                 huerfanos.append(respaldo)
-        self._pairs = []
         return huerfanos
 
 

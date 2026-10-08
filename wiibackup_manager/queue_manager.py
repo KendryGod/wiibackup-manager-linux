@@ -827,6 +827,7 @@ class TransferQueue:
                     cancel=job.cancel_token,
                     scrub_update=job.scrub_update,
                     flush_progress_cb=on_flush,
+                    op_log=self.ops.log,
                 )
             finally:
                 # Antes que los `except` de abajo, que ya cierran la tarea:

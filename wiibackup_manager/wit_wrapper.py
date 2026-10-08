@@ -474,6 +474,10 @@ WRITEBACK_MAX_WINDOW = 256 * 1024 * 1024
 # caché a velocidad de RAM, así que lo que se pasa entre dos miradas es
 # este intervalo por esa velocidad: con 10 ms se medía ~12 MB de más.
 _WRITEBACK_GATE_INTERVAL = 0.002
+# Cuánto se espera a los hilos del limitador al cortar una copia (cancelar,
+# fallo, timeout). Los dos son daemon y sus archivos están abiertos solo
+# para leer: dejarlos terminar solos no arriesga nada.
+_LIMITER_JOIN_ON_ABORT = 0.2
 
 
 def _is_wit_temp(path: Path, dest: Path) -> bool:
@@ -706,6 +710,7 @@ def _run_with_progress(
     cancel: Optional[CancellationToken] = None,
     inactivity_timeout: Optional[float] = WIT_INACTIVITY_TIMEOUT,
     absolute_timeout: Optional[float] = WIT_ABSOLUTE_TIMEOUT,
+    cleanup_on_abort: bool = True,
 ) -> subprocess.CompletedProcess:
     """Como `subprocess.run`, pero con `Popen` en vez de `.run()` para
     poder sondear cada 1s cuánto lleva escrito `wit`
@@ -727,7 +732,12 @@ def _run_with_progress(
     `inactivity_timeout` se reinicia cada vez que `wit` escribe algo, así
     que una transferencia lenta pero sana nunca se corta sola (ver el
     comentario de `WIT_INACTIVITY_TIMEOUT`); `absolute_timeout` queda
-    detrás como última red de seguridad."""
+    detrás como última red de seguridad.
+
+    Con `cleanup_on_abort=False`, lo que `wit` deja a medio escribir al
+    cancelar, fallar o vencer el timeout NO se borra acá: queda para quien
+    llama (`library_ops.DestinationGuard`, que primero devuelve el
+    original a su lugar y recién después barre)."""
     # Lo que ya existía antes de arrancar: si hay que limpiar por una
     # cancelación, se borra solo lo que agregó ESTA operación.
     outputs_before = output_files(dest)
@@ -786,24 +796,31 @@ def _run_with_progress(
                     if timeout_reason is not None:
                         # Reanudado antes: a un proceso detenido el
                         # SIGTERM no le llega hasta que lo reanudan.
-                        limiter.stop()
+                        limiter.stop(timeout=_LIMITER_JOIN_ON_ABORT)
                         _terminate_process_group(proc)
                         break
             if not running:
                 proc.wait()
         except BaseException:
-            limiter.stop()
+            limiter.stop(timeout=_LIMITER_JOIN_ON_ABORT)
             _terminate_process_group(proc)
-            cleanup_new_output_files(dest, outputs_before)
+            if cleanup_on_abort:
+                cleanup_new_output_files(dest, outputs_before)
             raise
         finally:
-            # Pase lo que pase, `wit` no queda detenido.
-            limiter.stop()
+            # Pase lo que pase, `wit` no queda detenido. Si se canceló no
+            # se espera a los hilos del limitador más que un instante: el
+            # que baja datos puede estar esperando a la unidad, ya no
+            # detiene a nadie, y cada segundo acá es un segundo más con el
+            # original del cliente apartado (ver `DestinationGuard`).
+            abortado = ((cancel is not None and cancel.cancelled)
+                        or timeout_reason is not None)
+            limiter.stop(timeout=_LIMITER_JOIN_ON_ABORT if abortado else 2.0)
             if cancel is not None:
                 cancel.detach(proc)
 
         cancelled = cancel is not None and cancel.cancelled
-        if cancelled or timeout_reason is not None:
+        if (cancelled or timeout_reason is not None) and cleanup_on_abort:
             # El proceso murió a mitad de una escritura: los temporales que
             # dejó no los va a renombrar ni limpiar nadie.
             cleanup_new_output_files(dest, outputs_before)
@@ -972,6 +989,7 @@ def convert(
     overwrite: bool = False,
     scrub_update: bool = True,
     prealloc: bool = True,
+    cleanup_on_abort: bool = True,
 ) -> subprocess.CompletedProcess:
     """Convierte src -> dest. target_format: 'WBFS' o 'ISO'.
 
@@ -1029,7 +1047,10 @@ def convert(
     veces. Quien llama decide según el filesystem del destino (ver
     `drives.is_fat_filesystem`); sin la reserva `wit` ya no falla temprano
     por falta de espacio, así que el espacio libre lo tiene que mirar
-    quien llama ANTES de copiar."""
+    quien llama ANTES de copiar.
+
+    `cleanup_on_abort=False` deja los temporales de una copia cortada
+    para quien llama (ver `_run_with_progress`)."""
     if not find_wit(binary):
         raise WitNotFoundError(binary)
 
@@ -1078,6 +1099,7 @@ def convert(
         args, dest, bytes_progress_cb or (lambda _n: None), cancel,
         inactivity_timeout=inactivity_timeout,
         absolute_timeout=absolute_timeout,
+        cleanup_on_abort=cleanup_on_abort,
     )
 
     if cancel is not None and cancel.cancelled:

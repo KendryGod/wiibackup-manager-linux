@@ -73,15 +73,34 @@ class _VentanaDeMentira:
         self.homebrew_view = _VistaDeMentira("homebrew", self.eventos)
         self.memory_check_view = _VistaDeMentira("memory", self.eventos)
         self.dialogos: list = []
+        self.toasts: list = []
+        # La espera acotada antes de cerrar (`_close_after_cancel`), con un
+        # reloj de mentira: cada vuelta del "temporizador" avanza el reloj
+        # lo que avanzaría el de GLib, hasta que la función pida parar.
+        self._closing = False
+        self.reloj = 0.0
+        self.vueltas = 0
+        self._close_clock = lambda: self.reloj
+        self._close_timer = self._temporizador
 
         from wiibackup_manager.window import WiiBackupWindow
         for nombre in ("_on_close_request", "_shutdown_views", "_confirm_close",
-                       "_on_close_response"):
+                       "_on_close_response", "_close_after_cancel"):
             setattr(self, nombre,
                     types.MethodType(getattr(WiiBackupWindow, nombre), self))
 
     def close(self):
         self.eventos.append("close")
+
+    def _show_toast(self, mensaje):
+        self.toasts.append(mensaje)
+
+    def _temporizador(self, ms, funcion):
+        while True:
+            self.reloj += ms / 1000
+            self.vueltas += 1
+            if not funcion():
+                return
 
 
 @pytest.fixture
@@ -257,3 +276,71 @@ def test_despues_de_confirmar_el_cierre_ya_no_vuelve_a_preguntar(ventana):
     assert ventana.dialogos == [ventana.dialogos[0]], "mostró un segundo diálogo"
     # Y no vuelve a cortar lo que ya cortó.
     assert ventana.eventos == []
+
+
+# ------------------------------------- Esperar lo cancelado, con un tope --
+def test_cerrar_espera_a_que_lo_cancelado_termine_de_cerrarse(ventana):
+    """El caso del reemplazo: cancelar mata `wit` en el acto, pero el
+    original lo devuelve a su nombre el hilo de la copia un momento
+    después. La ventana se cierra recién cuando la operación terminó."""
+    op = ventana.ops.start(OperationKind.TRANSFERRING, resources=["/run/media/usb"])
+    ventana._on_close_request()
+
+    def temporizador(ms, funcion):
+        while True:
+            ventana.reloj += ms / 1000
+            ventana.vueltas += 1
+            if ventana.vueltas == 6:
+                ventana.ops.finish(op)   # el hilo terminó de restaurar
+            if not funcion():
+                return
+
+    ventana._close_timer = temporizador
+    ventana.dialogos[0].emit("response", "close")
+
+    assert ventana.eventos[-1] == "close"
+    assert ventana.vueltas == 6
+    assert ventana.reloj == pytest.approx(0.6)
+    assert ventana.toasts == ["Cancelando antes de cerrar…"]
+
+
+def test_cerrar_no_espera_mas_de_3_segundos(ventana):
+    """Un `wit` que no muere (la USB se desconectó y quedó en estado D):
+    la operación no termina nunca, y la ventana se cierra igual al
+    vencer el plazo."""
+    ventana.ops.start(OperationKind.TRANSFERRING, resources=["/run/media/usb"])
+    ventana._on_close_request()
+    ventana.dialogos[0].emit("response", "close")
+
+    assert ventana.eventos[-1] == "close"
+    assert ventana.reloj == pytest.approx(operations.CLOSE_WAIT_SECONDS)
+    assert operations.CLOSE_WAIT_SECONDS <= 3.0
+
+
+def test_mientras_espera_otro_intento_de_cerrar_no_pregunta_ni_cierra(ventana):
+    op = ventana.ops.start(OperationKind.TRANSFERRING, resources=["/run/media/usb"])
+    programadas = []
+    ventana._close_timer = lambda ms, funcion: programadas.append(funcion)
+    ventana._on_close_request()
+    ventana.dialogos[0].emit("response", "close")
+    assert "close" not in ventana.eventos
+
+    assert ventana._on_close_request() is True
+    assert len(ventana.dialogos) == 1, "volvió a preguntar mientras esperaba"
+    assert "close" not in ventana.eventos
+
+    ventana.ops.finish(op)
+    assert programadas[0]() is False
+    assert ventana.eventos[-1] == "close"
+
+
+def test_lo_que_no_se_puede_cancelar_no_se_espera(ventana):
+    """Formatear corre como root fuera de la app: esperarlo 3 segundos no
+    cambia nada. Se cierra en el acto, como antes."""
+    ventana.ops.start(OperationKind.FORMATTING, resources=["/dev/sdb"])
+    ventana._on_close_request()
+    ventana.dialogos[0].emit("response", "close")
+
+    assert ventana.eventos[-1] == "close"
+    assert ventana.vueltas == 0
+    assert ventana.toasts == []

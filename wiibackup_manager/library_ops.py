@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import atomicfs, drives, fileops, wit_wrapper
+from . import atomicfs, drives, fileops, oplog, wit_wrapper
 from .fileops import _copy_with_progress, free_variant, rename_no_replace
 from .game_model import Game, standard_filename
 from .i18n import _
@@ -247,6 +247,22 @@ def original_kept_message() -> str:
 MARCA_RESPALDO = "respaldo"
 
 
+def _sync_dir(carpeta: Path) -> None:
+    """`fsync` de una carpeta: baja a la unidad sus entradas (un rename
+    recién hecho). Best-effort: si el filesystem no lo acepta o la unidad
+    ya no está, no hay nada mejor que hacer."""
+    try:
+        fd = os.open(carpeta, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 class DestinationGuard:
     """Aparta lo que ya hay en el destino y lo devuelve si algo falla.
 
@@ -273,11 +289,15 @@ class DestinationGuard:
         with DestinationGuard(dest) as guard:
             ...escribir dest...
             guard.commit()      # solo si salió TODO bien
+
+    `op_log`, si se pasa, es donde queda constancia si el original no
+    pudo volver a su nombre (ver `oplog.record_unrestored_backup`).
     """
 
-    def __init__(self, dest: Path, enabled: bool = True):
+    def __init__(self, dest: Path, enabled: bool = True, op_log=None):
         self.dest = Path(dest)
         self.enabled = enabled
+        self.op_log = op_log
         # El mecanismo de apartar/devolver/descartar es compartido
         # (`atomicfs.SetAside`); lo que esta clase pone encima es cuándo
         # hacerlo y qué significa cada fallo.
@@ -342,20 +362,32 @@ class DestinationGuard:
         # operación fallida dejó a medio escribir.
         if self._committed and exc_type is None:
             self._discard()
-        else:
-            self._cleanup_partials()
-            try:
-                self._restore()
-            except RollbackFailedError as rollback_error:
-                # `exc` es lo que haya fallado DENTRO del `with` (la
-                # conversión, una cancelación) -el motivo por el que se
-                # llegó a intentar restaurar en primer lugar. Si además
-                # restaurar falla, quien atrape esto necesita los dos
-                # datos: no alcanza con saber que el respaldo quedó a
-                # medio volver, si no también por qué se estaba
-                # restaurando.
-                rollback_error.original_error = exc
-                raise
+            return False
+        # Primero el original a su lugar y DESPUÉS la basura. Al revés,
+        # el juego del cliente seguía con un nombre oculto mientras se
+        # borraba un temporal de varios GB, y si la app se cerraba o se
+        # cortaba la luz en ese rato, ahí quedaba. `os.replace` pisa sin
+        # problema un nombre final que `wit` haya alcanzado a escribir.
+        error: Optional[RollbackFailedError] = None
+        try:
+            self._restore()
+        except RollbackFailedError as rollback_error:
+            # `exc` es lo que haya fallado DENTRO del `with` (la
+            # conversión, una cancelación) -el motivo por el que se llegó
+            # a intentar restaurar en primer lugar. Si además restaurar
+            # falla, quien atrape esto necesita los dos datos: no alcanza
+            # con saber que el respaldo quedó a medio volver, si no
+            # también por qué se estaba restaurando.
+            rollback_error.original_error = exc
+            error = rollback_error
+        self._cleanup_partials()
+        if self._aside.restored:
+            # Que "restaurado" quiera decir "en la unidad": el rename vive
+            # en la caché del directorio hasta que el kernel lo baja.
+            _sync_dir(self.dest.parent)
+        if error is not None:
+            oplog.record_unrestored_backup(self.op_log, str(self.dest), str(error))
+            raise error
         return False  # nunca se traga la excepción
 
     def _cleanup_partials(self) -> None:
@@ -374,13 +406,20 @@ class DestinationGuard:
 
         `cleanup_new_output_files` cubre las dos familias y solo toca lo
         que apareció después de `__enter__`, así que no se lleva por
-        delante lo que ya estaba."""
+        delante lo que ya estaba.
+
+        Corre DESPUÉS de `_restore`: los originales que ya volvieron a su
+        nombre están en los nombres finales y no son basura."""
         # Los respaldos van explícitos en el conjunto protegido además de
         # estar en la foto: son lo único que no se puede perder acá, y no
         # depende de que la foto se haya tomado en el orden correcto.
-        protegidos = self._outputs_before | {resp for _orig, resp in self._saved}
+        restaurados = set(self._aside.restored)
+        protegidos = (self._outputs_before | restaurados
+                      | {resp for _orig, resp in self._saved})
         wit_wrapper.cleanup_new_output_files(self.dest, protegidos)
         for parcial in wbfs_group(self.dest):
+            if parcial in restaurados:
+                continue
             try:
                 parcial.unlink()
             except OSError:
@@ -430,6 +469,7 @@ def send_to_wbfs_drive(
     cancel: Optional["wit_wrapper.CancellationToken"] = None,
     scrub_update: bool = True,
     flush_progress_cb: Optional[Callable[[], None]] = None,
+    op_log=None,
 ) -> Path:
     """Copia `game` a la estructura estándar 'wbfs/<ID6>/<ID6>.wbfs' que
     reconocen los USB Loaders de Wii (USB Loader GX, CFG USB Loader, etc.)
@@ -481,7 +521,11 @@ def send_to_wbfs_drive(
     en cuanto los datos llegan a la caché- se baja después, de a ventanas
     y antes de dar por buena la conversión, así que cancelar en esa espera
     devuelve el destino a como estaba. `flush_progress_cb()` se llama
-    durante esa espera, para quien muestre el progreso."""
+    durante esa espera, para quien muestre el progreso.
+
+    `op_log` es el historial donde queda constancia si un reemplazo
+    cortado no pudo devolver el original a su nombre (ver
+    `DestinationGuard`)."""
     if cancel is not None and cancel.cancelled:
         raise wit_wrapper.OperationCancelled("Transferencia cancelada por el usuario.")
 
@@ -497,7 +541,7 @@ def send_to_wbfs_drive(
     dest_dir.mkdir(parents=True, exist_ok=True)
     try:
         return _write_to_drive(game, dest, wit_binary, bytes_progress_cb,
-                               cancel, scrub_update, flush_progress_cb)
+                               cancel, scrub_update, flush_progress_cb, op_log)
     except BaseException:
         # Cancelada o fallida: lo que la copia escribió ya lo limpiaron
         # `atomicfs` o `DestinationGuard`, y la carpeta del juego
@@ -512,7 +556,7 @@ def send_to_wbfs_drive(
 
 def _write_to_drive(game: Game, dest: Path, wit_binary: str,
                     bytes_progress_cb, cancel, scrub_update,
-                    flush_progress_cb) -> Path:
+                    flush_progress_cb, op_log=None) -> Path:
     """El cuerpo de `send_to_wbfs_drive`, ya con la carpeta del juego
     creada: copia directa o conversión con `wit`, según el caso."""
     dest_dir = dest.parent
@@ -557,7 +601,8 @@ def _write_to_drive(game: Game, dest: Path, wit_binary: str,
 
     # Si había algo en el destino, se lo aparta antes de dejar que `wit`
     # escriba: si la conversión falla o se cancela, vuelve a su lugar.
-    with DestinationGuard(dest, enabled=bool(wbfs_group(dest))) as guard:
+    with DestinationGuard(dest, enabled=bool(wbfs_group(dest)),
+                          op_log=op_log) as guard:
         # `overwrite=True` explícito: quien llama ya decidió pisar (lo
         # exige el `overwrite` de esta función) y el guard de arriba tiene
         # el respaldo apartado, así que si `wit` se encuentra algo con el
@@ -572,7 +617,10 @@ def _write_to_drive(game: Game, dest: Path, wit_binary: str,
         result = wit_wrapper.convert(game.path, dest, "WBFS", wit_binary, split=split,
                                       bytes_progress_cb=bytes_progress_cb, cancel=cancel,
                                       overwrite=True, scrub_update=scrub_update,
-                                      prealloc=prealloc)
+                                      prealloc=prealloc,
+                                      # Lo cortado lo barre el guard, DESPUÉS
+                                      # de devolver el original a su lugar.
+                                      cleanup_on_abort=False)
         if result.returncode != 0:
             raise RuntimeError(
                 result.stderr.strip() or _("Error desconocido al convertir con wit"))

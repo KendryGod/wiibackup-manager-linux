@@ -90,6 +90,12 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         # volvería a entrar a `_on_close_request`, que volvería a
         # preguntar, y la ventana no se cerraría nunca.
         self._close_confirmed = False
+        # Entre "Cancelar operación y cerrar" y el cierre de verdad: se
+        # espera (sin trabar la ventana, hasta `CLOSE_WAIT_SECONDS`) a que
+        # lo cancelado termine de cerrarse. Ver `_close_after_cancel`.
+        self._closing = False
+        self._close_timer = GLib.timeout_add
+        self._close_clock = time.monotonic
 
         # Historial persistente de operaciones (pestaña Log). Se le pasa al
         # OperationManager para que cada operación que termina informando
@@ -1274,7 +1280,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 try:
                     library_ops.send_to_wbfs_drive(game, dest_root, wit_binary,
                                                 bytes_progress_cb=on_game_progress,
-                                                overwrite=overwrite, cancel=cancel)
+                                                overwrite=overwrite, cancel=cancel,
+                                                op_log=self.op_log)
                     ok += 1
                     bytes_written += item.output_bytes
                 except wit_wrapper.OperationCancelled:
@@ -2571,14 +2578,18 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 # se lo aparta y se lo devuelve si la conversión no
                 # termina bien. Ver library_ops.DestinationGuard.
                 with library_ops.DestinationGuard(
-                        dest, enabled=bool(transfer_plan.wbfs_group(dest))) as guard:
+                        dest, enabled=bool(transfer_plan.wbfs_group(dest)),
+                        op_log=self.op_log) as guard:
                     # `overwrite=True` explícito: el usuario ya confirmó
                     # pisar el destino y el guard de arriba tiene el
                     # respaldo apartado para devolverlo si esto sale mal.
+                    # Lo que quede a medio escribir lo barre el guard,
+                    # después de devolver el original.
                     result = wit_wrapper.convert(game.path, dest, target_ext.strip("."),
                                                   self.settings.wit_binary,
                                                   bytes_progress_cb=on_progress,
-                                                  cancel=cancel, overwrite=True)
+                                                  cancel=cancel, overwrite=True,
+                                                  cleanup_on_abort=False)
                     ok = result.returncode == 0
                     if ok:
                         guard.commit()
@@ -2795,6 +2806,11 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             # Segunda vuelta: el usuario ya eligió "Cancelar y cerrar" y ya
             # se canceló lo que había. Salir sin volver a preguntar.
             return False
+        if self._closing:
+            # Ya se está cerrando: lo cancelado todavía se está cerrando
+            # (ver `_close_after_cancel`). Ni cerrar antes ni preguntar de
+            # nuevo.
+            return True
 
         riesgosas = self.ops.unsafe_to_interrupt()
         if not riesgosas:
@@ -2873,8 +2889,28 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         # verificar en lote) no pasa por ninguna vista: se corta con el
         # token, que además mata el `wit` en curso.
         self._cancel_token.cancel()
-        self._close_confirmed = True
-        self.close()
+        self._close_after_cancel()
+
+    def _close_after_cancel(self):
+        """Cierra cuando lo cancelado terminó de cerrarse, o a los
+        `operations.CLOSE_WAIT_SECONDS`, lo que pase primero.
+
+        Cancelar mata `wit` en el acto, pero lo que viene después lo hace
+        el hilo de la operación: devolver a su nombre el juego que un
+        reemplazo había apartado y borrar lo que quedó a medio escribir.
+        Ese hilo es daemon; si la ventana se cerraba enseguida, el proceso
+        terminaba con él a mitad de camino y el original quedaba con su
+        nombre de respaldo. La espera no traba la ventana (ver
+        `operations.close_when_settled`)."""
+        self._closing = True
+
+        def cerrar():
+            self._close_confirmed = True
+            self.close()
+
+        if not operations.close_when_settled(self.ops, cerrar, self._close_timer,
+                                             clock=self._close_clock):
+            self._show_toast(_("Cancelando antes de cerrar…"))
 
     def _show_toast(self, message: str):
         # Sin markup: los avisos llevan nombres de juegos, rutas y errores
