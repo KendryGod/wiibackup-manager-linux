@@ -515,9 +515,37 @@ wiibackup_manager/
 
 ### 0.2.2
 
-Cuatro commits desde la 0.2.1, todos arreglos. Dos de ellos rompían
-funciones centrales con hardware y juegos reales: formatear un USB de
-fábrica y transferir cualquier juego de Wii con la opción por defecto.
+20 commits desde la 0.2.1. La mayoría son arreglos salidos de pruebas con
+hardware real (un Kingston DataTraveler de ~14 MB/s): formatear un USB de
+fábrica, transferir juegos de Wii con la opción por defecto, cancelar y
+cerrar a mitad de una copia sin perder el juego que ya estaba en la
+unidad. Además, dos funciones nuevas: el Ticket de Entrega con la marca
+del taller y la restauración de un reemplazo cortado desde el Recovery
+Manager.
+
+El bump a 0.2.2 (`6e53326`) se hizo después de los cuatro primeros
+arreglos; los 16 commits que le siguen también son parte de esta versión
+y están descritos acá.
+
+#### Nuevo
+
+- **Ticket de Entrega con la marca del taller.** El ticket deja de traer
+  un nombre fijo: nombre, eslogan, ubicación, WhatsApp, logo, color y
+  tema salen de Ajustes → General → **Mi taller**. La lista de juegos se
+  lee de la estructura de la unidad (Wii en `wbfs/`, GameCube en
+  `games/`), con los títulos de la caché de GameTDB. El PDF tiene modo
+  oscuro con la marca y claro para imprimir, se lee bien en el celular,
+  ajusta el tamaño de letra para llenar la hoja con pocos juegos y sigue
+  en otras hojas sin partir filas. El pie lleva el WhatsApp y un QR
+  opcional. El nombre del cliente sale en formato de título ("Juan de la
+  Cruz", "O'Brien") y el servicio con mayúscula inicial.
+
+- **El Recovery Manager ofrece restaurar un reemplazo cortado.** Al
+  reconectar una unidad que se desenchufó mientras se pisaba un juego, la
+  app ofrece devolver el original, que había quedado guardado aparte con
+  un nombre oculto. También reconoce los temporales de `wit`, junta las
+  partes de un mismo juego en una sola entrada y vuelve a escanear cada
+  vez que se monta una unidad.
 
 #### Corregido
 
@@ -560,6 +588,58 @@ fábrica y transferir cualquier juego de Wii con la opción por defecto.
   tienda de Homebrew y la descripción del Ticket. Al revés, las tarjetas
   de la tienda de Homebrew escapaban el nombre sobre un texto sin markup
   y mostraban un `&amp;` literal.
+
+- **"Cancelar todo" frena una copia directa hacia una unidad lenta.**
+  Las copias que no pasan por `wit` (GameCube, o un WBFS que entra
+  entero) dejaban todo en la caché y el tiempo real se iba en un `fsync`
+  final que no se podía cortar: la tarea terminaba "Completado" aunque
+  se hubiera cancelado. Ahora lo escrito se baja por ventanas y la
+  cancelación se mira mientras la unidad trabaja.
+
+- **Cancelar una copia de Wii es inmediato.** En un USB lento, cancelar
+  tardaba hasta minuto y medio: `wit` dejaba ~1 GB en la caché del
+  kernel y el sistema no lo deja morir hasta bajarlo. Ahora la app no deja que `wit` se adelante
+  más de ~1 s de copia a la unidad -lo pausa y lo reanuda según la
+  velocidad medida- y al cancelar lo mata en el acto. Medido: 0,6-1,1 s,
+  sin que la copia sea más lenta. Antes, cerrar la app justo después de
+  cancelar podía dejar a `wit` terminando la copia por su cuenta.
+
+- **Cerrar la app a mitad de un reemplazo devuelve el original.** Con
+  "Cancelar operación y cerrar" la app salía antes de devolver a su
+  nombre el juego que se estaba reemplazando, y quedaba oculto hasta
+  usar el Recovery Manager. Ahora la ventana espera a que eso termine
+  (sin trabarse y nunca más de 3 s), el original vuelve antes de borrar
+  lo que quedó a medias, y si no puede volver (USB desconectada) queda
+  anotado en el historial.
+
+- **Un reemplazo cortado por desconexión dice que el original quedó
+  guardado**, en vez de un "no se pudo restaurar" con rutas internas que
+  se leía como "se borró el juego".
+
+- **Ya no quedan carpetas vacías** (`wbfs/<ID6>/` o `games/<Título>
+  [ID6]/`) después de cancelar, de que falle una copia o de eliminar un
+  resto desde el Recovery Manager.
+
+- **Progreso y velocidad reales.** Con un pendrive lento la barra saltaba
+  a ~70 % a ~700 MB/s: medía lo que había llegado a la caché, no a la
+  unidad. Ahora mide lo que la unidad recibió, y un 100 % quiere decir
+  que ya se puede desenchufar.
+
+- **GameCube que no empieza con "G".** Ocarina of Time / Master Quest
+  (D43E01) se tomaba por Wii, se copiaba a `wbfs/` y `wit VERIFY` lo daba
+  por verificado sin revisar nada. Ahora la consola sale del disco y no
+  del prefijo del ID, y nunca se corre VERIFY sobre un disco de GameCube.
+
+- **Copias a FAT32 sin escribir dos veces.** La reserva de espacio de
+  `wit` en FAT32 escribía el archivo entero en ceros antes de copiar;
+  ahora va desactivada en FAT32. Antes de verificar, lo copiado se baja a
+  la unidad para que la verificación relea de ahí y no de la RAM.
+
+#### Otros
+
+- Cada transferencia mide cuánto duró cada fase (preparación, copia,
+  escritura en la unidad, verificación) y lo deja en el historial.
+- `pyflakes` limpio en todo el repo.
 
 ### 0.2.1
 
