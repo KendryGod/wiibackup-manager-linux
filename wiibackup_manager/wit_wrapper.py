@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from . import fsutil
 from .disc_header import DiscInfo, is_valid_game_id, validate_game_id
 from .i18n import _
 
@@ -45,7 +46,8 @@ class OperationCancelled(RuntimeError):
 
 
 # Segundos que se le dan a `wit` para terminar por las buenas (SIGTERM)
-# antes de matarlo a la fuerza (SIGKILL) al cancelar.
+# antes de matarlo a la fuerza (SIGKILL) cuando se lo da por colgado (ver
+# `_terminate_process_group`). Cancelar no espera: SIGKILL directo.
 _KILL_GRACE_SECONDS = 5.0
 
 
@@ -61,6 +63,10 @@ def _send_signal_group(proc: subprocess.Popen, sig) -> None:
         pgid = os.getpgid(proc.pid)
     except OSError:
         pgid = None
+    if pgid == os.getpgrp():
+        # El proceso no tiene grupo propio: señalar "su" grupo sería
+        # señalar a la app (un SIGSTOP la dejaría congelada).
+        pgid = None
 
     if pgid is not None:
         try:
@@ -74,46 +80,95 @@ def _send_signal_group(proc: subprocess.Popen, sig) -> None:
         pass
 
 
-def _escalate_to_kill(proc: subprocess.Popen) -> None:
-    """Espera la gracia del SIGTERM y, si el proceso sigue vivo, SIGKILL.
-
-    Sondea con `poll()` en vez de `wait()` a propósito: el hilo que lanzó
-    el proceso ya está esperándolo, y dos `wait()` sobre el mismo Popen
-    desde hilos distintos es justo la clase de carrera que no hace falta
-    tener."""
-    deadline = time.monotonic() + _KILL_GRACE_SECONDS
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            return
-        time.sleep(0.1)
-    if proc.poll() is None:
-        _send_signal_group(proc, signal.SIGKILL)
-
-
 def _request_termination(proc: subprocess.Popen) -> None:
-    """Pide que `proc` termine y VUELVE EN EL ACTO.
+    """Mata `proc` (y su grupo) con SIGKILL y VUELVE EN EL ACTO.
 
     Esto lo llama el botón "Cancelar", o sea el hilo de GTK: cualquier
-    espera acá congela la ventana entera. Antes se mandaba SIGTERM y se
-    esperaba hasta 5 segundos, y otros 5 después del SIGKILL: hasta 10
-    segundos con la interfaz trabada, sin repintar ni responder clicks,
-    justo cuando el usuario acaba de pedir que algo se detenga.
+    espera acá congela la ventana entera.
 
-    El SIGTERM se manda de inmediato (es lo que corta la escritura) y la
-    escalada a SIGKILL queda a cargo de un hilo suelto, que es trabajo de
-    fondo y a nadie le importa cuánto tarde."""
+    SIGKILL directo, sin pasar antes por SIGTERM. `wit` captura SIGTERM y
+    lo toma como "terminá lo que estás copiando", no como "abortá":
+    medido en una USB real, con un solo SIGTERM siguió escribiendo y
+    renombró el temporal al nombre final, o sea que dio por buena una
+    copia que el usuario había cancelado. Antes el SIGKILL llegaba 5
+    segundos después desde un hilo suelto, y si ese hilo no llegaba a
+    correr (la app se cerraba en esos 5 segundos) quedaba un `wit`
+    huérfano completando la copia. Mandarlo acá, en el mismo llamado, no
+    depende de ningún otro hilo."""
     if proc.poll() is not None:
         return
-    _send_signal_group(proc, signal.SIGTERM)
-    threading.Thread(target=_escalate_to_kill, args=(proc,), daemon=True,
-                      name="wit-kill").start()
+    _send_signal_group(proc, signal.SIGKILL)
+
+
+# `prctl(PR_SET_PDEATHSIG, SIGKILL)`: que el kernel mate a `wit` si muere
+# quien lo lanzó. Python no lo trae, así que va por ctypes; la función se
+# busca en el proceso padre, ANTES del fork, para que el hijo solo tenga
+# que llamarla.
+_PR_SET_PDEATHSIG = 1
+_prctl = None
+_prctl_buscado = False
+
+
+def _libc_prctl():
+    global _prctl, _prctl_buscado
+    if not _prctl_buscado:
+        _prctl_buscado = True
+        try:
+            import ctypes
+            funcion = ctypes.CDLL(None, use_errno=True).prctl
+            funcion.argtypes = (ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong,
+                                ctypes.c_ulong, ctypes.c_ulong)
+            funcion.restype = ctypes.c_int
+            _prctl = funcion
+        except (OSError, AttributeError):
+            _prctl = None
+    return _prctl
+
+
+def _pdeathsig_preexec() -> Optional[Callable[[], None]]:
+    """El `preexec_fn` que deja a `wit` atado a la vida de quien lo lanza,
+    o None si el sistema no tiene `prctl` (no es Linux).
+
+    Ojo con el "quien": para el kernel, el padre de esta señal es el HILO
+    que hizo el fork, no el proceso. Acá eso es lo que se quiere, porque
+    `wit` siempre se lanza desde el hilo que después se queda esperándolo
+    (`_run_with_progress` y `_run_cancellable` no vuelven hasta que `wit`
+    termina): ese hilo no puede terminar antes que `wit` salvo que la app
+    entera se esté cayendo, que es justo el caso que esto cubre. Lanzarlo
+    desde un hilo que NO lo espera lo mataría en cuanto ese hilo termine.
+
+    Si el proceso padre ya murió entre el fork y el `prctl` (la señal no
+    llegaría nunca), el hijo sale sin ejecutar `wit`."""
+    funcion = _libc_prctl()
+    if funcion is None:
+        return None
+    padre = os.getpid()
+
+    def _en_el_hijo() -> None:
+        funcion(_PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0)
+        if os.getppid() != padre:
+            os._exit(1)
+
+    return _en_el_hijo
+
+
+def _popen_wit(args: list[str], **kwargs) -> subprocess.Popen:
+    """Lanza `wit` en su propio grupo de procesos (para poder señalarlo
+    entero, ver `_send_signal_group`) y atado a la vida del hilo que lo
+    lanza (ver `_pdeathsig_preexec`): si la app muere de golpe, `wit` no
+    sigue escribiendo en la unidad -ni queda detenido por
+    `_WritebackLimiter`- sin nadie que lo espere."""
+    return subprocess.Popen(args, start_new_session=True,
+                            preexec_fn=_pdeathsig_preexec(), **kwargs)
 
 
 def _terminate_process_group(proc: subprocess.Popen) -> None:
-    """Versión bloqueante de lo de arriba, para los hilos de fondo que ya
-    estaban esperando al proceso (por ejemplo cuando `wit` se cuelga y
-    salta el timeout). Acá sí se puede esperar: no hay ninguna ventana del
-    otro lado."""
+    """SIGTERM, la gracia de `_KILL_GRACE_SECONDS` y después SIGKILL, todo
+    bloqueante: es para los hilos de fondo que ya estaban esperando al
+    proceso (por ejemplo cuando `wit` se cuelga y salta el timeout). Acá
+    sí se puede esperar: no hay ninguna ventana del otro lado. Lo que
+    `wit` alcance a renombrar con el SIGTERM lo barre quien llama
+    (`cleanup_new_output_files`)."""
     if proc.poll() is not None:
         return
     _send_signal_group(proc, signal.SIGTERM)
@@ -403,6 +458,247 @@ def _process_bytes_written(pid: int) -> Optional[int]:
     return None
 
 
+# ------------------------------------------- Caché sin bajar acotada --
+# Cuánto se deja a `wit` adelantarse a la unidad, en segundos de copia a la
+# velocidad que la unidad viene mostrando. Es, casi exacto, lo que tarda
+# en morir un `wit` cancelado: el kernel no lo deja salir hasta bajar lo
+# que tenga en la caché de sus archivos (medido en una USB FAT32 de ~14
+# MB/s: con ~1 GB en caché, 86 s; con la caché acotada a 16 MB, 0.9 s).
+WRITEBACK_TARGET_SECONDS = 1.0
+# Piso y techo de esa ventana. El piso evita esperas diminutas al
+# arrancar (todavía sin velocidad medida) o en una unidad lentísima; el
+# techo, que un disco rápido junte cientos de MB en la RAM.
+WRITEBACK_MIN_WINDOW = 4 * 1024 * 1024
+WRITEBACK_MAX_WINDOW = 256 * 1024 * 1024
+# Cada cuánto se mira si `wit` se pasó de la ventana. `wit` escribe en la
+# caché a velocidad de RAM, así que lo que se pasa entre dos miradas es
+# este intervalo por esa velocidad: con 10 ms se medía ~12 MB de más.
+_WRITEBACK_GATE_INTERVAL = 0.002
+
+
+def _is_wit_temp(path: Path, dest: Path) -> bool:
+    """`path` tiene la forma de un temporal de `wit` para `dest`
+    (`.{nombre}.{al azar}.tmp`, `.tmp.1`, ...; ver `_wbfs_temp_files`).
+    El respaldo de `DestinationGuard` (`.{nombre}.respaldo-<pid>`) cae en
+    el mismo glob, pero no tiene esta forma."""
+    return re.fullmatch(rf"\.{re.escape(dest.name)}\.[^.]+\.tmp(\.\d+)?",
+                        path.name) is not None
+
+
+class _WritebackLimiter:
+    """Que `wit` no deje más de ~1 s de copia en la caché sin bajar.
+
+    `wit` escribe en la caché del kernel a velocidad de RAM y la unidad la
+    baja a su ritmo: en una USB lenta se juntaba ~1 GB, y como un proceso
+    no termina de morir hasta que se baja lo que tiene pendiente, cancelar
+    tardaba minuto y medio aunque el SIGKILL saliera en el acto. Este
+    limitador hace dos cosas, cada una en su hilo:
+
+    - baja lo escrito (`sync_file_range` sobre los temporales de ESTA
+      operación) y mide a qué velocidad lo acepta la unidad;
+    - si `wit` se adelanta más de la ventana (~1 s a esa velocidad, ver
+      `WRITEBACK_TARGET_SECONDS`), lo detiene con SIGSTOP hasta que lo
+      pendiente baje a la mitad, y lo reanuda con SIGCONT.
+
+    La copia no se hace más lenta: la unidad sigue siendo el cuello de
+    botella, y el tiempo que `wit` pasa detenido es el que antes pasaba
+    bloqueado esperando a la unidad (medido: 273 s hasta el 50% con la
+    ventana, 275-278 s sin ella).
+
+    Solo toca los temporales nuevos de `wit` (`_is_wit_temp` y fuera de
+    `protected`, la foto de lo que ya había): nunca el respaldo de
+    `DestinationGuard` ni un archivo de otra operación. Los abre solo para
+    leer, así que cerrarlos no dispara ninguna escritura.
+
+    `stop()` reanuda a `wit` si quedó detenido, y lo mismo pasa si
+    cualquiera de los dos hilos falla: nunca queda un `wit` detenido por
+    culpa de esto. `sync` y `clock` se pueden reemplazar en las pruebas."""
+
+    def __init__(self, proc: subprocess.Popen, dest: Path, protected: set,
+                 sync: Optional[Callable[[int, int, int, int], None]] = None,
+                 clock: Callable[[], float] = time.monotonic,
+                 target_seconds: float = WRITEBACK_TARGET_SECONDS,
+                 min_window: int = WRITEBACK_MIN_WINDOW,
+                 max_window: int = WRITEBACK_MAX_WINDOW,
+                 interval: float = _WRITEBACK_GATE_INTERVAL):
+        self.proc = proc
+        self.dest = Path(dest)
+        self.protected = set(protected)
+        self._sync = sync or fsutil.sync_range
+        self._clock = clock
+        self.target_seconds = target_seconds
+        self.min_window = min_window
+        self.max_window = max_window
+        self.interval = interval
+        self.rate: Optional[float] = None   # bytes/s que acepta la unidad
+        self.flushed = 0                    # de lo escrito, ya bajado
+        self.max_pending = 0
+        self.pauses = 0
+        self._paused = False
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._threads: list[threading.Thread] = []
+
+    # -- medidas -------------------------------------------------------
+    @property
+    def window(self) -> int:
+        if self.rate is None:
+            return self.min_window
+        return int(min(max(self.rate * self.target_seconds, self.min_window),
+                       self.max_window))
+
+    def temp_files(self) -> list[Path]:
+        return sorted((f for f in _wbfs_temp_files(self.dest)
+                       if f not in self.protected and _is_wit_temp(f, self.dest)),
+                      key=lambda f: f.name)
+
+    def written(self) -> int:
+        """Lo que `wit` lleva escrito: `wchar` si el kernel lo cuenta (con
+        la reserva de espacio el temporal nace con su tamaño final, y el
+        tamaño no dice nada), si no la suma de los temporales."""
+        escrito = _process_bytes_written(self.proc.pid)
+        if escrito is not None:
+            return escrito
+        total = 0
+        for f in self.temp_files():
+            try:
+                total += f.stat().st_size
+            except OSError:
+                pass
+        return total
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
+
+    # -- ciclo de vida -------------------------------------------------
+    def start(self) -> None:
+        for destino, nombre in ((self._gate, "wit-writeback-gate"),
+                                (self._syncer, "wit-writeback-sync")):
+            hilo = threading.Thread(target=destino, name=nombre, daemon=True)
+            self._threads.append(hilo)
+            hilo.start()
+
+    def stop(self, timeout: float = 2.0) -> None:
+        """Deja de limitar y reanuda a `wit` si estaba detenido. Se puede
+        llamar más de una vez. No espera más de `timeout` a los hilos: el
+        que baja datos puede estar esperando a la unidad, y para entonces
+        ya no puede detener a nadie."""
+        self._stop.set()
+        self._resume()
+        for hilo in self._threads:
+            if hilo is not threading.current_thread():
+                hilo.join(timeout)
+
+    # -- pausa ---------------------------------------------------------
+    def _pause(self) -> None:
+        with self._lock:
+            if self._paused or self._stop.is_set() or self.proc.returncode is not None:
+                return
+            _send_signal_group(self.proc, signal.SIGSTOP)
+            self._paused = True
+            self.pauses += 1
+
+    def _resume(self) -> None:
+        with self._lock:
+            if not self._paused:
+                return
+            self._paused = False
+            if self.proc.returncode is None:
+                _send_signal_group(self.proc, signal.SIGCONT)
+
+    def _gate(self) -> None:
+        # Lo más que `wit` llegó a escribir entre dos miradas. Se lo
+        # detiene cuando la PRÓXIMA mirada ya llegaría tarde, no cuando ya
+        # se pasó de la ventana, y se lo reanuda solo si entra otra ráfaga
+        # entera. Decae de a poco, pero solo mientras `wit` corre: detenido
+        # no escribe nada, y olvidarla ahí era soltarlo justo antes de que
+        # vuelva a escribir a velocidad de RAM.
+        rafaga = 0.0
+        anterior = self.written()
+        try:
+            while not self._stop.is_set():
+                escrito = self.written()
+                delta = escrito - anterior
+                anterior = escrito
+                if delta > rafaga:
+                    rafaga = delta
+                elif not self._paused:
+                    rafaga *= 0.99
+                pendiente = escrito - self.flushed
+                self.max_pending = max(self.max_pending, pendiente)
+                ventana = self.window
+                if self._paused:
+                    # Si la ráfaga sola ya no entra en la ventana, se lo
+                    # suelta igual cuando casi no queda nada pendiente:
+                    # si no, no volvería a escribir nunca.
+                    if (pendiente + rafaga <= ventana * 3 // 4
+                            or pendiente <= ventana // 8):
+                        self._resume()
+                elif pendiente + rafaga >= ventana:
+                    self._pause()
+                self._stop.wait(self.interval)
+        finally:
+            self._stop.set()
+            self._resume()
+
+    # -- bajada --------------------------------------------------------
+    def _syncer(self) -> None:
+        fds: dict = {}
+        # Lo escrito al TERMINAR la bajada anterior: esa bajada pudo
+        # llevarse también lo que se escribió mientras duraba, pero nada
+        # posterior. Es la base para medir la velocidad por lo bajo.
+        escrito_al_terminar = 0
+        try:
+            while not self._stop.is_set():
+                marca = self.written()
+                pendiente = marca - self.flushed
+                # Con `wit` detenido se baja lo que haya, por poco que sea:
+                # es lo único que lo puede soltar.
+                minimo = 1 if self._paused else max(self.window // 4, 1)
+                if pendiente < minimo:
+                    self._stop.wait(self.interval * 5)
+                    continue
+                inicio = self._clock()
+                bajados = 0
+                for f in self.temp_files():
+                    fd = fds.get(f)
+                    if fd is None:
+                        try:
+                            fd = fds[f] = os.open(f, os.O_RDONLY)
+                        except FileNotFoundError:
+                            continue   # `wit` ya lo renombró
+                    self._sync(fd, 0, 0, fsutil._SYNC_AND_WAIT)
+                    bajados += 1
+                    try:
+                        os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+                    except (OSError, AttributeError):
+                        pass
+                duracion = self._clock() - inicio
+                # Seguro bajó, en esta vuelta, lo escrito entre el final
+                # de la anterior y `marca`; quizás más, nunca menos. Medida
+                # así, la velocidad queda por debajo de la real y la
+                # ventana del lado seguro: contar `pendiente` entero la
+                # inflaba (una USB de 5 MB/s llegó a medirse a 30 MB/s).
+                seguro = marca - escrito_al_terminar
+                if bajados and duracion > 0 and seguro >= 256 * 1024:
+                    medida = seguro / duracion
+                    self.rate = (medida if self.rate is None
+                                 else 0.7 * self.rate + 0.3 * medida)
+                self.flushed = marca
+                escrito_al_terminar = self.written()
+        except OSError:
+            # La unidad no acepta lo que se le pide (desconectada, error
+            # de E/S): no hay nada que acotar. `wit` va a chocar con el
+            # mismo error por su cuenta y lo informa quien lo espera.
+            pass
+        finally:
+            self._stop.set()
+            self._resume()
+            for fd in fds.values():
+                os.close(fd)
+
+
 def _run_with_progress(
     args: list[str],
     dest: Path,
@@ -436,10 +732,17 @@ def _run_with_progress(
     # cancelación, se borra solo lo que agregó ESTA operación.
     outputs_before = output_files(dest)
     with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
-        proc = subprocess.Popen(args, stdout=out_f, stderr=err_f, start_new_session=True)
+        proc = _popen_wit(args, stdout=out_f, stderr=err_f)
         # Si la cancelación llegó entre el chequeo previo y el Popen,
         # `attach` lo mata en el acto y devuelve False.
         running = cancel.attach(proc) if cancel is not None else True
+        # Que `wit` no se adelante a la unidad más de ~1 s: es lo que hace
+        # que cancelar corte en el acto (ver `_WritebackLimiter`). Solo
+        # sobre los temporales nuevos: `outputs_before` incluye el
+        # respaldo que haya apartado `DestinationGuard`.
+        limiter = _WritebackLimiter(proc, dest, outputs_before)
+        if running:
+            limiter.start()
 
         def medir() -> int:
             # Lo que escribió `wit`, si el kernel lo cuenta; si no, el
@@ -481,15 +784,21 @@ def _run_with_progress(
                             "se canceló la operación."
                         ).format(hours=absolute_timeout / 3600)
                     if timeout_reason is not None:
+                        # Reanudado antes: a un proceso detenido el
+                        # SIGTERM no le llega hasta que lo reanudan.
+                        limiter.stop()
                         _terminate_process_group(proc)
                         break
             if not running:
                 proc.wait()
         except BaseException:
+            limiter.stop()
             _terminate_process_group(proc)
             cleanup_new_output_files(dest, outputs_before)
             raise
         finally:
+            # Pase lo que pase, `wit` no queda detenido.
+            limiter.stop()
             if cancel is not None:
                 cancel.detach(proc)
 
@@ -799,12 +1108,11 @@ def _run_cancellable(
     if cancel is not None and cancel.cancelled:
         raise OperationCancelled(_("Operación cancelada antes de arrancar `wit`."))
 
-    proc = subprocess.Popen(
+    proc = _popen_wit(
         [binary, *args],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        start_new_session=True,
     )
     if cancel is not None and not cancel.attach(proc):
         # La cancelación llegó entre el chequeo y el Popen: `attach` ya lo
