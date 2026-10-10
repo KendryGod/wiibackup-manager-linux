@@ -461,6 +461,20 @@ class StillMountedError(FormatGuardError):
     tenga esa partición."""
 
 
+class DeviceTooLargeError(FormatGuardError):
+    """Modo Fábrica: el disco pasa de lo que admite una tabla MBR (ver
+    `MBR_MAX_BYTES`). Se levanta antes de desmontar, de pedir la
+    contraseña y de correr nada sobre el disco."""
+
+
+# Lo más grande que admite una tabla MBR ("msdos"), que es la que arma Modo
+# Fábrica porque es la que leen USB Loader GX y Nintendont: inicio y largo
+# de cada partición van en 32 bits de sectores de 512 bytes, o sea 2 TiB.
+# Con un disco más grande `parted` no puede crear la partición, y para
+# entonces `wipefs` ya borró las firmas.
+MBR_MAX_BYTES = 2 ** 32 * 512
+
+
 class MountNotWritableError(RuntimeError):
     """El formateo terminó, pero el punto de montaje resultante no es del
     usuario que corre la app o no se puede escribir en él (por ejemplo,
@@ -1344,7 +1358,15 @@ def format_as_wii_usb(device: BlockDevice, *, run=subprocess.run,
     carpetas de un loader de Wii adentro.
 
     Devuelve el punto de montaje final. Levanta lo mismo que
-    `format_fat32`."""
+    `format_fat32`, y `DeviceTooLargeError` -sin haber tocado el disco-
+    si pasa de lo que admite la tabla MBR."""
+    if device.size_bytes > MBR_MAX_BYTES:
+        raise DeviceTooLargeError(
+            _("{dev} pesa {size:.1f} TiB: Modo Fábrica arma una tabla de "
+              "particiones MBR, la que leen USB Loader GX y Nintendont, y "
+              "esa tabla no admite discos de más de 2 TiB. No se tocó el "
+              "disco.").format(dev=device.path,
+                               size=device.size_bytes / 2 ** 40))
     punto_montaje = format_fat32(device, run=run, label=label,
                                  sectors_per_cluster=sectors_per_cluster,
                                  mount_timeout=mount_timeout)

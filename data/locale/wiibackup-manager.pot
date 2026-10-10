@@ -9,7 +9,7 @@ msgstr ""
 "Project-Id-Version: WiiBackup Manager\n"
 "Report-Msgid-Bugs-To: https://github.com/KendryGod/wiibackup-manager-linux/"
 "issues\n"
-"POT-Creation-Date: 2026-10-10 05:28-0600\n"
+"POT-Creation-Date: 2026-10-10 05:30-0600\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -25,6 +25,14 @@ msgstr ""
 
 #: wiibackup_manager/drives.py:204
 msgid "La unidad USB fue desconectada durante la operación."
+msgstr ""
+
+#: wiibackup_manager/drives.py:1365
+#, python-brace-format
+msgid ""
+"{dev} pesa {size:.1f} TiB: Modo Fábrica arma una tabla de particiones MBR, "
+"la que leen USB Loader GX y Nintendont, y esa tabla no admite discos de más "
+"de 2 TiB. No se tocó el disco."
 msgstr ""
 
 #: wiibackup_manager/f3_wrapper.py:306

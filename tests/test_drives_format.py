@@ -42,11 +42,11 @@ def entorno(tmp_path, monkeypatch):
     monkeypatch.setattr(drives, "_PROC_MOUNTS", proc_mounts)
 
     def _crear(nombre="sdb", *, particiones=(), tabla=None, montajes=(),
-               identidad="SERIE-A"):
+               identidad="SERIE-A", sectores=SECTORES):
         d = sys_block / nombre
         d.mkdir()
         (d / "removable").write_text("1\n")
-        (d / "size").write_text(f"{SECTORES}\n")
+        (d / "size").write_text(f"{sectores}\n")
         disco = Path("/dev") / nombre
         punto = tmp_path / "run_media" / "kendry" / "USB"
         herramientas = crear_disco_falso(
@@ -56,7 +56,7 @@ def entorno(tmp_path, monkeypatch):
             "".join(f"{origen} {destino} vfat rw 0 0\n" for origen, destino in montajes))
         herramientas.fijar_identidad(identidad)
         device = drives.BlockDevice(path=disco, model="DataTraveler 3.0",
-                                    size_bytes=SECTORES * 512, identity=identidad)
+                                    size_bytes=sectores * 512, identity=identidad)
         return herramientas, device, punto
     return _crear
 
@@ -384,3 +384,54 @@ def test_partitions_of_filtra_solo_las_particiones():
             cmd, 0, "/dev/nvme1n1 disk\n/dev/nvme1n1p1 part\n/dev/nvme1n1p2 part\n", "")
     assert drives.partitions_of("/dev/nvme1n1", run=_run) == [
         Path("/dev/nvme1n1p1"), Path("/dev/nvme1n1p2")]
+
+
+# -------------------------------------- Modo Fábrica: límite de la MBR --
+# La tabla MBR (msdos) guarda el inicio y el largo de cada partición en 32
+# bits de sectores de 512 bytes: más de 2 TiB no entra.
+_DOS_TIB_EN_SECTORES = 2 ** 32
+
+
+def test_modo_fabrica_rechaza_un_disco_de_mas_de_2_tib_sin_tocarlo(entorno):
+    """Antes de pedir la contraseña y sin correr nada: ni `wipefs`, ni
+    `parted`, ni `mkfs.vfat`. Con un disco así `parted` no puede crear la
+    partición después de que `wipefs` ya borró las firmas."""
+    herramientas, device, _punto = entorno(
+        particiones=["/dev/sdb1"], tabla="msdos",
+        sectores=3 * 2 ** 40 // 512)
+
+    with pytest.raises(drives.FormatGuardError) as info:
+        drives.format_as_wii_usb(device, run=herramientas.run, mount_timeout=2.0)
+
+    assert type(info.value).__name__ == "DeviceTooLargeError"
+    assert herramientas.llamadas() == [], "se llegó a correr algo sobre el disco"
+    assert "2 TiB" in str(info.value)
+    assert str(device.path) in str(info.value)
+
+
+def test_modo_fabrica_acepta_un_disco_de_justo_2_tib(entorno):
+    herramientas, device, punto = entorno(
+        particiones=["/dev/sdb1"], tabla="msdos", sectores=_DOS_TIB_EN_SECTORES)
+
+    assert drives.format_as_wii_usb(device, run=herramientas.run,
+                                    mount_timeout=2.0) == punto
+
+
+def test_el_mensaje_del_disco_grande_esta_traducido(entorno, monkeypatch):
+    """Lo ve el usuario en el aviso de Modo Fábrica: tiene que estar en el
+    catálogo como cualquier otro texto de la interfaz."""
+    import gettext
+    from wiibackup_manager import i18n
+    catalogo = gettext.translation(
+        "wiibackup-manager",
+        localedir=str(Path(__file__).resolve().parent.parent / "data" / "locale"),
+        languages=["en"])
+    monkeypatch.setattr(i18n, "_", catalogo.gettext)
+    monkeypatch.setattr(drives, "_", catalogo.gettext)
+    herramientas, device, _punto = entorno(sectores=3 * 2 ** 40 // 512)
+
+    with pytest.raises(drives.FormatGuardError) as info:
+        drives.format_as_wii_usb(device, run=herramientas.run, mount_timeout=2.0)
+
+    assert "Factory Mode" in str(info.value)
+    assert "2 TiB" in str(info.value)
