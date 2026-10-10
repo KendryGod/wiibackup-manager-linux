@@ -7,3 +7,4 @@ dist/
 venv/
 .pytest_cache/
 .coverage
+todo_el_codigo.txt
