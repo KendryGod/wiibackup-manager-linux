@@ -196,3 +196,31 @@ def test_desconexion_a_mitad_de_un_reemplazo_dice_que_el_original_quedo(
     ida["si"] = False
     [respaldo] = [p for p in biblioteca.iterdir() if ".respaldo-" in p.name]
     assert respaldo.read_bytes() == ORIGINAL
+
+
+# ---------------------------------------------- F: la barra no se clava --
+def test_la_barra_avanza_hasta_el_final_al_convertir_a_algo_mas_grande(
+        ventana, juego, monkeypatch):
+    """CISO → ISO: la salida pesa más que la entrada. El tope de la barra
+    tiene que salir del tamaño de SALIDA (contra el que se divide), no del
+    de entrada: si no, la barra se queda en entrada/salida y no se mueve
+    más el resto de la conversión."""
+    game, dest = juego                      # entrada: 64 bytes
+    salida = 10_000
+    monkeypatch.setattr(transfer_plan, "estimate_output_size",
+                        lambda g, ext, binary: salida)
+
+    def wit_que_avanza(src, dest, fmt, binary, bytes_progress_cb=None, **kw):
+        for escrito in range(0, salida + 1, 1_000):
+            bytes_progress_cb(escrito)
+        Path(dest).write_bytes(NUEVO)
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    monkeypatch.setattr(wit_wrapper, "convert", wit_que_avanza)
+    monkeypatch.setattr(fileops, "flush_and_drop_cache", lambda *a, **k: None)
+
+    ventana._start_convert(game, dest, ".iso")
+
+    fracciones = ventana.progress_bar.fracciones
+    assert fracciones == sorted(fracciones)
+    assert max(fracciones) >= 0.9, f"la barra se quedó en {max(fracciones):.0%}"

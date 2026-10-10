@@ -2561,7 +2561,10 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         cancelled = False
 
         def on_progress(current: int):
-            est = min(current, int(game.size_bytes * 0.97))
+            # Tope del tamaño de SALIDA, el mismo contra el que se divide:
+            # con el de entrada, convertir a algo más grande (CISO → ISO)
+            # dejaba la barra clavada en entrada/salida.
+            est = min(current, int(total_bytes * 0.97))
             GLib.idle_add(self.progress_bar.set_fraction, min(est / total_bytes, 0.99))
 
         def worker():
