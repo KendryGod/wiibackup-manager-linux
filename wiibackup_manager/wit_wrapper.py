@@ -162,13 +162,33 @@ def _popen_wit(args: list[str], **kwargs) -> subprocess.Popen:
                             preexec_fn=_pdeathsig_preexec(), **kwargs)
 
 
+def _kill_process_group(proc: subprocess.Popen) -> None:
+    """SIGKILL al grupo y espera, bloqueante, a que termine: es cómo se
+    corta un `wit` que ESCRIBE (copiar, convertir) por un timeout o una
+    excepción, igual que al cancelar (`_request_termination`).
+
+    Sin SIGTERM por delante: `wit` lo toma como "terminá el trabajo en
+    curso" (medido: termina la copia, renombra el temporal al nombre
+    final y sale con 110), así que la gracia eran 5 segundos más
+    escribiendo en la unidad después de haber decidido cortar. La espera
+    tiene tope: después del SIGKILL el kernel puede tardar en soltarlo
+    mientras baja lo poco que el limitador dejó pendiente, y quien llama
+    igual sigue."""
+    if proc.poll() is not None:
+        return
+    _send_signal_group(proc, signal.SIGKILL)
+    try:
+        proc.wait(timeout=_KILL_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def _terminate_process_group(proc: subprocess.Popen) -> None:
     """SIGTERM, la gracia de `_KILL_GRACE_SECONDS` y después SIGKILL, todo
     bloqueante: es para los hilos de fondo que ya estaban esperando al
-    proceso (por ejemplo cuando `wit` se cuelga y salta el timeout). Acá
-    sí se puede esperar: no hay ninguna ventana del otro lado. Lo que
-    `wit` alcance a renombrar con el SIGTERM lo barre quien llama
-    (`cleanup_new_output_files`)."""
+    proceso, cuando una operación de SOLO LECTURA (VERIFY, LIST, ISOSIZE)
+    se cuelga y salta el timeout. Ahí terminar por las buenas no cuesta
+    nada. Lo que escribe se corta con `_kill_process_group`."""
     if proc.poll() is not None:
         return
     _send_signal_group(proc, signal.SIGTERM)
@@ -794,16 +814,14 @@ def _run_with_progress(
                             "se canceló la operación."
                         ).format(hours=absolute_timeout / 3600)
                     if timeout_reason is not None:
-                        # Reanudado antes: a un proceso detenido el
-                        # SIGTERM no le llega hasta que lo reanudan.
                         limiter.stop(timeout=_LIMITER_JOIN_ON_ABORT)
-                        _terminate_process_group(proc)
+                        _kill_process_group(proc)
                         break
             if not running:
                 proc.wait()
         except BaseException:
             limiter.stop(timeout=_LIMITER_JOIN_ON_ABORT)
-            _terminate_process_group(proc)
+            _kill_process_group(proc)
             if cleanup_on_abort:
                 cleanup_new_output_files(dest, outputs_before)
             raise
