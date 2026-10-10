@@ -611,7 +611,6 @@ def physical_disk_for_path(path) -> Path | None:
 
 
 # ------------------------------------------- Lo escrito en el dispositivo --
-_SYS_BLOCK = Path("/sys/block")
 # /sys/block/<disco>/stat cuenta en sectores de 512 bytes SIEMPRE, sea cual
 # sea el tamaño de sector real del disco (Documentation/block/stat.rst).
 _STAT_SECTOR_BYTES = 512
