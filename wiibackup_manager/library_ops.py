@@ -211,7 +211,8 @@ def remove_dir_if_empty(folder) -> bool:
     return True
 
 
-def replace_cut_by_disconnect(error: "RollbackFailedError", known_dir) -> bool:
+def replace_cut_by_disconnect(error: "RollbackFailedError", known_dir,
+                              mount_point=None) -> bool:
     """True si un reemplazo no pudo devolver el original porque la unidad
     DESAPARECIÓ, no porque algo esté roto.
 
@@ -220,9 +221,17 @@ def replace_cut_by_disconnect(error: "RollbackFailedError", known_dir) -> bool:
     oculto, y lo único que falló es moverlo de vuelta -no hay unidad donde
     moverlo-. Decírselo así al usuario ("tu juego quedó guardado") es la
     diferencia entre algo que se arregla al reconectar y "se me borró el
-    juego"."""
+    juego".
+
+    `known_dir` y `mount_point` son los de `drives.device_is_gone`, con
+    las mismas reglas: `mount_point` solo si ERA punto de montaje al
+    empezar. Quien ya mira el punto de montaje para los demás errores
+    tiene que pasarlo también acá: un punto de montaje creado a mano
+    queda como carpeta vacía que responde, y sin él este caso se veía
+    como un error común con rutas internas."""
     motivo = error.original_error if error.original_error is not None else error
-    return drives.device_is_gone(known_dir=known_dir, exc=motivo)
+    return drives.device_is_gone(mount_point=mount_point, known_dir=known_dir,
+                                 exc=motivo)
 
 
 def original_kept_message() -> str:

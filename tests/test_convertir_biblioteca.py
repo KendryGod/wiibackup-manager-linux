@@ -10,16 +10,17 @@ como el de verdad.
 """
 from __future__ import annotations
 
+import errno
 import subprocess
 import types
 from pathlib import Path
 
 import pytest
 
-from wiibackup_manager import (atomicfs, fileops, oplog, transfer_plan,
-                               wit_wrapper)
+from wiibackup_manager import (atomicfs, drives, fileops, library_ops, oplog,
+                               transfer_plan, wit_wrapper)
 from wiibackup_manager.game_model import Game
-from wiibackup_manager.operations import OperationManager
+from wiibackup_manager.operations import OperationKind, OperationManager
 
 ORIGINAL = b"juego original del usuario"
 NUEVO = b"juego convertido, completo"
@@ -45,8 +46,10 @@ class _Barra:
 
 class _VentanaDeMentira:
     def __init__(self, tmp_path):
-        self.ops = OperationManager()
+        # Como en la app (`window.py`): el resultado de cada operación
+        # queda en el historial al cerrarse.
         self.op_log = oplog.OperationLog(tmp_path / "historial.json")
+        self.ops = OperationManager(log=self.op_log)
         self.settings = types.SimpleNamespace(wit_binary="wit")
         self.progress_bar = _Barra()
         self.toasts = []
@@ -151,3 +154,45 @@ def test_si_bajar_a_disco_falla_el_original_vuelve(ventana, juego, monkeypatch):
     assert dest.read_bytes() == ORIGINAL
     assert not [p for p in dest.parent.iterdir() if p.name.startswith(".")]
     assert ventana.toasts and "Error al convertir" in ventana.toasts[-1]
+
+
+# ---------------------------------------------- D: biblioteca desenchufada --
+def test_desconexion_a_mitad_de_un_reemplazo_dice_que_el_original_quedo(
+        ventana, juego, monkeypatch):
+    """La biblioteca puede estar en un USB. Si se desenchufa mientras se
+    convierte pisando un juego, el original queda apartado en la unidad:
+    se dice eso y queda como "Unidad desconectada", igual que en la cola,
+    y no como un error con rutas internas."""
+    game, dest = juego
+    biblioteca = dest.parent
+    ida = {"si": False}
+    real_replace, real_responde = atomicfs.os.replace, drives._responde
+
+    def replace(a, b, *k, **kw):
+        if ida["si"]:
+            raise OSError(errno.EIO, "Input/output error")
+        return real_replace(a, b, *k, **kw)
+
+    def responde(path):
+        if ida["si"] and str(biblioteca) in str(path):
+            return False
+        return real_responde(path)
+
+    def wit_que_corta(src, dest, fmt, binary, **kw):
+        ida["si"] = True
+        return subprocess.CompletedProcess([], 1, "", "wit: write error")
+
+    monkeypatch.setattr(atomicfs.os, "replace", replace)
+    monkeypatch.setattr(drives, "_responde", responde)
+    monkeypatch.setattr(wit_wrapper, "convert", wit_que_corta)
+
+    ventana._start_convert(game, dest, ".wbfs")
+
+    assert ventana.toasts[-1] == library_ops.original_kept_message()
+    [conversion] = [e for e in ventana.op_log.entries()
+                    if e.operation == OperationKind.CONVERTING.value]
+    assert conversion.status == oplog.STATUS_DISCONNECTED
+    # Los datos no cambian: el original sigue entero, apartado.
+    ida["si"] = False
+    [respaldo] = [p for p in biblioteca.iterdir() if ".respaldo-" in p.name]
+    assert respaldo.read_bytes() == ORIGINAL

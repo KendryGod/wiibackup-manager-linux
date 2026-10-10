@@ -859,7 +859,9 @@ class TransferQueue:
                 oplog.STATUS_ERROR, op=op)
             return
         except library_ops.RollbackFailedError as e:
-            if library_ops.replace_cut_by_disconnect(e, job.dest_root):
+            if library_ops.replace_cut_by_disconnect(
+                    e, job.dest_root,
+                    mount_point=job.dest_root if raiz_era_montaje else None):
                 # Se desenchufó la unidad en medio de un reemplazo. El
                 # original no está perdido: quedó apartado en la unidad con
                 # un nombre oculto, y el Recovery Manager lo ofrece al

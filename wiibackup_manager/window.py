@@ -2623,14 +2623,24 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 detail = "cancelada por el usuario"
                 msg = f"Conversión de '{game.title}' cancelada."
             except library_ops.RollbackFailedError as e:
-                # Caso grave: además de fallar la conversión, no se pudo
-                # devolver el original a su lugar (ver
-                # `library_ops.RollbackFailedError`). `user_message` nombra
-                # los dos problemas -no alcanza con "error al convertir"
-                # cuando el archivo puede haber quedado inservible.
-                ok = False
-                msg = e.user_message()
-                detail = str(e)
+                if library_ops.replace_cut_by_disconnect(e, dest.parent):
+                    # La biblioteca está en un USB que se desenchufó a mitad
+                    # de pisar un juego: el original quedó apartado en la
+                    # unidad, entero. Mismo criterio que la cola
+                    # (`TransferQueue._copy`) y que la rama de abajo.
+                    disconnected = True
+                    msg = library_ops.original_kept_message()
+                    detail = msg
+                else:
+                    # Caso grave: además de fallar la conversión, no se pudo
+                    # devolver el original a su lugar (ver
+                    # `library_ops.RollbackFailedError`). `user_message`
+                    # nombra los dos problemas -no alcanza con "error al
+                    # convertir" cuando el archivo puede haber quedado
+                    # inservible.
+                    ok = False
+                    msg = e.user_message()
+                    detail = str(e)
             except Exception as e:
                 if cancel.cancelled:
                     cancelled = True

@@ -222,3 +222,34 @@ def test_el_mensaje_de_la_biblioteca_tambien_dice_que_el_original_quedo(
         library_ops.send_to_wbfs_drive(brawl, usb, overwrite=True)
     assert library_ops.replace_cut_by_disconnect(info.value, usb)
     assert "original quedó guardado" in library_ops.original_kept_message()
+
+
+# ==================== El punto de montaje queda como carpeta que responde --
+def test_desconexion_con_el_punto_de_montaje_vacio_igual_se_reconoce(
+        usb, brawl, monkeypatch, sin_papelera):
+    """Un punto de montaje creado a mano (`/mnt/usb`) sigue existiendo como
+    carpeta vacía cuando la unidad se va: la carpeta responde y el error de
+    `wit` no trae errno. La única señal es que dejó de ser punto de
+    montaje, y la rama del reemplazo cortado tiene que mirarla igual que
+    la rama de los demás errores."""
+    ida = {"si": False}
+    real_replace, real_es_montaje = os.replace, drives.is_mount_point
+
+    def replace(a, b, *k, **kw):
+        if ida["si"] and str(usb) in str(a):
+            raise OSError(errno.ENOENT, "No such file or directory")
+        return real_replace(a, b, *k, **kw)
+
+    def es_montaje(path):
+        if Path(path) == usb:
+            return not ida["si"]
+        return real_es_montaje(path)
+
+    monkeypatch.setattr(atomicfs.os, "replace", replace)
+    monkeypatch.setattr(drives, "is_mount_point", es_montaje)
+    _wit_falso(monkeypatch, al_escribir=lambda: ida.__setitem__("si", True), codigo=1)
+
+    job = _correr(brawl, usb)
+
+    assert job.status is JobStatus.DEVICE_DISCONNECTED, job.error_msg
+    assert job.error_msg == library_ops.original_kept_message()
