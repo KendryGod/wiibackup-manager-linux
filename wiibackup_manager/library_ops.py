@@ -592,8 +592,19 @@ def _write_to_drive(game: Game, dest: Path, wit_binary: str,
         # (crash, USB desenchufado, disco lleno) dejaba al usuario sin el
         # respaldo que ya tenía. El callback no-op no cuesta nada; tener
         # dos caminos de escritura, uno protegido y otro no, sí.
-        _copy_with_progress(game.path, dest,
-                            bytes_progress_cb or (lambda _n: None), cancel)
+        #
+        # Y con el guard, como el camino de `wit`: si lo que había era un
+        # juego DIVIDIDO (`.wbfs` + `.wbf1`…, por ejemplo de otra
+        # herramienta que parte en 2 GB), reemplazar solo el `.wbfs` dejaba
+        # la `.wbf1` vieja, y el loader la pega al final del juego nuevo.
+        # El guard aparta todas las partes y las descarta recién con lo
+        # nuevo ya en su lugar (`_copy_with_progress` lo baja a disco antes
+        # del rename); si la copia falla, vuelven todas.
+        with DestinationGuard(dest, enabled=bool(wbfs_group(dest)),
+                              op_log=op_log) as guard:
+            _copy_with_progress(game.path, dest,
+                                bytes_progress_cb or (lambda _n: None), cancel)
+            guard.commit()
         return dest
 
     if not wit_wrapper.is_available(wit_binary):

@@ -868,6 +868,32 @@ def restore(leftover: Leftover) -> None:
             _("No se pudo restaurar «{name}»: el archivo sigue en "
               "{ruta}.").format(name=leftover.original.name,
                                 ruta=leftover.path))
+    if leftover.kind is LeftoverKind.BACKUP:
+        _borrar_partes_sobrantes(leftover)
+
+
+def _borrar_partes_sobrantes(leftover: Leftover) -> None:
+    """Después de restaurar un juego dividido, borra las partes con nombre
+    final que NO son del original: `RSBE01.wbf1` de una copia cortada que
+    había dejado dos partes, cuando el original tenía una sola. Un USB
+    Loader pega todas las partes que encuentra, así que una que sobra
+    deja el juego restaurado inservible.
+
+    Son siempre de la copia cortada: `DestinationGuard` aparta TODAS las
+    partes del original antes de escribir (`wbfs_group`), así que lo que
+    hay con nombre final y no está entre los respaldos se escribió
+    después. Corre solo cuando la restauración ya salió bien."""
+    principal = leftover.original
+    if principal.suffix.lower() != ".wbfs":
+        return
+    restaurados = {original for original, _resto in leftover.pairs()}
+    for parte in library_ops.wbfs_group(principal):
+        if parte in restaurados:
+            continue
+        try:
+            parte.unlink()
+        except OSError:
+            pass
 
 
 def delete(leftover: Leftover) -> None:
