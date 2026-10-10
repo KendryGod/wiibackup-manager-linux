@@ -832,6 +832,74 @@ def scan_roots(settings=None, *,
     return resultado
 
 
+# ------------------------------------------- Homebrew: la app ya está --
+def _tiene_contenido(path: Path) -> bool:
+    """Si en `path` hay algo que se perdería al poner otra cosa en su
+    lugar: un archivo, o una carpeta con algo adentro. Una carpeta vacía no
+    cuenta -`os.replace` la reemplaza sin perder nada-. Si no se puede
+    mirar, cuenta: ante la duda, no se pisa."""
+    try:
+        if path.is_dir() and not path.is_symlink():
+            with os.scandir(path) as entradas:
+                return next(entradas, None) is not None
+        return os.path.lexists(path)
+    except OSError:
+        return True
+
+
+def homebrew_app_installed(leftover: Leftover) -> bool:
+    """Si `leftover` es el respaldo de una app de Homebrew y la app YA está
+    instalada en su lugar: con su nombre hay ahora un archivo, o una
+    carpeta con algo adentro (una carpeta vacía no es una app instalada).
+
+    El instalador solo pone en el destino una staging completa
+    (`atomicfs.staged_directory`), así que un respaldo con la app
+    instalada al lado es la versión ANTERIOR: quedó porque se cortó -o
+    falló- su borrado después de un intercambio que sí salió bien, y por
+    eso mismo puede estar a medio borrar. Restaurarlo encima cambiaría una
+    versión completa por una que quizás no lo está, así que en ese caso no
+    se ofrece: solo eliminarlo.
+
+    Mira el disco en el momento y no la foto del escaneo
+    (`Leftover.original_exists`): la lista del Recovery Manager es la del
+    último escaneo, y la app pudo instalarse después. Si no se puede
+    mirar, cuenta como instalada: ante la duda, no se pisa."""
+    return (leftover.kind is LeftoverKind.HOMEBREW_BACKUP
+            and _tiene_contenido(leftover.original))
+
+
+def restore_overwrites(leftover: Leftover) -> bool:
+    """Si restaurar `leftover` va a pisar algo que hay en su nombre: lo que
+    la interfaz tiene que confirmar antes (ver `restore`).
+
+    Un respaldo de Homebrew nunca: o la app está instalada, y entonces no
+    se restaura (`homebrew_app_installed`), o en su lugar hay a lo sumo una
+    carpeta vacía, que no se pierde. Preguntar "¿Reemplazar?" ahí llamaba
+    "probablemente incompleto" a algo que no era nada."""
+    if leftover.kind is LeftoverKind.HOMEBREW_BACKUP:
+        return False
+    return leftover.original_exists
+
+
+def describe(leftover: Leftover) -> str:
+    """Por qué está ahí y qué implica, para el diálogo: lo de su tipo
+    (`LeftoverKind.description`), salvo un respaldo de Homebrew con la app
+    ya instalada, que no se puede devolver a su lugar."""
+    if homebrew_app_installed(leftover):
+        return _("Versión anterior de la app. La app ya está instalada, así "
+                 "que este respaldo no se restaura: solo se puede eliminar, y "
+                 "la versión instalada no se toca.")
+    return leftover.kind.description
+
+
+def app_installed_message(leftover: Leftover) -> str:
+    """El aviso cuando se pide restaurar un respaldo de Homebrew con la app
+    ya instalada (ver `homebrew_app_installed`)."""
+    return _("«{name}» ya está instalada: este respaldo es la versión "
+             "anterior y no se restaura encima. Si no lo necesitás, "
+             "eliminalo.").format(name=leftover.original.name)
+
+
 # ------------------------------------------------------------ Acciones --
 def restore(leftover: Leftover) -> None:
     """Devuelve un respaldo a su nombre original.
@@ -851,7 +919,11 @@ def restore(leftover: Leftover) -> None:
     hace en `RecoveryDialog._on_restore`.
 
     Levanta `RecoveryError` si no era restaurable (una staging o un
-    temporal: no hay ningún "antes" adentro) o si el rename falló."""
+    temporal: no hay ningún "antes" adentro), si es el respaldo de una app
+    de Homebrew que ya está instalada (`homebrew_app_installed`), o si el
+    rename falló. En los dos primeros casos sin tocar nada."""
+    if homebrew_app_installed(leftover):
+        raise RecoveryError(app_installed_message(leftover))
     if not leftover.restorable:
         raise RecoveryError(
             _("«{name}» no se puede restaurar: no es una copia de "

@@ -9,7 +9,7 @@ msgstr ""
 "Project-Id-Version: WiiBackup Manager\n"
 "Report-Msgid-Bugs-To: https://github.com/KendryGod/wiibackup-manager-linux/"
 "issues\n"
-"POT-Creation-Date: 2026-10-10 05:30-0600\n"
+"POT-Creation-Date: 2026-10-10 05:51-0600\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -626,31 +626,44 @@ msgid_plural "(+{n} partes)"
 msgstr[0] ""
 msgstr[1] ""
 
-#: wiibackup_manager/recovery_service.py:857
+#: wiibackup_manager/recovery_service.py:889
+msgid ""
+"Versión anterior de la app. La app ya está instalada, así que este respaldo "
+"no se restaura: solo se puede eliminar, y la versión instalada no se toca."
+msgstr ""
+
+#: wiibackup_manager/recovery_service.py:898
+#, python-brace-format
+msgid ""
+"«{name}» ya está instalada: este respaldo es la versión anterior y no se "
+"restaura encima. Si no lo necesitás, eliminalo."
+msgstr ""
+
+#: wiibackup_manager/recovery_service.py:929
 #, python-brace-format
 msgid ""
 "«{name}» no se puede restaurar: no es una copia de seguridad, es un archivo "
 "que quedó a medio escribir."
 msgstr ""
 
-#: wiibackup_manager/recovery_service.py:868
+#: wiibackup_manager/recovery_service.py:940
 #, python-brace-format
 msgid "No se pudo restaurar «{name}»: el archivo sigue en {ruta}."
 msgstr ""
 
-#: wiibackup_manager/recovery_service.py:916
+#: wiibackup_manager/recovery_service.py:988
 #, python-brace-format
 msgid ""
 "No se pudo eliminar {ruta}. Puede estar en uso o la unidad puede ser de solo "
 "lectura."
 msgstr ""
 
-#: wiibackup_manager/recovery_service.py:946
+#: wiibackup_manager/recovery_service.py:1018
 #, python-brace-format
 msgid "No se pudo restaurar «{name}»: ya hay algo en {ruta}."
 msgstr ""
 
-#: wiibackup_manager/recovery_service.py:958
+#: wiibackup_manager/recovery_service.py:1030
 #, python-brace-format
 msgid "No se pudo restaurar «{name}»: {detail}"
 msgstr ""
@@ -725,8 +738,8 @@ msgid "Verificar integridad"
 msgstr ""
 
 #: wiibackup_manager/widgets/game_row.py:122
-#: wiibackup_manager/widgets/recovery_dialog.py:155
-#: wiibackup_manager/widgets/recovery_dialog.py:255
+#: wiibackup_manager/widgets/recovery_dialog.py:164
+#: wiibackup_manager/widgets/recovery_dialog.py:283
 #: wiibackup_manager/window.py:440 wiibackup_manager/window.py:1639
 #: wiibackup_manager/window.py:1647 wiibackup_manager/window.py:2741
 msgid "Eliminar"
@@ -742,8 +755,8 @@ msgstr ""
 #: wiibackup_manager/widgets/log_view.py:152
 #: wiibackup_manager/widgets/memory_check_view.py:137
 #: wiibackup_manager/widgets/memory_check_view.py:333
-#: wiibackup_manager/widgets/recovery_dialog.py:214
-#: wiibackup_manager/widgets/recovery_dialog.py:254
+#: wiibackup_manager/widgets/recovery_dialog.py:234
+#: wiibackup_manager/widgets/recovery_dialog.py:282
 #: wiibackup_manager/widgets/ticket_dialog.py:42
 #: wiibackup_manager/widgets/transfer_view.py:628
 #: wiibackup_manager/window.py:335 wiibackup_manager/window.py:1556
@@ -1357,11 +1370,11 @@ msgid_plural "Se encontraron {n} restos de operaciones interrumpidas ({size})."
 msgstr[0] ""
 msgstr[1] ""
 
-#: wiibackup_manager/widgets/recovery_dialog.py:104
+#: wiibackup_manager/widgets/recovery_dialog.py:108
 msgid "Operaciones interrumpidas"
 msgstr ""
 
-#: wiibackup_manager/widgets/recovery_dialog.py:115
+#: wiibackup_manager/widgets/recovery_dialog.py:119
 msgid ""
 "Son archivos que quedaron de operaciones que no llegaron a terminar (por "
 "ejemplo, si se apagó la PC o se desconectó la unidad en el medio). Los "
@@ -1369,38 +1382,38 @@ msgid ""
 "sin interrumpir nada."
 msgstr ""
 
-#: wiibackup_manager/widgets/recovery_dialog.py:148
+#: wiibackup_manager/widgets/recovery_dialog.py:156
 msgid "Restaurar"
 msgstr ""
 
-#: wiibackup_manager/widgets/recovery_dialog.py:150
+#: wiibackup_manager/widgets/recovery_dialog.py:158
 #, python-brace-format
 msgid "Devolver este archivo a su nombre original: {name}"
 msgstr ""
 
-#: wiibackup_manager/widgets/recovery_dialog.py:160
+#: wiibackup_manager/widgets/recovery_dialog.py:169
 msgid "Ignorar por ahora"
 msgstr ""
 
-#: wiibackup_manager/widgets/recovery_dialog.py:163
+#: wiibackup_manager/widgets/recovery_dialog.py:172
 msgid "No tocarlo. Vuelve a aparecer la próxima vez que abras la app."
 msgstr ""
 
-#: wiibackup_manager/widgets/recovery_dialog.py:180
+#: wiibackup_manager/widgets/recovery_dialog.py:189
 msgid "el nombre original está ocupado"
 msgstr ""
 
-#: wiibackup_manager/widgets/recovery_dialog.py:193
+#: wiibackup_manager/widgets/recovery_dialog.py:202
 msgid ""
 "Ahora hay una operación usando esa ubicación. Probá de nuevo cuando termine."
 msgstr ""
 
-#: wiibackup_manager/widgets/recovery_dialog.py:206
+#: wiibackup_manager/widgets/recovery_dialog.py:226
 #, python-brace-format
 msgid "¿Reemplazar «{name}»?"
 msgstr ""
 
-#: wiibackup_manager/widgets/recovery_dialog.py:209
+#: wiibackup_manager/widgets/recovery_dialog.py:229
 #, python-brace-format
 msgid ""
 "Ya hay un archivo con ese nombre: es lo que alcanzó a escribir la operación "
@@ -1409,16 +1422,16 @@ msgid ""
 "Restaurar lo reemplaza por el respaldo ({size}) y no se puede deshacer."
 msgstr ""
 
-#: wiibackup_manager/widgets/recovery_dialog.py:215
+#: wiibackup_manager/widgets/recovery_dialog.py:235
 msgid "Reemplazar"
 msgstr ""
 
-#: wiibackup_manager/widgets/recovery_dialog.py:232
+#: wiibackup_manager/widgets/recovery_dialog.py:252
 #, python-brace-format
 msgid "«{name}» volvió a su lugar."
 msgstr ""
 
-#: wiibackup_manager/widgets/recovery_dialog.py:241
+#: wiibackup_manager/widgets/recovery_dialog.py:261
 #, python-brace-format
 msgid ""
 "Se van a liberar {size}.\n"
@@ -1428,7 +1441,14 @@ msgid ""
 "No se puede deshacer."
 msgstr ""
 
-#: wiibackup_manager/widgets/recovery_dialog.py:248
+#: wiibackup_manager/widgets/recovery_dialog.py:268
+#, python-brace-format
+msgid ""
+"Es la versión anterior de «{name}». La versión instalada no se toca.\n"
+"\n"
+msgstr ""
+
+#: wiibackup_manager/widgets/recovery_dialog.py:276
 #, python-brace-format
 msgid ""
 "Es una copia completa de «{name}». Si la eliminás, ya no vas a poder "
@@ -1436,11 +1456,11 @@ msgid ""
 "\n"
 msgstr ""
 
-#: wiibackup_manager/widgets/recovery_dialog.py:253
+#: wiibackup_manager/widgets/recovery_dialog.py:281
 msgid "¿Eliminar este resto?"
 msgstr ""
 
-#: wiibackup_manager/widgets/recovery_dialog.py:272
+#: wiibackup_manager/widgets/recovery_dialog.py:300
 #, python-brace-format
 msgid "Espacio liberado: {size}."
 msgstr ""

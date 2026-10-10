@@ -381,3 +381,122 @@ def test_el_dialogo_de_restos_se_arma_y_sus_acciones_funcionan(gtk, tmp_path):
 
     assert len(resueltos) == 2
     assert len(toasts) == 1  # solo el de restaurar; ignorar no avisa nada
+
+
+def _botones_visibles(widget) -> list:
+    """Etiquetas de los botones visibles dentro de `widget`, en orden."""
+    from gi.repository import Gtk
+    encontrados = []
+    hijo = widget.get_first_child()
+    while hijo is not None:
+        if isinstance(hijo, Gtk.Button) and hijo.get_visible() and hijo.get_label():
+            encontrados.append(hijo.get_label())
+        encontrados += _botones_visibles(hijo)
+        hijo = hijo.get_next_sibling()
+    return encontrados
+
+
+def _homebrew(tmp_path, pid, *, instalada: bool):
+    apps = tmp_path / "apps"
+    resp = apps / f".WiiDonut.wbm-respaldo-{pid}"
+    resp.mkdir(parents=True)
+    (resp / "boot.dol").write_bytes(b"version anterior")
+    if instalada:
+        _instalar_wiidonut(tmp_path)
+    return resp
+
+
+def _instalar_wiidonut(tmp_path):
+    app = tmp_path / "apps" / "WiiDonut"
+    app.mkdir(parents=True)
+    (app / "boot.dol").write_bytes(b"version nueva, completa")
+    return app
+
+
+def test_respaldo_de_homebrew_con_la_app_instalada_solo_se_puede_eliminar(
+        gtk, tmp_path, monkeypatch):
+    """La app ya está instalada: el respaldo es la versión anterior, quizás
+    a medio borrar. Solo "Eliminar", y ningún texto dice que esté completo
+    ni que lo instalado esté "probablemente incompleto"."""
+    from wiibackup_manager import recovery_service
+    from wiibackup_manager.widgets import recovery_dialog
+    from wiibackup_manager.widgets.recovery_dialog import RecoveryDialog
+
+    resp = _homebrew(tmp_path, _pid_muerto(), instalada=True)
+    [resto] = recovery_service.scan([tmp_path])
+    presentados = []
+    monkeypatch.setattr(recovery_dialog.Adw.AlertDialog, "present",
+                        lambda self, parent=None: presentados.append(self))
+    dialog = RecoveryDialog([resto], ops=None, show_toast=lambda _m: None,
+                            on_resolved=lambda _lo: None)
+
+    grupo = dialog._grupos[resto.path]
+    botones = _botones_visibles(grupo)
+    assert "Restaurar" not in botones
+    assert "Eliminar" in botones
+    descripcion = grupo.get_description()
+    assert "ya está instalada" in descripcion
+    assert "Está completa" not in descripcion
+
+    dialog._on_delete(resto)
+    [confirmacion] = presentados
+    cuerpo = confirmacion.get_body()
+    assert "La versión instalada no se toca" in cuerpo
+    assert "copia completa" not in cuerpo
+    assert "incomplet" not in cuerpo
+    assert resp.exists()          # confirmar es otro paso: no se tocó nada
+
+
+def test_si_la_app_se_instalo_despues_restaurar_no_la_pisa_ni_pregunta(
+        gtk, tmp_path, monkeypatch):
+    """El diálogo se arma con la lista del último escaneo. Si la app se
+    instaló después, al apretar "Restaurar" no aparece el "¿Reemplazar?" (que
+    llamaría incompleta a la app recién instalada): se avisa, desaparece el
+    botón y no se toca nada."""
+    from wiibackup_manager import recovery_service
+    from wiibackup_manager.widgets import recovery_dialog
+    from wiibackup_manager.widgets.recovery_dialog import RecoveryDialog
+
+    resp = _homebrew(tmp_path, _pid_muerto(), instalada=False)
+    [resto] = recovery_service.scan([tmp_path])
+    presentados, toasts = [], []
+    monkeypatch.setattr(recovery_dialog.Adw.AlertDialog, "present",
+                        lambda self, parent=None: presentados.append(self))
+    dialog = RecoveryDialog([resto], ops=None, show_toast=toasts.append,
+                            on_resolved=lambda _lo: None)
+    assert "Restaurar" in _botones_visibles(dialog._grupos[resto.path])
+
+    app = _instalar_wiidonut(tmp_path)
+    dialog._on_restore(resto)
+
+    assert presentados == [], "preguntó si reemplazar la app recién instalada"
+    assert len(toasts) == 1 and "ya está instalada" in toasts[0]
+    assert "Restaurar" not in _botones_visibles(dialog._grupos[resto.path])
+    assert (app / "boot.dol").read_bytes() == b"version nueva, completa"
+    assert (resp / "boot.dol").read_bytes() == b"version anterior"
+
+
+def test_respaldo_de_homebrew_sobre_una_carpeta_vacia_se_restaura_sin_preguntar(
+        gtk, tmp_path, monkeypatch):
+    """Una carpeta vacía con el nombre de la app no es una app instalada:
+    restaurar no pierde nada, así que no se pregunta "¿Reemplazar?" (cuyo
+    texto llamaría "probablemente incompleto" a algo que no es nada)."""
+    from wiibackup_manager import recovery_service
+    from wiibackup_manager.widgets import recovery_dialog
+    from wiibackup_manager.widgets.recovery_dialog import RecoveryDialog
+
+    resp = _homebrew(tmp_path, _pid_muerto(), instalada=False)
+    (tmp_path / "apps" / "WiiDonut").mkdir()
+    [resto] = recovery_service.scan([tmp_path])
+    presentados = []
+    monkeypatch.setattr(recovery_dialog.Adw.AlertDialog, "present",
+                        lambda self, parent=None: presentados.append(self))
+    dialog = RecoveryDialog([resto], ops=None, show_toast=lambda _m: None,
+                            on_resolved=lambda _lo: None)
+    assert "Restaurar" in _botones_visibles(dialog._grupos[resto.path])
+
+    dialog._on_restore(resto)
+
+    assert [d.get_body() for d in presentados] == []
+    assert (tmp_path / "apps" / "WiiDonut" / "boot.dol").read_bytes() == b"version anterior"
+    assert not resp.exists()

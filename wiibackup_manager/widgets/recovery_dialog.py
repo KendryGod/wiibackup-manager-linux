@@ -100,6 +100,10 @@ class RecoveryDialog(Adw.Dialog):
         self._show_toast = show_toast
         self._on_resolved = on_resolved
         self._grupos: dict = {}
+        # El botón "Restaurar" de cada resto que lo tiene, para poder
+        # sacarlo si al apretarlo resulta que ya no se puede (ver
+        # `_on_restore`).
+        self._botones_restaurar: dict = {}
 
         self.set_title(_("Operaciones interrumpidas"))
         self.set_content_width(600)
@@ -129,8 +133,12 @@ class RecoveryDialog(Adw.Dialog):
 
     # ------------------------------------------------------------ Filas --
     def _build_group(self, leftover) -> Adw.PreferencesGroup:
+        # Un respaldo de Homebrew con la app ya instalada es la versión
+        # anterior, quizás a medio borrar: no se ofrece restaurarlo encima
+        # (ver `recovery_service.homebrew_app_installed`).
+        instalada = recovery_service.homebrew_app_installed(leftover)
         grupo = Adw.PreferencesGroup(title=leftover.kind.label,
-                                     description=leftover.kind.description)
+                                     description=recovery_service.describe(leftover))
 
         fila = Adw.ActionRow(title=leftover.title)
         # Sin markup: los nombres de archivo del usuario pueden traer `&` o
@@ -144,13 +152,14 @@ class RecoveryDialog(Adw.Dialog):
         botones = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
                           valign=Gtk.Align.CENTER)
 
-        if leftover.restorable:
+        if leftover.restorable and not instalada:
             restaurar = Gtk.Button(label=_("Restaurar"))
             restaurar.set_tooltip_text(
                 _("Devolver este archivo a su nombre original: {name}")
                 .format(name=leftover.original.name))
             restaurar.connect("clicked", lambda *_a: self._on_restore(leftover))
             botones.append(restaurar)
+            self._botones_restaurar[leftover.path] = restaurar
 
         eliminar = Gtk.Button(label=_("Eliminar"))
         eliminar.add_css_class("destructive-action")
@@ -176,7 +185,7 @@ class RecoveryDialog(Adw.Dialog):
         borrar algo de 4 GB."""
         partes = [format_size(leftover.size_bytes),
                   format_age(leftover.age_seconds())]
-        if leftover.original_exists and leftover.restorable:
+        if leftover.restorable and recovery_service.restore_overwrites(leftover):
             partes.append(_("el nombre original está ocupado"))
         return " · ".join(partes) + "\n" + str(leftover.path)
 
@@ -197,8 +206,19 @@ class RecoveryDialog(Adw.Dialog):
     def _on_restore(self, leftover):
         if not self._sigue_libre(leftover):
             return
-        if not leftover.original_exists:
-            # El nombre original está libre: devolverlo no pisa nada.
+        if recovery_service.homebrew_app_installed(leftover):
+            # La app se instaló después del escaneo con el que se armó esta
+            # lista. Ni se pregunta "¿Reemplazar?" -que llamaría incompleta
+            # a una app recién instalada- ni se toca nada: se avisa y queda
+            # solo "Eliminar".
+            self._show_toast(recovery_service.app_installed_message(leftover))
+            boton = self._botones_restaurar.pop(leftover.path, None)
+            if boton is not None:
+                boton.set_visible(False)
+            return
+        if not recovery_service.restore_overwrites(leftover):
+            # El nombre original está libre (o, para una app de Homebrew,
+            # hay a lo sumo una carpeta vacía): devolverlo no pisa nada.
             self._restaurar(leftover)
             return
 
@@ -240,7 +260,15 @@ class RecoveryDialog(Adw.Dialog):
         cuerpo = _(
             "Se van a liberar {size}.\n\n{ruta}\n\nNo se puede deshacer."
         ).format(size=format_size(leftover.size_bytes), ruta=leftover.path)
-        if leftover.restorable:
+        if recovery_service.homebrew_app_installed(leftover):
+            # La versión anterior de una app que ya está instalada: no se
+            # promete que esté completa, y se aclara que borrarla no
+            # desinstala nada.
+            cuerpo = _(
+                "Es la versión anterior de «{name}». La versión instalada no "
+                "se toca.\n\n"
+            ).format(name=leftover.original.name) + cuerpo
+        elif leftover.restorable:
             # Es la copia entera de un archivo del usuario, no un temporal:
             # eliminarla es la única acción de este diálogo que puede
             # perder datos que todavía se podían recuperar.
