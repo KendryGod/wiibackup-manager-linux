@@ -982,6 +982,18 @@ class TransferQueue:
             return
 
         if not resultado.ok:
+            if drives.device_is_gone(
+                    mount_point=job.dest_root if raiz_era_montaje else None,
+                    known_dir=job.dest_root):
+                # La unidad se fue mientras `wit` la releía: lo que falló es
+                # la lectura, no el archivo. Decir "no pasó la verificación"
+                # mandaría a volver a copiar un juego que quizás está bien.
+                # Sin `exc`: el texto de `wit` no es señal de desconexión
+                # (un EIO también lo da un pendrive con sectores malos).
+                self._finish_job(job, JobStatus.DEVICE_DISCONNECTED,
+                                 drives.disconnected_message(),
+                                 oplog.STATUS_DISCONNECTED, op=op)
+                return
             self._finish_job(
                 job, JobStatus.CORRUPT,
                 _("Se copió entero, pero al releerlo no pasó la "

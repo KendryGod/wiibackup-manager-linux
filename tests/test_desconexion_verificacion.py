@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from wiibackup_manager import (drives, fileops, library_ops, queue_manager,
-                               transfer_plan)
+                               transfer_plan, wit_wrapper)
 from wiibackup_manager.operations import OperationManager
 from wiibackup_manager.queue_manager import JobStatus, TransferQueue
 
@@ -84,3 +84,33 @@ def test_eio_al_bajar_a_disco_con_la_unidad_montada_sigue_siendo_error(
     job = _copiar_y_verificar(make_game, raiz)
     assert job.status is JobStatus.ERROR
 
+
+# ----------------------------------------------------- N2: _verify_copy --
+def test_desconexion_al_releer_es_unidad_desconectada_y_no_corrupto(
+        make_game, usb, monkeypatch):
+    raiz, ida = usb
+    monkeypatch.setattr(fileops, "flush_and_drop_cache", lambda *a, **k: None)
+
+    def verify_y_se_va(path, binary="wit", timeout=None, cancel=None):
+        ida["si"] = True
+        return wit_wrapper.VerifyResult(
+            ok=False, timed_out=False,
+            output="wit: ERROR #31 [READ FAILED] Input/output error")
+
+    monkeypatch.setattr(queue_manager.wit_wrapper, "verify_result", verify_y_se_va)
+    job = _copiar_y_verificar(make_game, raiz)
+    assert job.status is JobStatus.DEVICE_DISCONNECTED, job.error_msg
+    assert job.error_msg == drives.disconnected_message()
+
+
+def test_una_relectura_que_falla_con_la_unidad_montada_sigue_siendo_corrupta(
+        make_game, usb, monkeypatch):
+    """Control: sin desconexión, una verificación que no pasa es CORRUPT."""
+    raiz, _ida = usb
+    monkeypatch.setattr(fileops, "flush_and_drop_cache", lambda *a, **k: None)
+    monkeypatch.setattr(
+        queue_manager.wit_wrapper, "verify_result",
+        lambda path, binary="wit", timeout=None, cancel=None: wit_wrapper.VerifyResult(
+            ok=False, timed_out=False, output="wit: ERROR #31 [READ FAILED] hash mismatch"))
+    job = _copiar_y_verificar(make_game, raiz)
+    assert job.status is JobStatus.CORRUPT
