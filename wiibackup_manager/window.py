@@ -2590,9 +2590,17 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                                                   bytes_progress_cb=on_progress,
                                                   cancel=cancel, overwrite=True,
                                                   cleanup_on_abort=False)
-                    ok = result.returncode == 0
-                    if ok:
+                    if result.returncode == 0:
+                        # `wit` termina con lo escrito todavía en la caché:
+                        # se baja ANTES del `commit`, que es lo que borra
+                        # el respaldo del original. Al revés, un corte en
+                        # ese momento dejaba sin el juego viejo y con el
+                        # nuevo a medias. Mismo orden que
+                        # `library_ops._write_to_drive`.
+                        fileops.flush_and_drop_cache(
+                            transfer_plan.wbfs_group(dest), cancel=cancel)
                         guard.commit()
+                        ok = True
                 detail = (f"a {dest.name}" if ok else result.stderr.strip()[:200])
                 msg = (f"Convertido a {dest.name}" if ok
                        else f"Error al convertir: {result.stderr.strip()[:200]}")
