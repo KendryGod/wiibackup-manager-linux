@@ -900,9 +900,10 @@ class TransferQueue:
         if not job.verify_after_copy:
             self._finish_job(job, JobStatus.DONE, "", oplog.STATUS_OK, op=op)
             return
-        self._verify_copy(job, dest, op)
+        self._verify_copy(job, dest, op, raiz_era_montaje)
 
-    def _verify_copy(self, job: TransferJob, dest: Path, op) -> None:
+    def _verify_copy(self, job: TransferJob, dest: Path, op,
+                     raiz_era_montaje: bool = False) -> None:
         """Relee lo que se acabó de escribir y cierra la tarea con lo que
         diga `wit`.
 
@@ -933,7 +934,7 @@ class TransferQueue:
 
         grupo = transfer_plan.wbfs_group(dest)
         partes = len(grupo) or 1
-        if not self._sync_copy(job, grupo, op):
+        if not self._sync_copy(job, grupo, op, raiz_era_montaje):
             return
         self._update(job, status=JobStatus.VERIFYING, progress=0.99,
                      speed_text=_("Releyendo lo copiado…"))
@@ -1013,13 +1014,19 @@ class TransferQueue:
         except Exception:  # noqa: BLE001
             return False
 
-    def _sync_copy(self, job: TransferJob, archivos: list, op) -> bool:
+    def _sync_copy(self, job: TransferJob, archivos: list, op,
+                   raiz_era_montaje: bool = False) -> bool:
         """Baja a la unidad cada parte (.wbfs, .wbf1…) y la saca de la
         caché antes de verificar: ver la fase "sync" en `PHASE_LABELS`.
 
         Devuelve False si la tarea ya se cerró acá: un `fsync` que falla
         es la unidad diciendo que no guardó lo que se le mandó, y eso no
-        es un "no se pudo verificar" sino una copia que no quedó."""
+        es un "no se pudo verificar" sino una copia que no quedó.
+
+        `raiz_era_montaje` es la foto que sacó `_copy` antes de escribir:
+        un punto de montaje fijo (`/mnt/usb`) queda como carpeta vacía que
+        responde cuando la unidad se va, y la única señal es que dejó de
+        ser punto de montaje (ver `drives.device_is_gone`)."""
         self._update(job, speed_text=_("Sincronizando…"))
         inicio = time.monotonic()
         try:
@@ -1033,7 +1040,9 @@ class TransferQueue:
                              op=op)
             return False
         except OSError as e:
-            if drives.device_is_gone(known_dir=job.dest_root, exc=e):
+            if drives.device_is_gone(
+                    mount_point=job.dest_root if raiz_era_montaje else None,
+                    known_dir=job.dest_root, exc=e):
                 self._finish_job(job, JobStatus.DEVICE_DISCONNECTED,
                                  drives.disconnected_message(),
                                  oplog.STATUS_DISCONNECTED, op=op)
