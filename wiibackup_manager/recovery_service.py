@@ -872,13 +872,23 @@ def restore_overwrites(leftover: Leftover) -> bool:
     """Si restaurar `leftover` va a pisar algo que hay en su nombre: lo que
     la interfaz tiene que confirmar antes (ver `restore`).
 
+    Mira el disco en el momento, no la foto del escaneo
+    (`Leftover.original_exists`): la lista del Recovery Manager es la del
+    último escaneo, y entre la foto y el clic lo que había pudo irse -no
+    hay nada que confirmar- o pudo aparecer algo -un juego copiado
+    después, que restaurar pisaría sin preguntar-. Cuenta cualquiera de las
+    partes de un juego dividido, y si no se puede mirar, cuenta como
+    ocupado: ante la duda, se pregunta.
+
     Un respaldo de Homebrew nunca: o la app está instalada, y entonces no
     se restaura (`homebrew_app_installed`), o en su lugar hay a lo sumo una
     carpeta vacía, que no se pierde. Preguntar "¿Reemplazar?" ahí llamaba
     "probablemente incompleto" a algo que no era nada."""
     if leftover.kind is LeftoverKind.HOMEBREW_BACKUP:
         return False
-    return leftover.original_exists
+    if leftover.kind is LeftoverKind.TRASHED:
+        return bool(_choques_al_restaurar(leftover.path, leftover.original))
+    return any(_existe(original) for original, _resto in leftover.pairs())
 
 
 def describe(leftover: Leftover) -> str:

@@ -500,3 +500,60 @@ def test_respaldo_de_homebrew_sobre_una_carpeta_vacia_se_restaura_sin_preguntar(
     assert [d.get_body() for d in presentados] == []
     assert (tmp_path / "apps" / "WiiDonut" / "boot.dol").read_bytes() == b"version anterior"
     assert not resp.exists()
+
+
+def _respaldo_de_brawl(tmp_path, pid, *, con_original: bool):
+    carpeta = tmp_path / "wbfs" / "RSBE01"
+    carpeta.mkdir(parents=True)
+    respaldo = carpeta / f".RSBE01.wbfs.respaldo-{pid}"
+    respaldo.write_bytes(b"ORIGINAL")
+    if con_original:
+        (carpeta / "RSBE01.wbfs").write_bytes(b"cortado")
+    return carpeta, respaldo
+
+
+def test_restaurar_no_pregunta_si_lo_que_habia_ya_no_esta(gtk, tmp_path, monkeypatch):
+    """El escaneo vio algo en el nombre original, pero ya no está: no hay
+    nada que reemplazar, así que no se pregunta "¿Reemplazar?"."""
+    from wiibackup_manager import recovery_service
+    from wiibackup_manager.widgets import recovery_dialog
+    from wiibackup_manager.widgets.recovery_dialog import RecoveryDialog
+
+    carpeta, respaldo = _respaldo_de_brawl(tmp_path, _pid_muerto(), con_original=True)
+    [resto] = recovery_service.scan([tmp_path])
+    presentados = []
+    monkeypatch.setattr(recovery_dialog.Adw.AlertDialog, "present",
+                        lambda self, parent=None: presentados.append(self))
+    dialog = RecoveryDialog([resto], ops=None, show_toast=lambda _m: None,
+                            on_resolved=lambda _lo: None)
+    (carpeta / "RSBE01.wbfs").unlink()
+
+    dialog._on_restore(resto)
+
+    assert presentados == []
+    assert (carpeta / "RSBE01.wbfs").read_bytes() == b"ORIGINAL"
+    assert not respaldo.exists()
+
+
+def test_restaurar_pregunta_si_aparecio_algo_despues_del_escaneo(
+        gtk, tmp_path, monkeypatch):
+    """Al revés: el escaneo vio el nombre libre, pero ahora hay un juego
+    ahí. Restaurar sin preguntar lo pisaría."""
+    from wiibackup_manager import recovery_service
+    from wiibackup_manager.widgets import recovery_dialog
+    from wiibackup_manager.widgets.recovery_dialog import RecoveryDialog
+
+    carpeta, respaldo = _respaldo_de_brawl(tmp_path, _pid_muerto(), con_original=False)
+    [resto] = recovery_service.scan([tmp_path])
+    presentados = []
+    monkeypatch.setattr(recovery_dialog.Adw.AlertDialog, "present",
+                        lambda self, parent=None: presentados.append(self))
+    dialog = RecoveryDialog([resto], ops=None, show_toast=lambda _m: None,
+                            on_resolved=lambda _lo: None)
+    (carpeta / "RSBE01.wbfs").write_bytes(b"juego copiado despues")
+
+    dialog._on_restore(resto)
+
+    assert len(presentados) == 1, "pisó sin preguntar"
+    assert (carpeta / "RSBE01.wbfs").read_bytes() == b"juego copiado despues"
+    assert respaldo.exists()
