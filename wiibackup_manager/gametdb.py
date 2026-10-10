@@ -49,9 +49,10 @@ COVER_URL_TEMPLATES = {
 }
 DEFAULT_CONSOLE = "wii"
 # GameTDB no siempre sube la carátula bajo la región "EN": muchos títulos
-# NTSC-U (p.ej. SMNE01, New Super Mario Bros. Wii) sólo existen bajo "US".
+# NTSC-U (p.ej. SMNE01, New Super Mario Bros. Wii) sólo existen bajo "US",
+# y algunos lanzados solo en España sólo bajo "ES" (RV7SMR, RZYS41).
 # Probamos la región pedida y después esta lista de respaldo, en orden.
-COVER_FALLBACK_REGIONS = ["US", "EN", "DE", "FR", "JA", "KO"]
+COVER_FALLBACK_REGIONS = ["US", "EN", "DE", "FR", "JA", "KO", "ES"]
 DEFAULT_COVER_REGION = "EN"
 REQUEST_TIMEOUT = 5
 

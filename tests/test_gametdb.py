@@ -51,6 +51,11 @@ def _sandbox_gametdb(tmp_path, monkeypatch):
 
 
 # ------------------------------------------------------------- utilidades --
+# Cuántos pedidos hace `get_cover_path(..., region="EN")` cuando ninguna
+# región tiene la carátula: "EN" y después el resto de los respaldos.
+_PEDIDOS_CON_EN = 1 + len([r for r in gametdb.COVER_FALLBACK_REGIONS if r != "EN"])
+
+
 def _make_png(color=(255, 0, 0)) -> bytes:
     """PNG de 1x1 válido de verdad (se decodifica con GdkPixbuf), armado a
     mano para no depender de ningún archivo de fixtures binario."""
@@ -299,7 +304,7 @@ def test_get_cover_path_id_invalido_no_toca_red(monkeypatch):
 
 def test_get_cover_path_todas_las_regiones_404_no_loggea(monkeypatch, capsys):
     errores = [urllib.error.HTTPError("http://x", 404, "Not Found", None, None)
-               for _ in range(6)]
+               for _ in range(_PEDIDOS_CON_EN)]
     monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen_sequence(errores))
     assert gametdb.get_cover_path("RMCP01", region="EN") is None
     assert capsys.readouterr().err == ""
@@ -308,7 +313,7 @@ def test_get_cover_path_todas_las_regiones_404_no_loggea(monkeypatch, capsys):
 def test_get_cover_path_error_no_404_se_loggea(monkeypatch, capsys):
     secuencia = [urllib.error.HTTPError("http://x", 500, "boom", None, None)]
     secuencia += [urllib.error.HTTPError("http://x", 404, "Not Found", None, None)
-                  for _ in range(5)]
+                  for _ in range(_PEDIDOS_CON_EN - 1)]
     monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen_sequence(secuencia))
     assert gametdb.get_cover_path("RMCP01", region="EN") is None
     err = capsys.readouterr().err
@@ -321,7 +326,7 @@ def test_get_cover_path_status_no_200_sin_excepcion(monkeypatch, capsys):
     HTTP que no es 200 ni un error levantado por urllib."""
     secuencia = [FakeResponse(503, b"")]
     secuencia += [urllib.error.HTTPError("http://x", 404, "Not Found", None, None)
-                  for _ in range(5)]
+                  for _ in range(_PEDIDOS_CON_EN - 1)]
     monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen_sequence(secuencia))
     assert gametdb.get_cover_path("RMCP01", region="EN") is None
     assert "status HTTP 503" in capsys.readouterr().err
@@ -337,7 +342,7 @@ def test_get_cover_path_timeout_en_una_region_sigue_con_la_siguiente(monkeypatch
 
 
 def test_get_cover_path_sin_red_en_todas_las_regiones(monkeypatch, capsys):
-    errores = [urllib.error.URLError("sin red") for _ in range(6)]
+    errores = [urllib.error.URLError("sin red") for _ in range(_PEDIDOS_CON_EN)]
     monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen_sequence(errores))
     assert gametdb.get_cover_path("RMCP01", region="EN") is None
     assert "RMCP01" in capsys.readouterr().err
@@ -346,7 +351,7 @@ def test_get_cover_path_sin_red_en_todas_las_regiones(monkeypatch, capsys):
 def test_get_cover_path_respuesta_no_es_png(monkeypatch, capsys):
     secuencia = [FakeResponse(200, b"<html>404 not found</html>")]
     secuencia += [urllib.error.HTTPError("http://x", 404, "Not Found", None, None)
-                  for _ in range(5)]
+                  for _ in range(_PEDIDOS_CON_EN - 1)]
     monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen_sequence(secuencia))
     assert gametdb.get_cover_path("RMCP01", region="EN") is None
     assert "no es un PNG" in capsys.readouterr().err
@@ -355,7 +360,7 @@ def test_get_cover_path_respuesta_no_es_png(monkeypatch, capsys):
 def test_get_cover_path_png_descargado_no_se_puede_decodificar(monkeypatch, capsys):
     secuencia = [FakeResponse(200, gametdb.PNG_MAGIC + b"corrupto")]
     secuencia += [urllib.error.HTTPError("http://x", 404, "Not Found", None, None)
-                  for _ in range(5)]
+                  for _ in range(_PEDIDOS_CON_EN - 1)]
     monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen_sequence(secuencia))
     assert gametdb.get_cover_path("RMCP01", region="EN") is None
     assert "decodificar" in capsys.readouterr().err
@@ -1093,3 +1098,24 @@ def test_fetch_extra_info_async_excepcion_inesperada_da_none(monkeypatch):
     assert _esperar(lambda: len(resultados) == 1)
     assert resultados == [None]
     assert gametdb.extra_info_in_flight() == 0
+
+
+def test_caratula_que_solo_existe_bajo_es(monkeypatch):
+    """Juegos lanzados solo en España: GameTDB tiene la carátula únicamente
+    bajo "ES" (comprobado con HEAD contra art.gametdb.com: RV7SMR,
+    "Supervivientes", y RZYS41, "Mi Experto en Vocabulario", dan 404 en
+    US, EN, DE, FR, JA y KO). Sin "ES" entre los respaldos no aparecía
+    nunca."""
+    png = _make_png()
+    pedidas = []
+
+    def fake(req, timeout=None):
+        pedidas.append(req.full_url)
+        if "/ES/" in req.full_url:
+            return FakeResponse(200, png)
+        raise urllib.error.HTTPError(req.full_url, 404, "Not Found", None, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+
+    assert gametdb.get_cover_path("RV7SMR", region="EN") is not None
+    assert pedidas[-1].endswith("/ES/RV7SMR.png")
