@@ -105,20 +105,46 @@ GC_EXTENSIONS = (".iso", ".ciso")
 
 
 def gc_group(dest: Path) -> list:
-    """`dest` y su otra extensión (`game.iso` / `game.ciso`), las que
-    existan, empezando por `dest`. Es el `wbfs_group` de GameCube: lo que
-    ocupa el lugar de ese disco en la carpeta del juego, sea cual sea la
-    extensión con la que llegó."""
-    variantes = [dest] + [dest.with_suffix(ext) for ext in GC_EXTENSIONS
-                          if ext != dest.suffix.lower()]
+    """`dest` y el mismo disco con cualquier extensión de GameCube
+    (`game.iso` / `game.ciso`), los que existan, empezando por `dest`. Es
+    el `wbfs_group` de GameCube: lo que ocupa el lugar de ese disco en la
+    carpeta del juego, sea cual sea la extensión con la que llegó.
+
+    Sin distinguir mayúsculas: otra herramienta puede haber dejado
+    `GAME.ISO` o `game.CISO`, y en un sistema de archivos que las distingue
+    (ext4) armar las variantes en minúsculas y preguntar `exists()` no lo
+    veía. Por eso se lista la carpeta -solo esa-. En FAT32, que no las
+    distingue al buscar, `dest` puede existir con otro nombre en disco: ese
+    archivo no se cuenta dos veces."""
     existentes = []
-    for variante in variantes:
-        try:
-            if variante.exists():
-                existentes.append(variante)
-        except OSError:
-            pass
+    try:
+        if dest.exists():
+            existentes.append(dest)
+    except OSError:
+        pass
+    raiz = dest.stem.lower()
+    try:
+        with os.scandir(dest.parent) as entradas:
+            candidatos = sorted(
+                Path(e.path) for e in entradas
+                if e.name != dest.name
+                and Path(e.name).stem.lower() == raiz
+                and Path(e.name).suffix.lower() in GC_EXTENSIONS
+                and e.is_file(follow_symlinks=False))
+    except OSError:
+        candidatos = []
+    for candidato in candidatos:
+        if existentes and _mismo_archivo(candidato, dest):
+            continue
+        existentes.append(candidato)
     return existentes
+
+
+def _mismo_archivo(a: Path, b: Path) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
 
 
 def existing_destination(game: Game, drive_root: Path) -> Optional[Path]:
