@@ -59,6 +59,43 @@ def gc_dest_path(game: Game, drive_root: Path) -> Path:
     return Path(drive_root) / "games" / folder / filename
 
 
+# Las dos formas en que Nintendont lee un juego de GameCube. En la carpeta
+# del juego son INTERCAMBIABLES: `game.iso` y `game.ciso` (o `disc2.iso` y
+# `disc2.ciso`) son el mismo disco, y tener los dos es tener el juego dos
+# veces.
+GC_EXTENSIONS = (".iso", ".ciso")
+
+
+def gc_group(dest: Path) -> list:
+    """`dest` y su otra extensión (`game.iso` / `game.ciso`), las que
+    existan, empezando por `dest`. Es el `wbfs_group` de GameCube: lo que
+    ocupa el lugar de ese disco en la carpeta del juego, sea cual sea la
+    extensión con la que llegó."""
+    variantes = [dest] + [dest.with_suffix(ext) for ext in GC_EXTENSIONS
+                          if ext != dest.suffix.lower()]
+    existentes = []
+    for variante in variantes:
+        try:
+            if variante.exists():
+                existentes.append(variante)
+        except OSError:
+            pass
+    return existentes
+
+
+def existing_destination(game: Game, drive_root: Path) -> Optional[Path]:
+    """Lo que ya ocupa en `drive_root` el lugar de `game`, o None: el
+    archivo de destino o, para GameCube, el mismo disco con la otra
+    extensión (ver `gc_group`). Es la pregunta "¿ya está?" que se hace
+    antes de copiar, para pedir confirmación o saltearlo. Levanta
+    ValueError como `game_dest_path`."""
+    dest = game_dest_path(game, drive_root)
+    if game.console == "gc":
+        ocupado = gc_group(dest)
+        return ocupado[0] if ocupado else None
+    return dest if dest.exists() else None
+
+
 def game_dest_path(game: Game, drive_root: Path) -> Path:
     """Ruta final de `game` dentro de `drive_root`, delegando en la
     estructura que corresponda según la consola: `wbfs_dest_path` para Wii,

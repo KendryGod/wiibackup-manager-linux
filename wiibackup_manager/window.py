@@ -1174,11 +1174,13 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         # tiene sentido preguntar por cada uno: el worker los omite y los
         # informa aparte en el resumen final.
         if len(games) == 1:
+            # Para GameCube cuenta también la otra extensión (ver
+            # `transfer_plan.existing_destination`).
             try:
-                dest = transfer_plan.game_dest_path(games[0], dest_root)
+                dest = transfer_plan.existing_destination(games[0], dest_root)
             except ValueError:
                 dest = None
-            if dest is not None and dest.exists():
+            if dest is not None:
                 gtk_helpers.confirm_overwrite(
                     self,
                     _("Ya existe un archivo en:\n{dest}\n\n"

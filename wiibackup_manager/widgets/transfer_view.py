@@ -1034,11 +1034,13 @@ class TransferView(Gtk.Box):
         # usuario acaba de elegir: es lo bastante barata como para hacerla
         # en el hilo de GTK sin que se note.
         if len(selected) == 1:
+            # Para GameCube cuenta también la otra extensión (ver
+            # `transfer_plan.existing_destination`).
             try:
-                dest = transfer_plan.game_dest_path(selected[0], dest_root)
+                dest = transfer_plan.existing_destination(selected[0], dest_root)
             except ValueError:
                 dest = None
-            if dest is not None and dest.exists():
+            if dest is not None:
                 gtk_helpers.confirm_overwrite(
                     self.get_root(),
                     _("Ya existe un archivo en:\n{dest}\n\n"

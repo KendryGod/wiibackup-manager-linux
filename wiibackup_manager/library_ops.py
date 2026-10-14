@@ -19,7 +19,7 @@ from . import atomicfs, drives, fileops, oplog, wit_wrapper
 from .fileops import _copy_with_progress, free_variant, rename_no_replace
 from .game_model import Game, standard_filename
 from .i18n import _
-from .transfer_plan import game_dest_path, wbfs_group
+from .transfer_plan import existing_destination, game_dest_path, gc_group, wbfs_group
 
 
 # Límite duro de FAT32 por archivo (en realidad 2^32 - 1 bytes; usamos
@@ -303,10 +303,15 @@ class DestinationGuard:
     pudo volver a su nombre (ver `oplog.record_unrestored_backup`).
     """
 
-    def __init__(self, dest: Path, enabled: bool = True, op_log=None):
+    def __init__(self, dest: Path, enabled: bool = True, op_log=None,
+                 group: Callable[[Path], list] = wbfs_group):
         self.dest = Path(dest)
         self.enabled = enabled
         self.op_log = op_log
+        # Qué se aparta: las partes de un WBFS (`wbfs_group`) o, para
+        # GameCube, el disco con cualquiera de sus dos extensiones
+        # (`gc_group`).
+        self._group = group
         # El mecanismo de apartar/devolver/descartar es compartido
         # (`atomicfs.SetAside`); lo que esta clase pone encima es cuándo
         # hacerlo y qué significa cada fallo.
@@ -333,7 +338,7 @@ class DestinationGuard:
             # ESTA operación de lo que ya estaba.
             self._outputs_before = wit_wrapper.output_files(self.dest)
             return self
-        for original in wbfs_group(self.dest):
+        for original in self._group(self.dest):
             try:
                 self._aside.move_aside(original)
             except OSError as e:
@@ -426,7 +431,7 @@ class DestinationGuard:
         protegidos = (self._outputs_before | restaurados
                       | {resp for _orig, resp in self._saved})
         wit_wrapper.cleanup_new_output_files(self.dest, protegidos)
-        for parcial in wbfs_group(self.dest):
+        for parcial in self._group(self.dest):
             if parcial in restaurados:
                 continue
             try:
@@ -541,8 +546,12 @@ def send_to_wbfs_drive(
     dest = game_dest_path(game, drive_root)
     dest_dir = dest.parent
 
-    if not overwrite and dest.exists():
-        raise DestinationExistsError(dest)
+    # Para GameCube cuenta también el mismo disco con la otra extensión
+    # (`game.ciso` si llega un `.iso`): si no, se copiaba al lado y la
+    # carpeta quedaba con el juego dos veces.
+    ocupado = existing_destination(game, drive_root)
+    if not overwrite and ocupado is not None:
+        raise DestinationExistsError(ocupado)
 
     # Si la carpeta la crea ESTA copia, es la única que puede saber que,
     # si no llega, queda vacía por culpa suya.
@@ -570,8 +579,16 @@ def _write_to_drive(game: Game, dest: Path, wit_binary: str,
     creada: copia directa o conversión con `wit`, según el caso."""
     dest_dir = dest.parent
     if game.console == "gc":
-        _copy_with_progress(game.path, dest,
-                            bytes_progress_cb or (lambda _n: None), cancel)
+        # Con el guard, como Wii: lo que ya estaba -el mismo disco, con
+        # esta extensión o con la otra- se aparta, y se descarta recién con
+        # lo nuevo en su lugar (`_copy_with_progress` lo baja a disco antes
+        # del rename). Si la copia falla o se cancela, vuelve; si el
+        # proceso muere en el medio, el Recovery Manager lo ofrece.
+        with DestinationGuard(dest, enabled=bool(gc_group(dest)),
+                              op_log=op_log, group=gc_group) as guard:
+            _copy_with_progress(game.path, dest,
+                                bytes_progress_cb or (lambda _n: None), cancel)
+            guard.commit()
         return dest
 
     split = drives.needs_wbfs_split(dest_dir)

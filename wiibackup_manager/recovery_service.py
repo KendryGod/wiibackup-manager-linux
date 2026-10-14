@@ -97,7 +97,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, Optional
 
-from . import atomicfs, drives, library_ops, oscwii_installer
+from . import atomicfs, drives, library_ops, oscwii_installer, transfer_plan
 from .fsutil import path_size
 from .i18n import _, ngettext
 
@@ -888,7 +888,8 @@ def restore_overwrites(leftover: Leftover) -> bool:
         return False
     if leftover.kind is LeftoverKind.TRASHED:
         return bool(_choques_al_restaurar(leftover.path, leftover.original))
-    return any(_existe(original) for original, _resto in leftover.pairs())
+    return (any(_existe(original) for original, _resto in leftover.pairs())
+            or bool(_sobrantes(leftover)))
 
 
 def describe(leftover: Leftover) -> str:
@@ -954,26 +955,48 @@ def restore(leftover: Leftover) -> None:
         _borrar_partes_sobrantes(leftover)
 
 
-def _borrar_partes_sobrantes(leftover: Leftover) -> None:
-    """Después de restaurar un juego dividido, borra las partes con nombre
-    final que NO son del original: `RSBE01.wbf1` de una copia cortada que
-    había dejado dos partes, cuando el original tenía una sola. Un USB
-    Loader pega todas las partes que encuentra, así que una que sobra
-    deja el juego restaurado inservible.
+# `game.iso` / `disc2.ciso`: los nombres de disco de la carpeta de un juego
+# de GameCube (`transfer_plan.gc_dest_path`).
+_DISCO_GAMECUBE = re.compile(r"^(?:game|disc\d+)$", re.IGNORECASE)
 
-    Son siempre de la copia cortada: `DestinationGuard` aparta TODAS las
-    partes del original antes de escribir (`wbfs_group`), así que lo que
-    hay con nombre final y no está entre los respaldos se escribió
-    después. Corre solo cuando la restauración ya salió bien."""
+
+def _sobrantes(leftover: Leftover) -> list:
+    """Lo que, con nombre final, NO es del original de un respaldo de
+    juego y quedaría al lado de él al restaurarlo:
+
+    - las partes de más de un WBFS dividido: `RSBE01.wbf1` de una copia
+      cortada que había dejado dos partes, cuando el original tenía una
+      sola. Un USB Loader pega todas las partes que encuentra;
+    - en la carpeta de un juego de GameCube, el mismo disco con la otra
+      extensión: `game.iso` de una copia cortada, cuando el original era
+      `game.ciso`. Nintendont tendría el juego dos veces.
+
+    Son siempre de la copia cortada: `DestinationGuard` aparta TODO el
+    grupo del original antes de escribir (`wbfs_group` / `gc_group`), así
+    que lo que hay con nombre final y no está entre los respaldos se
+    escribió después. Lo de GameCube se mira solo dentro de `games/`: en
+    una biblioteca, `Juego.iso` y `Juego.ciso` pueden ser dos archivos del
+    usuario."""
     principal = leftover.original
-    if principal.suffix.lower() != ".wbfs":
-        return
+    sufijo = principal.suffix.lower()
+    if sufijo == ".wbfs":
+        grupo = library_ops.wbfs_group(principal)
+    elif (sufijo in transfer_plan.GC_EXTENSIONS
+          and _DISCO_GAMECUBE.match(principal.stem)
+          and principal.parent.parent.name.lower() == "games"):
+        grupo = transfer_plan.gc_group(principal)
+    else:
+        return []
     restaurados = {original for original, _resto in leftover.pairs()}
-    for parte in library_ops.wbfs_group(principal):
-        if parte in restaurados:
-            continue
+    return [p for p in grupo if p not in restaurados]
+
+
+def _borrar_partes_sobrantes(leftover: Leftover) -> None:
+    """Después de restaurar un juego, borra lo que sobra al lado (ver
+    `_sobrantes`). Corre solo cuando la restauración ya salió bien."""
+    for sobrante in _sobrantes(leftover):
         try:
-            parte.unlink()
+            sobrante.unlink()
         except OSError:
             pass
 
