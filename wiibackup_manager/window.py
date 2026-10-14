@@ -1217,6 +1217,10 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
         total = len(games)
         wit_binary = self.settings.wit_binary
+        # Foto ANTES de escribir, como `TransferQueue._copy`: solo si el
+        # destino era un punto de montaje, "dejó de serlo" significa que la
+        # unidad se fue (ver `drives.device_is_gone`).
+        raiz_era_montaje = drives.is_mount_point(dest_root)
 
         def worker():
             # El plan (cuánto va a ocupar cada juego en el destino) se arma
@@ -1302,7 +1306,9 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                     # original quedó apartado ahí y se dice eso.
                     detalle = (library_ops.original_kept_message()
                                if library_ops.replace_cut_by_disconnect(
-                                   e, dest_root)
+                                   e, dest_root,
+                                   mount_point=dest_root if raiz_era_montaje
+                                   else None)
                                else e.user_message())
                     errors.append(f"{game.title}: {detalle}")
                     bytes_failed += item.output_bytes
