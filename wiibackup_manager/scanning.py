@@ -7,6 +7,7 @@ que después se hace con esos juegos vive en otros módulos.
 """
 from __future__ import annotations
 
+import dataclasses
 import os
 from pathlib import Path
 from typing import Callable, Optional
@@ -45,6 +46,8 @@ def identify_file(path: Path, wit_binary: str = "wit") -> Optional[Game]:
 
     if suffix == ".iso":
         info = read_plain_iso_header(path)
+        if info is not None and info.console == "gc":
+            info = _titulo_gamecube_de_wit(info, path, wit_binary)
 
     if info is None and wit_wrapper.is_available(wit_binary):
         try:
@@ -86,6 +89,29 @@ def identify_file(path: Path, wit_binary: str = "wit") -> Optional[Game]:
         console=info.console,
         disc_number=disc_number,
     )
+
+
+def _titulo_gamecube_de_wit(info: DiscInfo, path: Path, wit_binary: str) -> DiscInfo:
+    """El título de un ISO de GameCube desde la base de títulos de `wit`,
+    por ID6: la misma con la que se identifica su CISO, que no se puede
+    leer directo. Sin esto, el mismo juego aparecía como "ZELDA OCARINA
+    MULTI PACK" (el nombre interno de la cabecera) en `.iso` y como "The
+    Legend of Zelda: Ocarina of Time / Master Quest" en `.ciso`.
+
+    Si `wit` no está, no puede leerlo o devuelve otro ID, queda el título
+    de la cabecera. Solo GameCube: en Wii cambiaría lo que hace "Renombrar
+    a estándar [ID]" con toda una biblioteca ya renombrada, y sumaría un
+    `wit` por ISO a cada escaneo."""
+    if not wit_wrapper.is_available(wit_binary):
+        return info
+    try:
+        de_wit = wit_wrapper.identify(path, wit_binary)
+    except wit_wrapper.WitNotFoundError:
+        return info
+    if (de_wit is None or not de_wit.title
+            or de_wit.game_id.upper() != info.game_id.upper()):
+        return info
+    return dataclasses.replace(info, title=de_wit.title)
 
 
 def find_game_files(root: Path, skipped: Optional[list] = None) -> list[Path]:
