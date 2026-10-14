@@ -8,6 +8,8 @@ estas cuentas para decidir.
 from __future__ import annotations
 
 import concurrent.futures
+import os
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,10 +55,46 @@ def gc_dest_path(game: Game, drive_root: Path) -> Path:
     Nintendont no los va a poder ver como un solo juego; eso lo tiene que
     resolver quien importa, no esta función)."""
     game_id = validate_game_id(game.game_id)
-    folder = sanitize_filename(f"{game.title} [{game_id}]")
     ext = game.path.suffix.lower()
     filename = f"disc{game.disc_number + 1}{ext}" if game.disc_number else f"game{ext}"
-    return Path(drive_root) / "games" / folder / filename
+    games_dir = Path(drive_root) / "games"
+    # Si el juego ya tiene carpeta, es esa aunque el título no coincida:
+    # el mismo disco se identifica con títulos distintos según el formato
+    # (un ISO trae el nombre interno del disco, "ZELDA OCARINA MULTI PACK",
+    # y un CISO el de `wit`), y armar la carpeta con el título nuevo dejaba
+    # el juego dos veces.
+    existente = _gc_game_folder(games_dir, game_id)
+    if existente is not None:
+        return existente / filename
+    folder = sanitize_filename(f"{game.title} [{game_id}]")
+    return games_dir / folder / filename
+
+
+# Un disco en la carpeta de un juego de GameCube: `game.iso`, `disc2.ciso`…
+_GC_DISCO = re.compile(r"^(?:game|disc\d+)\.(?:iso|ciso)$", re.IGNORECASE)
+
+
+def _gc_game_folder(games_dir: Path, game_id: str) -> Optional[Path]:
+    """La carpeta de `games/` que ya es de ese juego: la que termina en
+    `[ID6]`, que es lo que identifica al juego (el título de adelante puede
+    variar). Si hay más de una, la primera que ya tiene un disco adentro;
+    si ninguna, la primera por nombre. None si no hay ninguna o no se
+    puede leer `games/`."""
+    sufijo = f"[{game_id}]"
+    try:
+        with os.scandir(games_dir) as entradas:
+            candidatas = sorted(Path(e.path) for e in entradas
+                                if e.name.upper().endswith(sufijo)
+                                and e.is_dir(follow_symlinks=False))
+    except OSError:
+        return None
+    for carpeta in candidatas:
+        try:
+            if any(_GC_DISCO.match(n) for n in os.listdir(carpeta)):
+                return carpeta
+        except OSError:
+            continue
+    return candidatas[0] if candidatas else None
 
 
 # Las dos formas en que Nintendont lee un juego de GameCube. En la carpeta
