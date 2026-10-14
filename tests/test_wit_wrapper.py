@@ -376,6 +376,54 @@ def test_verify_deja_en_stderr_el_comando_exacto(monkeypatch, tmp_path, capsys):
     assert shlex.split(stderr.split("wit: ", 1)[1]) == lanzado["args"]
 
 
+# ------------------------------------------- --trunc (ISO de GameCube) --
+# Sin `--trunc`, un CISO de GameCube convertido a ISO sale de 4,7 GB (el
+# tamaño de un DVD de Wii) y no entra en FAT32.
+def test_convert_con_trunc_le_pasa_trunc_a_wit(monkeypatch, tmp_path):
+    args = _args_de_convert(monkeypatch, tmp_path, trunc=True)
+    assert "--trunc" in args
+    assert args.index("--trunc") < args.index("--dest")
+
+
+def test_convert_por_defecto_no_recorta(monkeypatch, tmp_path):
+    """Lo que ya llamaba a `convert` (Wii) sigue igual."""
+    args = _args_de_convert(monkeypatch, tmp_path)
+    assert "--trunc" not in args
+
+
+@pytest.mark.skipif(wit_wrapper.find_wit("wit") is None, reason="wit no instalado")
+def test_el_wit_real_acepta_trunc(monkeypatch, tmp_path):
+    """Si `wit` llega a quejarse del ARCHIVO, pasó el parseo de opciones."""
+    wit_real = wit_wrapper.find_wit("wit")
+    args = _args_de_convert(monkeypatch, tmp_path, trunc=True)
+    args[0] = wit_real
+    real = subprocess.run(args, capture_output=True, text=True, timeout=30)
+    salida = real.stdout + real.stderr
+    assert real.returncode != 0
+    assert "SYNTAX ERROR" not in salida
+    assert "CAN'T OPEN FILE" in salida
+
+
+# ------------------------------------------- wit CMP --
+@pytest.mark.parametrize("codigo, coinciden", [
+    (0, True), (2, False), (4, False), (wit_wrapper.TIMEOUT_RETURNCODE, False)])
+def test_images_match_es_true_solo_con_cero(monkeypatch, tmp_path, codigo, coinciden):
+    lanzado = {}
+
+    def _run_espia(binary, *args, timeout=None, cancel=None):
+        lanzado.update(args=[binary, *args], cancel=cancel)
+        return subprocess.CompletedProcess(args, codigo, stdout="", stderr="")
+
+    monkeypatch.setattr(wit_wrapper, "find_wit", lambda b: "/usr/bin/wit")
+    monkeypatch.setattr(wit_wrapper, "_run_cancellable", _run_espia)
+    token = wit_wrapper.CancellationToken()
+
+    assert wit_wrapper.images_match(tmp_path / "a.ciso", tmp_path / "a.iso",
+                                    cancel=token) is coinciden
+    assert lanzado["args"] == ["wit", "CMP", str(tmp_path / "a.ciso"), str(tmp_path / "a.iso")]
+    assert lanzado["cancel"] is token
+
+
 # ------------------------------------------- Reserva de espacio (prealloc) --
 # En FAT32 `posix_fallocate` no reserva: escribe ceros. Medido en una USB
 # real, 1 GB de reserva tardó 74 s, o sea que cada byte se escribía dos

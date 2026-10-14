@@ -1400,9 +1400,9 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         seleccionados = self._selected_games()
         if not seleccionados:
             return
-        # Los que no se convierten (GameCube, ver
-        # `library_ops.conversion_target`) se saltean y se informan con
-        # el resto de los omitidos.
+        # Los que no se convierten (un GameCube que no está en CISO ni en
+        # ISO, ver `library_ops.conversion_target`) se saltean y se
+        # informan con el resto de los omitidos.
         games, destinos_ext, no_convertibles = [], {}, []
         for g in seleccionados:
             try:
@@ -1494,16 +1494,32 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                     bytes_other += salidas[id(game)]
                 else:
                     try:
-                        # Sin `overwrite`: acá el lote ya saltea el juego
-                        # si el destino existe (ver el `if` de arriba), así
-                        # que no hay nada que pisar. Si algo apareciera con
-                        # ese nombre entre el chequeo y esta línea, `wit`
-                        # falla y se informa, que es justo lo que se quiere.
-                        result = wit_wrapper.convert(game.path, dest, target_ext.strip("."),
-                                                      wit_binary, bytes_progress_cb=on_progress,
-                                                      cancel=cancel)
-                        if result.returncode != 0:
-                            raise RuntimeError(result.stderr.strip()[:200] or "error de wit")
+                        if game.console == "gc":
+                            # GameCube: entre CISO e ISO, con el resultado
+                            # comprobado; si no queda bien levanta y va a
+                            # los errores (ver `library_ops.convert_gamecube`).
+                            # Si algo apareciera en el destino entre el `if`
+                            # de arriba y esta línea, se aparta y vuelve a
+                            # su lugar si la conversión falla.
+                            huerfanos = library_ops.convert_gamecube(
+                                game, dest, target_ext, wit_binary,
+                                bytes_progress_cb=on_progress, cancel=cancel,
+                                op_log=self.op_log)
+                            if huerfanos:
+                                GLib.idle_add(oplog.record_orphaned_backup, self.op_log,
+                                              game.title,
+                                              formatting.format_orphaned_backups(huerfanos))
+                        else:
+                            # Sin `overwrite`: acá el lote ya saltea el juego
+                            # si el destino existe (ver el `if` de arriba), así
+                            # que no hay nada que pisar. Si algo apareciera con
+                            # ese nombre entre el chequeo y esta línea, `wit`
+                            # falla y se informa, que es justo lo que se quiere.
+                            result = wit_wrapper.convert(game.path, dest, target_ext.strip("."),
+                                                          wit_binary, bytes_progress_cb=on_progress,
+                                                          cancel=cancel)
+                            if result.returncode != 0:
+                                raise RuntimeError(result.stderr.strip()[:200] or "error de wit")
                         ok += 1
                         bytes_written += salidas[id(game)]
                     except wit_wrapper.OperationCancelled:
@@ -2604,43 +2620,57 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             # la conversión, desapareció el disco.
             disconnected = False
             try:
-                # El destino puede existir (el usuario confirmó pisarlo):
-                # se lo aparta y se lo devuelve si la conversión no
-                # termina bien. Ver library_ops.DestinationGuard.
-                with library_ops.DestinationGuard(
-                        dest, enabled=bool(transfer_plan.wbfs_group(dest)),
-                        op_log=self.op_log) as guard:
-                    # `overwrite=True` explícito: el usuario ya confirmó
-                    # pisar el destino y el guard de arriba tiene el
-                    # respaldo apartado para devolverlo si esto sale mal.
-                    # Lo que quede a medio escribir lo barre el guard,
-                    # después de devolver el original.
-                    result = wit_wrapper.convert(game.path, dest, target_ext.strip("."),
-                                                  self.settings.wit_binary,
-                                                  bytes_progress_cb=on_progress,
-                                                  cancel=cancel, overwrite=True,
-                                                  cleanup_on_abort=False)
-                    if result.returncode == 0:
-                        # `wit` termina con lo escrito todavía en la caché:
-                        # se baja ANTES del `commit`, que es lo que borra
-                        # el respaldo del original. Al revés, un corte en
-                        # ese momento dejaba sin el juego viejo y con el
-                        # nuevo a medias. Mismo orden que
-                        # `library_ops._write_to_drive`.
-                        fileops.flush_and_drop_cache(
-                            transfer_plan.wbfs_group(dest), cancel=cancel)
-                        guard.commit()
-                        ok = True
-                detail = (f"a {dest.name}" if ok else result.stderr.strip()[:200])
+                if game.console == "gc":
+                    # GameCube: entre CISO e ISO, con el resultado
+                    # comprobado antes de darlo por bueno. Si no queda bien
+                    # levanta, y lo que hubiera en el destino vuelve a su
+                    # lugar (ver `library_ops.convert_gamecube`).
+                    huerfanos = library_ops.convert_gamecube(
+                        game, dest, target_ext, self.settings.wit_binary,
+                        bytes_progress_cb=on_progress, cancel=cancel,
+                        op_log=self.op_log)
+                    ok = True
+                    error_wit = ""
+                else:
+                    # El destino puede existir (el usuario confirmó pisarlo):
+                    # se lo aparta y se lo devuelve si la conversión no
+                    # termina bien. Ver library_ops.DestinationGuard.
+                    with library_ops.DestinationGuard(
+                            dest, enabled=bool(transfer_plan.wbfs_group(dest)),
+                            op_log=self.op_log) as guard:
+                        # `overwrite=True` explícito: el usuario ya confirmó
+                        # pisar el destino y el guard de arriba tiene el
+                        # respaldo apartado para devolverlo si esto sale mal.
+                        # Lo que quede a medio escribir lo barre el guard,
+                        # después de devolver el original.
+                        result = wit_wrapper.convert(game.path, dest, target_ext.strip("."),
+                                                      self.settings.wit_binary,
+                                                      bytes_progress_cb=on_progress,
+                                                      cancel=cancel, overwrite=True,
+                                                      cleanup_on_abort=False)
+                        if result.returncode == 0:
+                            # `wit` termina con lo escrito todavía en la caché:
+                            # se baja ANTES del `commit`, que es lo que borra
+                            # el respaldo del original. Al revés, un corte en
+                            # ese momento dejaba sin el juego viejo y con el
+                            # nuevo a medias. Mismo orden que
+                            # `library_ops._write_to_drive`.
+                            fileops.flush_and_drop_cache(
+                                transfer_plan.wbfs_group(dest), cancel=cancel)
+                            guard.commit()
+                            ok = True
+                    huerfanos = guard.orphaned_backups
+                    error_wit = "" if ok else result.stderr.strip()[:200]
+                detail = (f"a {dest.name}" if ok else error_wit)
                 msg = (f"Convertido a {dest.name}" if ok
-                       else f"Error al convertir: {result.stderr.strip()[:200]}")
+                       else f"Error al convertir: {error_wit}")
                 # El guard ya intentó borrar el respaldo al salir del
                 # `with`. Si no pudo, la conversión igual salió bien: el
                 # aviso se suma al mensaje y va como entrada propia del
                 # historial, en vez de perderse (ver
                 # `DestinationGuard._discard`).
-                if guard.orphaned_backups:
-                    aviso = formatting.format_orphaned_backups(guard.orphaned_backups)
+                if huerfanos:
+                    aviso = formatting.format_orphaned_backups(huerfanos)
                     msg = f"{msg}. {aviso}"
                     detail = f"{detail} · {aviso}" if detail else aviso
                     GLib.idle_add(oplog.record_orphaned_backup,
@@ -2684,6 +2714,9 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                     disconnected = True
                     msg = drives.disconnected_message()
                     detail = msg
+                elif isinstance(e, library_ops.GameCubeConversionError):
+                    # Ya dice qué pasó y que el original quedó como estaba.
+                    msg = detail = str(e)
                 else:
                     ok, msg = False, f"Error al convertir: {e}"
                     detail = str(e)

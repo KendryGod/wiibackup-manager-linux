@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import atomicfs, drives, fileops, oplog, wit_wrapper
+from . import atomicfs, drives, fileops, formatting, oplog, transfer_plan, wit_wrapper
 from .fileops import _copy_with_progress, free_variant, rename_no_replace
 from .game_model import Game, standard_filename
 from .i18n import _
@@ -212,27 +212,33 @@ def remove_dir_if_empty(folder) -> bool:
 
 
 class UnsupportedConversionError(ValueError):
-    """Se pidió "Convertir ISO ↔ WBFS" para un juego que no se convierte
-    (hoy, uno de GameCube). El mensaje es para el usuario."""
+    """Se pidió convertir un juego que no se convierte (hoy, uno de
+    GameCube que no está en CISO ni en ISO). El mensaje es para el
+    usuario."""
 
 
 def conversion_target(game: Game) -> str:
-    """A qué extensión lleva "Convertir ISO ↔ WBFS" a `game`: `.wbfs` si no
-    es WBFS, `.iso` si lo es. Es la única decisión de las dos formas de
-    convertir de la Biblioteca (la fila y "Convertir" en lote).
+    """A qué extensión lleva "Convertir" a `game`. Es la única decisión de
+    las dos formas de convertir de la Biblioteca (la fila y "Convertir" en
+    lote).
 
-    Un juego de GameCube levanta `UnsupportedConversionError`: Nintendont
-    lo lee tal cual, como `.iso` o `.ciso` (ver `gc_dest_path`), y un WBFS
-    de GameCube no le sirve. Antes salía igual (`wit` lo acepta) y quedaba
-    duplicado en la Biblioteca. Tampoco se ofrece CISO ↔ ISO: `wit` lo
-    hace bien solo con `--trunc` -sin eso el ISO sale de 4,7 GB, el tamaño
-    de un DVD de Wii, y no entra en FAT32-, y Nintendont ya lee los dos
-    formatos, así que no hace falta."""
+    Wii ("Convertir ISO ↔ WBFS"): `.wbfs` si no es WBFS, `.iso` si lo es.
+
+    GameCube ("Convertir CISO ↔ ISO"): entre los dos formatos que lee
+    Nintendont, con `convert_gamecube`. En cualquier otro formato -un WBFS
+    que dejó una versión anterior- levanta `UnsupportedConversionError`:
+    un WBFS de GameCube no le sirve a Nintendont, y antes salía igual
+    (`wit` lo acepta) y quedaba duplicado en la Biblioteca."""
     if game.console == "gc":
+        fmt = game.fmt.upper()
+        if fmt == "CISO":
+            return ".iso"
+        if fmt == "ISO":
+            return ".ciso"
         raise UnsupportedConversionError(
-            _("«{title}» es de GameCube: Nintendont lo lee tal cual, como "
-              ".iso o .ciso, y un WBFS de GameCube no le sirve. No hace falta "
-              "convertirlo.").format(title=game.title))
+            _("«{title}» es de GameCube y está en {fmt}, un formato que "
+              "Nintendont no lee. Un juego de GameCube se convierte solo "
+              "entre ISO y CISO.").format(title=game.title, fmt=fmt))
     return ".wbfs" if game.fmt.upper() != "WBFS" else ".iso"
 
 
@@ -497,6 +503,102 @@ class DestinationGuard:
         guard lo reporta (`format_orphaned_backups` +
         `oplog.record_orphaned_backup`)."""
         self.orphaned_backups = self._aside.discard()
+
+
+class GameCubeConversionError(RuntimeError):
+    """Una conversión CISO ↔ ISO de GameCube que no arrancó (no había
+    lugar) o cuyo resultado no pasó las comprobaciones de
+    `convert_gamecube`. Lo convertido ya se descartó y el original quedó
+    como estaba. El mensaje es para el usuario."""
+
+
+def _un_archivo(dest: Path) -> list:
+    """El grupo (`DestinationGuard`) de un ISO o un CISO: el archivo solo.
+    Ni `.wbf1` -sería parte de OTRO juego, un WBFS dividido- ni la otra
+    extensión del mismo disco, que es justamente el origen de la
+    conversión."""
+    try:
+        return [dest] if dest.exists() else []
+    except OSError:
+        return []
+
+
+def convert_gamecube(game: Game, dest: Path, target_ext: str, wit_binary: str = "wit",
+                     *, bytes_progress_cb: Optional[Callable[[int], None]] = None,
+                     cancel: Optional["wit_wrapper.CancellationToken"] = None,
+                     op_log=None) -> list:
+    """Convierte el juego de GameCube `game` entre CISO e ISO
+    (`target_ext`, el que da `conversion_target`) y lo deja en `dest`. El
+    original no se toca.
+
+    Hacia ISO va con `--trunc` (sin eso sale de 4,7 GB, ver
+    `wit_wrapper.convert`). Y el resultado no se da por bueno hasta
+    comprobar que tiene el mismo ID6, que es de GameCube, que si es ISO no
+    pesa más que un disco de GameCube y que `wit CMP` lo da igual al
+    original. Si algo no da, se descarta y levanta
+    `GameCubeConversionError`. Un error de `wit` levanta `RuntimeError` con
+    lo que dijo, como en la conversión de Wii.
+
+    Lo que ya hubiera en `dest` se aparta y vuelve a su lugar si algo falla
+    (`DestinationGuard`), y lo nuevo se baja a la unidad antes de descartar
+    lo viejo.
+
+    Devuelve los respaldos que no se pudieron borrar aunque todo salió
+    bien (ver `DestinationGuard.orphaned_backups`)."""
+    # Sin la reserva de `wit` (en FAT32 escribe ceros) nadie avisa de que
+    # no hay lugar hasta que la copia falla a mitad: se mira antes. Hace
+    # falta lugar para todo lo nuevo aunque `dest` exista, porque lo viejo
+    # sigue ahí hasta el final.
+    necesita = transfer_plan.estimate_output_size(game, target_ext, wit_binary)
+    libres = transfer_plan.free_space(dest.parent)
+    if libres is not None and necesita > libres:
+        raise GameCubeConversionError(
+            _("No entra en el destino: necesita {need} y quedan {free}.")
+            .format(need=formatting.format_size(necesita),
+                    free=formatting.format_size(libres)))
+    a_iso = target_ext.lower() == ".iso"
+    with DestinationGuard(dest, op_log=op_log, group=_un_archivo) as guard:
+        # Sin `--psel=-UPDATE`: un disco de GameCube no tiene particiones.
+        result = wit_wrapper.convert(game.path, dest, target_ext.strip("."), wit_binary,
+                                     bytes_progress_cb=bytes_progress_cb, cancel=cancel,
+                                     overwrite=True, scrub_update=False, prealloc=False,
+                                     trunc=a_iso, cleanup_on_abort=False)
+        if result.returncode != 0:
+            raise RuntimeError(
+                result.stderr.strip()[:200]
+                or _("wit terminó con el código {code}.").format(code=result.returncode))
+        # Primero a la unidad y después la comprobación: así `wit CMP` lee
+        # lo que la unidad guardó, no lo que quedó en la caché.
+        fileops.flush_and_drop_cache([dest], cancel=cancel)
+        motivo = _gamecube_conversion_problem(game, dest, a_iso, wit_binary, cancel)
+        if motivo:
+            raise GameCubeConversionError(
+                _("{name} no quedó bien ({reason}) y se descartó; el original "
+                  "sigue como estaba.").format(name=dest.name, reason=motivo))
+        guard.commit()
+    return guard.orphaned_backups
+
+
+def _gamecube_conversion_problem(game: Game, dest: Path, a_iso: bool, wit_binary: str,
+                                 cancel) -> Optional[str]:
+    """Por qué `dest`, recién convertido de `game`, no sirve; None si pasa
+    las comprobaciones de `convert_gamecube`."""
+    info = wit_wrapper.identify(dest, wit_binary)
+    if info is None:
+        return _("wit no lo reconoce")
+    if info.game_id != game.game_id:
+        return _("tiene otro ID: {found} en vez de {expected}").format(
+            found=info.game_id, expected=game.game_id)
+    if info.console != "gc":
+        return _("no es un disco de GameCube")
+    if a_iso:
+        tamano = dest.stat().st_size
+        if tamano > transfer_plan.GC_DISC_SIZE:
+            return _("pesa {size}, más que un disco de GameCube").format(
+                size=formatting.format_size(tamano))
+    if not wit_wrapper.images_match(game.path, dest, wit_binary, cancel=cancel):
+        return _("su contenido no coincide con el original")
+    return None
 
 
 def send_to_wbfs_drive(

@@ -1008,8 +1008,9 @@ def convert(
     scrub_update: bool = True,
     prealloc: bool = True,
     cleanup_on_abort: bool = True,
+    trunc: bool = False,
 ) -> subprocess.CompletedProcess:
-    """Convierte src -> dest. target_format: 'WBFS' o 'ISO'.
+    """Convierte src -> dest. target_format: 'WBFS', 'ISO' o 'CISO'.
 
     `bytes_progress_cb`, si se pasa, se llama aproximadamente cada 1s
     (desde este mismo hilo, bloqueante) con cuántos bytes lleva escritos
@@ -1068,7 +1069,15 @@ def convert(
     quien llama ANTES de copiar.
 
     `cleanup_on_abort=False` deja los temporales de una copia cortada
-    para quien llama (ver `_run_with_progress`)."""
+    para quien llama (ver `_run_with_progress`).
+
+    `trunc=True` agrega `--trunc`: el ISO de salida termina en el último
+    dato del disco. Es lo que hace falta para un ISO de GameCube: sin eso
+    `wit` lo rellena hasta el tamaño de un DVD de Wii (4 699 979 776
+    bytes), que no entra en FAT32. Medido con `wit` v3.05a: con `--trunc`
+    sale de 1 459 978 240 bytes en Ocarina of Time / Master Quest y de
+    1 459 978 220 en Twilight Princess -recorta hasta el último dato, no a
+    un tamaño fijo-."""
     if not find_wit(binary):
         raise WitNotFoundError(binary)
 
@@ -1093,6 +1102,8 @@ def convert(
         args.append("--psel=-UPDATE")
     if not prealloc:
         args.append("--prealloc=OFF")
+    if trunc:
+        args.append("--trunc")
     args += [str(src), "--dest", str(dest)]
     _log_command(args)
 
@@ -1182,6 +1193,25 @@ def _run_cancellable(
         args=[binary, *args], returncode=proc.returncode,
         stdout=stdout, stderr=stderr,
     )
+
+
+def images_match(a: Path, b: Path, binary: str = "wit",
+                 cancel: Optional[CancellationToken] = None) -> bool:
+    """True si `wit CMP` dice que `a` y `b` son el mismo disco, aunque
+    estén en formatos distintos (un CISO y el ISO que salió de él).
+
+    Comprobado contra `wit` v3.05a: sale con 0 si coinciden y con 2 si no,
+    y detecta un solo byte cambiado en medio de los datos del juego.
+    Cualquier otra salida (no pudo leer uno de los dos, venció el tiempo)
+    tampoco es "coinciden".
+
+    `cancel` permite cortarlo desde el botón "Cancelar": lee los dos
+    archivos enteros. Cancelado, levanta `OperationCancelled`."""
+    if not find_wit(binary):
+        raise WitNotFoundError(binary)
+    _log_command([binary, "CMP", str(a), str(b)])
+    result = _run_cancellable(binary, "CMP", str(a), str(b), cancel=cancel)
+    return result.returncode == 0
 
 
 @dataclass(frozen=True)

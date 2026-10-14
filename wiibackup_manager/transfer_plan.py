@@ -263,9 +263,9 @@ def estimate_transfer_size(game: Game, wit_binary: str = "wit") -> int:
     formatos compactos, el tamaño de un disco de una capa, que es lo
     mínimo honesto que se puede afirmar sin abrir el archivo.
 
-    Un juego de GameCube nunca se convierte -Nintendont lee ISO y CISO tal
-    cual, ver `send_to_wbfs_drive`- así que lo que va a ocupar en el
-    destino es exactamente lo que pesa el archivo de origen, ni más ni
+    Al enviarlo, un juego de GameCube no se convierte -Nintendont lee ISO
+    y CISO tal cual, ver `send_to_wbfs_drive`- así que lo que va a ocupar
+    en el destino es exactamente lo que pesa el archivo de origen, ni más ni
     menos: no hace falta (ni corresponde) preguntarle a `wit` ni aplicar
     el margen de `_WBFS_OVERHEAD`, que es un ajuste de la conversión a
     WBFS."""
@@ -283,6 +283,17 @@ def estimate_transfer_size(game: Game, wit_binary: str = "wit") -> int:
 _WII_DUAL_LAYER_BYTES = 8_511_160_320
 
 
+# Un disco de GameCube entero. Un ISO de GameCube convertido con
+# `--trunc` nunca pesa más (ver `wit_wrapper.convert`).
+GC_DISC_SIZE = 1_459_978_240
+
+
+# Lo que un CISO puede pesar de más sobre el ISO del que sale: la cabecera
+# (32 KiB) y el último bloque guardado entero. Medido en CISO reales de
+# GameCube: bloques de 2 MiB. Redondeado para arriba.
+_CISO_EXTRA = 4 * 1024 * 1024
+
+
 def estimate_output_size(game: Game, target_ext: str, wit_binary: str = "wit") -> int:
     """Cuánto va a pesar `game` convertido a `target_ext`.
 
@@ -294,7 +305,16 @@ def estimate_output_size(game: Game, target_ext: str, wit_binary: str = "wit") -
     Se usa como denominador de la barra de progreso de la conversión: el
     callback de `wit` informa bytes escritos en el DESTINO, así que
     dividir por el tamaño del archivo de origen daba una barra que llegaba
-    al final antes de tiempo (o que no llegaba nunca)."""
+    al final antes de tiempo (o que no llegaba nunca).
+
+    Para GameCube (CISO ↔ ISO, ver `library_ops.convert_gamecube`) es una
+    cota, y con ella se mira además si hay lugar antes de convertir: el
+    ISO sale recortado, así que no pasa del disco entero; el CISO guarda
+    los bloques usados del ISO de origen, que como mucho son todos."""
+    if game.console == "gc":
+        if target_ext.lower().lstrip(".") == "iso":
+            return GC_DISC_SIZE
+        return game.size_bytes + _CISO_EXTRA
     if target_ext.lower().lstrip(".") == "iso":
         usado = wit_wrapper.iso_size_bytes(game.path, wit_binary)
         if usado and usado > _WII_SINGLE_LAYER_BYTES:

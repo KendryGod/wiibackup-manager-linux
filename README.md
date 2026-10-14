@@ -21,8 +21,8 @@ en una carpeta, esta app te deja:
   los USB Loaders de la Wii, sin acordarte de cómo se llamaba la carpeta ni
   de dividir los juegos grandes a mano;
 - **ordenar el desorden**: renombrar todo al formato estándar, convertir
-  entre ISO y WBFS para ahorrar espacio, y verificar que un respaldo no
-  esté dañado antes de confiar en él.
+  entre ISO y WBFS para ahorrar espacio (los de GameCube, entre CISO e
+  ISO), y verificar que un respaldo no esté dañado antes de confiar en él.
 
 Está pensada para quien prepara varias Wii seguidas y necesita que cada
 paso sea rápido y que nada se pise: la app avisa antes de reemplazar

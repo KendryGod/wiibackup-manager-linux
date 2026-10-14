@@ -118,10 +118,14 @@ class GameRow(Adw.ActionRow):
         from gi.repository import Gio
         menu = Gio.Menu()
         menu.append(_("Renombrar a estándar [ID]"), "row.rename")
-        # GameCube no se convierte: Nintendont lo lee tal cual (ver
-        # `library_ops.conversion_target`).
+        # Wii, entre ISO y WBFS; GameCube, entre CISO e ISO, los formatos
+        # que lee Nintendont. Un GameCube en otro formato (un WBFS de una
+        # versión anterior) no se convierte. La misma regla que
+        # `library_ops.conversion_target`.
         if self.game.console != "gc":
             menu.append(_("Convertir ISO ↔ WBFS"), "row.convert")
+        elif self.game.fmt.upper() in ("CISO", "ISO"):
+            menu.append(_("Convertir CISO ↔ ISO"), "row.convert")
         menu.append(_("Verificar integridad"), "row.verify")
         menu.append(_("Eliminar"), "row.delete")
         return menu
