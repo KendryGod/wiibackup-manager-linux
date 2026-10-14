@@ -109,9 +109,11 @@ def test_convertir_en_lote_saltea_gamecube_y_convierte_wii(
         _reject_if_busy=lambda *a, **k: False,
         _show_toast=lambda _m: None,
         _begin_cancellable_progress=lambda *_a: wit_wrapper.CancellationToken(),
-        _describe_target=lambda games: "x",
+        # El real: lo que queda en el historial tiene que nombrar lo que
+        # el usuario seleccionó, no solo lo que se llegó a convertir.
+        _describe_target=window.WiiBackupWindow._describe_target,
         _on_batch_done=lambda title, ok, errors, skipped, op, target, cancelled:
-            resultado.update(ok=ok, errors=errors, skipped=skipped))
+            resultado.update(ok=ok, errors=errors, skipped=skipped, target=target))
 
     window.WiiBackupWindow._on_batch_convert(ventana)
 
@@ -119,6 +121,7 @@ def test_convertir_en_lote_saltea_gamecube_y_convierte_wii(
     assert not (tmp_path / "biblioteca" / "Zelda.wbfs").exists()
     assert resultado["ok"] == 1
     assert any("Zelda OoT MQ" in s for s in resultado["skipped"] + resultado["errors"])
+    assert resultado["target"] == "2 juegos"
 
 
 # ------------------------------------------------- Backend y otros caminos --

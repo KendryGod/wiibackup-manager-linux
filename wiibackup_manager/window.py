@@ -1520,8 +1520,11 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                             break
                         errors.append(f"{game.title}: {e}")
                         bytes_other += salidas[id(game)]
+            # Lo seleccionado, no solo lo convertible: el historial tiene
+            # que nombrar el lote que pidió el usuario (los omitidos van en
+            # el detalle).
             GLib.idle_add(self._on_batch_done, "Convirtiendo", ok, errors, skipped, op,
-                          self._describe_target(games), cancelled)
+                          self._describe_target(seleccionados), cancelled)
 
         threading.Thread(target=worker, daemon=True).start()
 
