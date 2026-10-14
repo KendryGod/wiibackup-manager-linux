@@ -1043,10 +1043,9 @@ class TransferView(Gtk.Box):
             if dest is not None:
                 gtk_helpers.confirm_overwrite(
                     self.get_root(),
-                    _("Ya existe un archivo en:\n{dest}\n\n"
-                      "Enviar '{title}' lo va a reemplazar. "
-                      "Esta acción no se puede deshacer.")
-                    .format(dest=dest, title=selected[0].title),
+                    gtk_helpers.send_replace_body(
+                        dest, transfer_plan.game_dest_path(selected[0], dest_root),
+                        selected[0].title),
                     lambda: self._enqueue(selected, dest_root, overwrite=True),
                 )
                 return

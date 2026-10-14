@@ -1183,10 +1183,9 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             if dest is not None:
                 gtk_helpers.confirm_overwrite(
                     self,
-                    _("Ya existe un archivo en:\n{dest}\n\n"
-                      "Enviar '{title}' lo va a reemplazar. "
-                      "Esta acción no se puede deshacer.")
-                    .format(dest=dest, title=games[0].title),
+                    gtk_helpers.send_replace_body(
+                        dest, transfer_plan.game_dest_path(games[0], dest_root),
+                        games[0].title),
                     lambda: self._start_send(games, dest_root, overwrite=True),
                 )
                 return

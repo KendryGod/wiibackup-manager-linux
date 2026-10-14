@@ -35,6 +35,25 @@ def safe_initial_folder(preferred: str | Path | None = None) -> Gio.File:
     return Gio.File.new_for_path(str(Path.home()))
 
 
+def send_replace_body(existing: Path, new_dest: Path, title: str) -> str:
+    """El cuerpo de la confirmación antes de enviar un juego que ya está en
+    el destino: `existing` es lo que hay, `new_dest` lo que va a quedar.
+
+    Con GameCube pueden tener distinta extensión (está `game.ciso` y llega
+    `game.iso`, ver `transfer_plan.gc_group`): ahí se dice qué archivo
+    reemplaza a cuál, porque nombrar solo `game.ciso` no avisa que va a
+    quedar un `.iso`. Con la misma extensión, el mensaje de siempre."""
+    if existing.suffix.lower() != new_dest.suffix.lower():
+        return _("Ya existe un archivo en:\n{dest}\n\n"
+                 "Enviar '{title}' va a reemplazar {old} por {new}. "
+                 "Esta acción no se puede deshacer.").format(
+                     dest=existing, title=title, old=existing.name,
+                     new=new_dest.name)
+    return _("Ya existe un archivo en:\n{dest}\n\n"
+             "Enviar '{title}' lo va a reemplazar. "
+             "Esta acción no se puede deshacer.").format(dest=existing, title=title)
+
+
 def confirm_overwrite(parent, body: str, on_overwrite: Callable[[], None]) -> None:
     """Diálogo de confirmación antes de pisar un archivo que ya existe.
 
