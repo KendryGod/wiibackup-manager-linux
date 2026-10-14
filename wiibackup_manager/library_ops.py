@@ -211,6 +211,31 @@ def remove_dir_if_empty(folder) -> bool:
     return True
 
 
+class UnsupportedConversionError(ValueError):
+    """Se pidió "Convertir ISO ↔ WBFS" para un juego que no se convierte
+    (hoy, uno de GameCube). El mensaje es para el usuario."""
+
+
+def conversion_target(game: Game) -> str:
+    """A qué extensión lleva "Convertir ISO ↔ WBFS" a `game`: `.wbfs` si no
+    es WBFS, `.iso` si lo es. Es la única decisión de las dos formas de
+    convertir de la Biblioteca (la fila y "Convertir" en lote).
+
+    Un juego de GameCube levanta `UnsupportedConversionError`: Nintendont
+    lo lee tal cual, como `.iso` o `.ciso` (ver `gc_dest_path`), y un WBFS
+    de GameCube no le sirve. Antes salía igual (`wit` lo acepta) y quedaba
+    duplicado en la Biblioteca. Tampoco se ofrece CISO ↔ ISO: `wit` lo
+    hace bien solo con `--trunc` -sin eso el ISO sale de 4,7 GB, el tamaño
+    de un DVD de Wii, y no entra en FAT32-, y Nintendont ya lee los dos
+    formatos, así que no hace falta."""
+    if game.console == "gc":
+        raise UnsupportedConversionError(
+            _("«{title}» es de GameCube: Nintendont lo lee tal cual, como "
+              ".iso o .ciso, y un WBFS de GameCube no le sirve. No hace falta "
+              "convertirlo.").format(title=game.title))
+    return ".wbfs" if game.fmt.upper() != "WBFS" else ".iso"
+
+
 def replace_cut_by_disconnect(error: "RollbackFailedError", known_dir,
                               mount_point=None) -> bool:
     """True si un reemplazo no pudo devolver el original porque la unidad

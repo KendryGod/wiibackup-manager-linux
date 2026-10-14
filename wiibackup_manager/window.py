@@ -1398,14 +1398,26 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         return False
 
     def _on_batch_convert(self):
-        games = self._selected_games()
+        seleccionados = self._selected_games()
+        if not seleccionados:
+            return
+        # Los que no se convierten (GameCube, ver
+        # `library_ops.conversion_target`) se saltean y se informan con
+        # el resto de los omitidos.
+        games, destinos_ext, no_convertibles = [], {}, []
+        for g in seleccionados:
+            try:
+                destinos_ext[id(g)] = library_ops.conversion_target(g)
+                games.append(g)
+            except library_ops.UnsupportedConversionError as e:
+                no_convertibles.append((g, str(e)))
         if not games:
+            self._show_toast(no_convertibles[0][1])
             return
         if self._reject_if_busy(OperationKind.CONVERTING,
                                  read=[g.path for g in games],
-                                 write=[g.path.with_suffix(
-                                     ".wbfs" if g.fmt.upper() != "WBFS" else ".iso")
-                                     for g in games]):
+                                 write=[g.path.with_suffix(destinos_ext[id(g)])
+                                        for g in games]):
             return
         if not wit_wrapper.is_available(self.settings.wit_binary):
             self._show_toast(_("No se encontró 'wit'. Instalalo para poder convertir "
@@ -1421,8 +1433,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         # Se registran tanto el origen como el destino de cada conversión:
         # el destino también es un archivo que nadie más puede tocar
         # mientras `wit` lo está escribiendo.
-        destinos = [g.path.with_suffix(".wbfs" if g.fmt.upper() != "WBFS" else ".iso")
-                     for g in games]
+        destinos = [g.path.with_suffix(destinos_ext[id(g)]) for g in games]
         try:
             op = self.ops.start(OperationKind.CONVERTING,
                                  read=[g.path for g in games], write=destinos)
@@ -1443,7 +1454,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             GLib.idle_add(self.progress_bar.set_text, _("Calculando…"))
             salidas = {
                 id(g): transfer_plan.estimate_output_size(
-                    g, ".wbfs" if g.fmt.upper() != "WBFS" else ".iso", wit_binary)
+                    g, destinos_ext[id(g)], wit_binary)
                 for g in games
             }
             total_bytes = sum(salidas.values())
@@ -1451,7 +1462,9 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
             ok = 0
             errors: list[str] = []
-            skipped: list[str] = []
+            skipped: list[str] = [
+                _("{title} (GameCube: no se convierte)").format(title=g.title)
+                for g, _motivo in no_convertibles]
             # Igual que en la transferencia: lo omitido y lo fallado no se
             # cuenta como convertido, pero sí como resuelto, para que la
             # barra refleje cuánto falta del lote.
@@ -1462,7 +1475,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 if cancel.cancelled:
                     cancelled = True
                     break
-                target_ext = ".wbfs" if game.fmt.upper() != "WBFS" else ".iso"
+                target_ext = destinos_ext[id(game)]
                 dest = game.path.with_suffix(target_ext)
                 base_bytes_done = bytes_written + bytes_other
 
@@ -2512,12 +2525,16 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
     def _on_convert_requested(self, row: GameRow):
         game = row.game
+        try:
+            target_ext = library_ops.conversion_target(game)
+        except library_ops.UnsupportedConversionError as e:
+            self._show_toast(str(e))
+            return
         if not wit_wrapper.is_available(self.settings.wit_binary):
             self._show_toast(_("No se encontró 'wit'. Instalalo para poder convertir "
                                "(ver README)."))
             return
 
-        target_ext = ".wbfs" if game.fmt.upper() != "WBFS" else ".iso"
         dest = game.path.with_suffix(target_ext)
 
         if self._reject_if_busy(OperationKind.CONVERTING, read=[game.path], write=[dest]):

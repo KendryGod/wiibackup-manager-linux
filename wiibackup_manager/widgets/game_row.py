@@ -98,6 +98,7 @@ class GameRow(Adw.ActionRow):
         menu_button.set_valign(Gtk.Align.CENTER)
         menu_button.set_menu_model(self._build_menu())
         self.add_suffix(menu_button)
+        self._menu_button = menu_button
 
         action_group = Gio_SimpleActionGroup(self)
         self.insert_action_group("row", action_group)
@@ -117,7 +118,10 @@ class GameRow(Adw.ActionRow):
         from gi.repository import Gio
         menu = Gio.Menu()
         menu.append(_("Renombrar a estándar [ID]"), "row.rename")
-        menu.append(_("Convertir ISO ↔ WBFS"), "row.convert")
+        # GameCube no se convierte: Nintendont lo lee tal cual (ver
+        # `library_ops.conversion_target`).
+        if self.game.console != "gc":
+            menu.append(_("Convertir ISO ↔ WBFS"), "row.convert")
         menu.append(_("Verificar integridad"), "row.verify")
         menu.append(_("Eliminar"), "row.delete")
         return menu
@@ -155,6 +159,8 @@ class GameRow(Adw.ActionRow):
 
         self.game = game
         self.cover_region = region
+        # El menú depende de la consola (convertir no va para GameCube).
+        self._menu_button.set_menu_model(self._build_menu())
         self.set_title(GLib.markup_escape_text(game.title))
         self._base_subtitle = f"{game.game_id} · {game.fmt} · {game.size_mb:,.0f} MB"
 
