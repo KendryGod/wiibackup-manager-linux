@@ -3064,6 +3064,15 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 "administrador, fuera de la app-. Si cerrás, la ventana "
                 "desaparece pero eso sigue funcionando hasta terminar. Es "
                 "mejor esperar.").format(ops=", ".join(sin_cancelacion))
+            if self._factory_busy:
+                # Modo Fábrica monta la unidad y crea apps/games/wbfs DESPUÉS
+                # de formatear, desde la app (`drives.format_as_wii_usb`):
+                # con la app cerrada eso no pasa.
+                cuerpo += "\n\n" + _(
+                    "En Modo Fábrica el formateo va a seguir como root hasta "
+                    "terminar, pero la unidad quedaría sin montar y sin las "
+                    "carpetas apps, games y wbfs: eso lo hace la app cuando el "
+                    "formateo termina, y si está cerrada no puede.")
         else:
             cuerpo += "\n\n" + _(
                 "Si cerrás ahora se cancela y puede quedar un archivo a "

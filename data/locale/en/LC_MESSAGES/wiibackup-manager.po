@@ -7,7 +7,7 @@ msgstr ""
 "Project-Id-Version: WiiBackup Manager\n"
 "Report-Msgid-Bugs-To: https://github.com/KendryGod/wiibackup-manager-linux/"
 "issues\n"
-"POT-Creation-Date: 2026-10-15 05:08-0600\n"
+"POT-Creation-Date: 2026-10-15 05:10-0600\n"
 "PO-Revision-Date: 2026-08-30 05:58-0600\n"
 "Last-Translator: GameFix SPS\n"
 "Language-Team: English\n"
@@ -3452,7 +3452,18 @@ msgstr ""
 "permissions, outside the app-. If you close, the window goes away but that "
 "keeps running until it finishes. Better to wait."
 
-#: wiibackup_manager/window.py:3069
+#: wiibackup_manager/window.py:3072
+msgid ""
+"En Modo Fábrica el formateo va a seguir como root hasta terminar, pero la "
+"unidad quedaría sin montar y sin las carpetas apps, games y wbfs: eso lo "
+"hace la app cuando el formateo termina, y si está cerrada no puede."
+msgstr ""
+"In Factory Mode the formatting will keep running as root until it finishes, "
+"but the drive would be left unmounted and without the apps, games and wbfs "
+"folders: the app does that when the formatting finishes, and it cannot if "
+"it is closed."
+
+#: wiibackup_manager/window.py:3078
 msgid ""
 "Si cerrás ahora se cancela y puede quedar un archivo a medio escribir en la "
 "unidad."
@@ -3460,19 +3471,19 @@ msgstr ""
 "If you close now it gets cancelled, and a half-written file may be left on "
 "the drive."
 
-#: wiibackup_manager/window.py:3073
+#: wiibackup_manager/window.py:3082
 msgid "¿Cerrar con una operación en curso?"
 msgstr "Close while an operation is running?"
 
-#: wiibackup_manager/window.py:3076
+#: wiibackup_manager/window.py:3085
 msgid "Seguir esperando"
 msgstr "Keep waiting"
 
-#: wiibackup_manager/window.py:3077
+#: wiibackup_manager/window.py:3086
 msgid "Cancelar operación y cerrar"
 msgstr "Cancel the operation and close"
 
-#: wiibackup_manager/window.py:3126
+#: wiibackup_manager/window.py:3135
 msgid "Cancelando antes de cerrar…"
 msgstr "Cancelling before closing…"
 

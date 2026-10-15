@@ -74,6 +74,8 @@ class _VentanaDeMentira:
         self.memory_check_view = _VistaDeMentira("memory", self.eventos)
         self.dialogos: list = []
         self.toasts: list = []
+        # Lo pone Modo Fábrica mientras formatea (`_start_factory_format`).
+        self._factory_busy = False
         # La espera acotada antes de cerrar (`_close_after_cancel`), con un
         # reloj de mentira: cada vuelta del "temporizador" avanza el reloj
         # lo que avanzaría el de GLib, hasta que la función pida parar.
@@ -215,6 +217,26 @@ def test_el_dialogo_avisa_cuando_lo_que_corre_no_se_puede_cancelar(ventana):
     cuerpo = ventana.dialogos[0].get_body()
     assert "no se puede cancelar" in cuerpo
     assert "sigue funcionando" in cuerpo
+
+
+def test_cerrar_durante_modo_fabrica_avisa_que_queda_sin_montar_y_sin_carpetas(ventana):
+    """El formateo de Modo Fábrica sigue como root aunque se cierre la
+    app, pero montar la unidad y crear apps/games/wbfs lo hace la app
+    cuando termina: cerrada, la unidad queda formateada y nada más."""
+    ventana._factory_busy = True
+    ventana.ops.start(OperationKind.FORMATTING, resources=["/dev/sdb"])
+    ventana._on_close_request()
+
+    cuerpo = ventana.dialogos[0].get_body()
+    assert "como root" in cuerpo
+    assert "sin montar" in cuerpo and "apps, games y wbfs" in cuerpo
+
+
+def test_el_formateo_de_verificar_memoria_no_habla_de_carpetas(ventana):
+    ventana.ops.start(OperationKind.FORMATTING, resources=["/dev/sdb"])
+    ventana._on_close_request()
+
+    assert "wbfs" not in ventana.dialogos[0].get_body()
 
 
 # ----------------------------------------------- Lo que hace cada respuesta --

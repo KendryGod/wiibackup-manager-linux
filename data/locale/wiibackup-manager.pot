@@ -9,7 +9,7 @@ msgstr ""
 "Project-Id-Version: WiiBackup Manager\n"
 "Report-Msgid-Bugs-To: https://github.com/KendryGod/wiibackup-manager-linux/"
 "issues\n"
-"POT-Creation-Date: 2026-10-15 05:08-0600\n"
+"POT-Creation-Date: 2026-10-15 05:10-0600\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -3193,25 +3193,32 @@ msgid ""
 "funcionando hasta terminar. Es mejor esperar."
 msgstr ""
 
-#: wiibackup_manager/window.py:3069
+#: wiibackup_manager/window.py:3072
+msgid ""
+"En Modo Fábrica el formateo va a seguir como root hasta terminar, pero la "
+"unidad quedaría sin montar y sin las carpetas apps, games y wbfs: eso lo "
+"hace la app cuando el formateo termina, y si está cerrada no puede."
+msgstr ""
+
+#: wiibackup_manager/window.py:3078
 msgid ""
 "Si cerrás ahora se cancela y puede quedar un archivo a medio escribir en la "
 "unidad."
 msgstr ""
 
-#: wiibackup_manager/window.py:3073
+#: wiibackup_manager/window.py:3082
 msgid "¿Cerrar con una operación en curso?"
 msgstr ""
 
-#: wiibackup_manager/window.py:3076
+#: wiibackup_manager/window.py:3085
 msgid "Seguir esperando"
 msgstr ""
 
-#: wiibackup_manager/window.py:3077
+#: wiibackup_manager/window.py:3086
 msgid "Cancelar operación y cerrar"
 msgstr ""
 
-#: wiibackup_manager/window.py:3126
+#: wiibackup_manager/window.py:3135
 msgid "Cancelando antes de cerrar…"
 msgstr ""
 
