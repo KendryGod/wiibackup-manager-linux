@@ -15,6 +15,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import ClassVar, Optional
 
+from .packs import clean_packs
+
 APP_ID = "com.gamefixsps.WiiBackupManager"
 
 XDG_CONFIG_HOME = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
@@ -143,6 +145,11 @@ class Settings:
     # "dark" (con la marca, para mandar por WhatsApp) o "light" (fondo
     # blanco, para imprimir sin gastar tinta). Ver `TICKET_THEMES`.
     ticket_theme: str = TICKET_THEME_DARK
+    # Packs de taller de la pestaña Transferir: {"Pack Mario": ["RMCE01",
+    # ...]}. Un objeto de listas de ID6, como `dest_presets`, para que el
+    # config.json siga siendo legible y editable a mano. Una config de
+    # 0.2.2 no la trae: queda vacía. Ver packs.py.
+    packs: dict = field(default_factory=dict)
 
     # Lo que `load` tuvo que hacer con un config.json que no se podía usar:
     # si lo encontró dañado, y dónde lo dejó guardado aparte (None si no lo
@@ -207,6 +214,8 @@ class Settings:
                 values["library_path"] = biblioteca
         if "dest_presets" in values:
             values["dest_presets"] = clean_presets(values["dest_presets"])
+        if "packs" in values:
+            values["packs"] = clean_packs(values["packs"])
         if "shop_whatsapp" in values:
             values["shop_whatsapp"] = clean_whatsapp(values["shop_whatsapp"])
         if values.get("shop_accent_color") is not None \

@@ -13,7 +13,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, Gtk, GLib  # noqa: E402
 
-from .. import config, drives, formatting, gametdb, transfer_plan
+from .. import config, drives, formatting, gametdb, packs, transfer_plan
 from ..game_model import Game
 from ..queue_manager import (JobStatus, TransferJob, TransferQueue,
                              format_phase_times)
@@ -413,7 +413,16 @@ class TransferView(Gtk.Box):
         select_all_btn.connect("clicked", lambda *_a: self._set_all_selected(True))
         deselect_all_btn = Gtk.Button(label=_("Deseleccionar todos"))
         deselect_all_btn.connect("clicked", lambda *_a: self._set_all_selected(False))
+        # Packs de taller: listas de juegos que se cargan juntos. Junto a
+        # "Seleccionar todos" porque es otra forma de elegir (ver packs.py).
+        self.packs_button = Gtk.MenuButton(label=_("Packs"))
+        self.packs_button.set_tooltip_text(
+            _("Listas de juegos que se cargan juntos: marcar los de un pack o "
+              "guardar la selección como pack."))
+        self._setup_pack_actions()
+        self._rebuild_packs_menu()
         games_header.append(games_label)
+        games_header.append(self.packs_button)
         games_header.append(select_all_btn)
         games_header.append(deselect_all_btn)
         self.append(games_header)
@@ -697,12 +706,14 @@ class TransferView(Gtk.Box):
         self._show_toast(_("Se quitó el acceso rápido '{name}'.")
                          .format(name=preset.get("name", "")))
 
-    def _save_settings(self):
+    def _save_settings(self) -> bool:
         error = config.try_save(self.settings)
         if error:
             # No se pierde lo que ya está en pantalla: la lista en memoria
             # queda igual, solo no sobrevive al próximo arranque.
             self._show_toast(_("No se pudo guardar la configuración: {error}").format(error=error))
+            return False
+        return True
 
     def _poll_drives(self):
         """Sondeo periódico (mismo patrón que la detección de la Biblioteca
@@ -1089,16 +1100,212 @@ class TransferView(Gtk.Box):
         self._update_selection_label()
 
     def _set_all_selected(self, value: bool):
+        self._set_rows_selected(self._game_rows, value)
+
+    def _set_rows_selected(self, rows, value: bool):
         # Una sola cuenta al final y no una por casilla: con 300 juegos
         # eran 300 sumas y 300 repintados del contador.
         self._bulk_toggle = True
         try:
-            for row in self._game_rows:
+            for row in rows:
                 row.check.set_active(value)
         finally:
             self._bulk_toggle = False
         self._update_operation_ui()
         self._update_selection_label()
+
+    # -------------------------------------------------------------- Packs --
+    def _setup_pack_actions(self):
+        """Las acciones del menú "Packs", en el grupo "transfer" de esta
+        vista. Las de un pack llevan su nombre como parámetro."""
+        acciones = Gio.SimpleActionGroup()
+        guardar = Gio.SimpleAction.new("save-pack", None)
+        guardar.connect("activate", lambda *_a: self._on_save_pack())
+        acciones.add_action(guardar)
+        for nombre, handler in (("apply-pack", self._apply_pack),
+                                ("rename-pack", self._on_rename_pack),
+                                ("delete-pack", self._on_delete_pack)):
+            accion = Gio.SimpleAction.new(nombre, GLib.VariantType.new("s"))
+            accion.connect("activate",
+                           lambda _a, pack, h=handler: h(pack.get_string()))
+            acciones.add_action(accion)
+        self.insert_action_group("transfer", acciones)
+        self._pack_actions = acciones
+
+    def _rebuild_packs_menu(self):
+        """El menú del botón "Packs": un submenú por pack (marcar sus
+        juegos, renombrar, borrar) y al final guardar la selección."""
+        guardados = Gio.Menu()
+        for nombre, ids in self.settings.packs.items():
+            opciones = Gio.Menu()
+            for etiqueta, accion in ((_("Marcar sus juegos"), "transfer.apply-pack"),
+                                     (_("Renombrar…"), "transfer.rename-pack"),
+                                     (_("Borrar…"), "transfer.delete-pack")):
+                item = Gio.MenuItem.new(etiqueta, None)
+                item.set_action_and_target_value(accion, GLib.Variant("s", nombre))
+                opciones.append_item(item)
+            titulo = ngettext("{name} ({n} juego)", "{name} ({n} juegos)",
+                              len(ids)).format(name=packs.short_name(nombre), n=len(ids))
+            # El nombre lo eligió el usuario: un "_" es parte del nombre, no
+            # el atajo de teclado del menú.
+            guardados.append_submenu(titulo.replace("_", "__"), opciones)
+        final = Gio.Menu()
+        final.append(_("Guardar selección como pack…"), "transfer.save-pack")
+        menu = Gio.Menu()
+        menu.append_section(None, guardados)
+        menu.append_section(None, final)
+        self.packs_button.set_menu_model(menu)
+
+    def _apply_pack(self, nombre: str):
+        """Tilda los juegos del pack que están en la biblioteca, sin
+        destildar nada: dos packs seguidos se suman. Avisa cuántos de la
+        lista no están; cuánto ocupa lo elegido ya lo dice el contador."""
+        ids = self.settings.packs.get(nombre)
+        if ids is None:
+            return
+        elegidos, faltan = packs.match(ids, [row.game for row in self._game_rows])
+        if not elegidos:
+            self._show_toast(_("Ninguno de los juegos del pack '{name}' está en la "
+                               "biblioteca.").format(name=nombre))
+            return
+        marcar = {id(game) for game in elegidos}
+        self._set_rows_selected([row for row in self._game_rows if id(row.game) in marcar],
+                                True)
+        mensaje = ngettext("Pack '{name}': se marcó {n} juego.",
+                           "Pack '{name}': se marcaron {n} juegos.",
+                           len(elegidos)).format(name=nombre, n=len(elegidos))
+        if faltan:
+            mensaje += " " + ngettext("{n} de la lista no está en la biblioteca.",
+                                      "{n} de la lista no están en la biblioteca.",
+                                      len(faltan)).format(n=len(faltan))
+        self._show_toast(mensaje)
+
+    def _pack_name_problem(self, problema: str, nombre: str) -> str:
+        if problema == packs.EMPTY:
+            return _("El pack necesita un nombre.")
+        return _("Ya hay un pack que se llama '{name}': elegí otro nombre.").format(
+            name=packs.find(self.settings.packs, nombre) or nombre)
+
+    def _pack_name_dialog(self, heading: str, body: str, initial: str,
+                          accept_label: str, renaming: str | None = None):
+        """Diálogo para el nombre de un pack, para guardar o renombrar.
+
+        El botón de aceptar se apaga mientras el nombre esté vacío o sea el
+        de otro pack (ver `packs.check_name`), y debajo se dice por qué: un
+        pack nunca pisa a otro en silencio. Devuelve (diálogo, entrada,
+        aviso) sin mostrarlo."""
+        dialog = Adw.AlertDialog(heading=heading, body=body)
+        entry = Gtk.Entry(text=initial, max_length=60, activates_default=True,
+                          placeholder_text=_("Ej.: Pack Mario, Pack niños"))
+        aviso = Gtk.Label(xalign=0, wrap=True)
+        aviso.add_css_class("caption")
+        caja = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6,
+                       margin_start=12, margin_end=12, margin_top=8, margin_bottom=4)
+        caja.append(entry)
+        caja.append(aviso)
+        dialog.set_extra_child(caja)
+        dialog.add_response("cancel", _("Cancelar"))
+        dialog.add_response("ok", accept_label)
+        dialog.set_default_response("ok")
+        dialog.set_close_response("cancel")
+        dialog.set_response_appearance("ok", Adw.ResponseAppearance.SUGGESTED)
+
+        def revisar(*_args):
+            nombre, problema = packs.check_name(self.settings.packs, entry.get_text(),
+                                                renaming=renaming)
+            dialog.set_response_enabled("ok", problema is None)
+            aviso.set_label(self._pack_name_problem(problema, nombre) if problema else "")
+            aviso.set_visible(problema is not None)
+            # En rojo solo si choca con otro pack; vacío es como se abre.
+            if problema == packs.DUPLICATE:
+                aviso.remove_css_class("dim-label")
+                aviso.add_css_class("error")
+            else:
+                aviso.remove_css_class("error")
+                aviso.add_css_class("dim-label")
+
+        entry.connect("changed", revisar)
+        revisar()
+        return dialog, entry, aviso
+
+    def _on_save_pack(self):
+        ids = packs.ids_from_selection(self._selected_games())
+        if not ids:
+            self._show_toast(_("Elegí primero los juegos del pack: se guardan los que "
+                               "están identificados (con ID)."))
+            return
+        dialog, entry, _aviso = self._pack_name_dialog(
+            _("Guardar selección como pack"),
+            ngettext("El pack va a tener {n} juego.", "El pack va a tener {n} juegos.",
+                     len(ids)).format(n=len(ids)),
+            "", _("Guardar"))
+        dialog.connect("response", self._on_save_pack_response, entry, ids)
+        dialog.present(self.get_root())
+
+    def _on_save_pack_response(self, dialog, response, entry, ids: list):
+        if response != "ok":
+            return
+        # Se vuelve a mirar al aceptar: el botón apagado es la primera
+        # guarda, no la única.
+        nombre, problema = packs.check_name(self.settings.packs, entry.get_text())
+        if problema is not None:
+            self._show_toast(self._pack_name_problem(problema, nombre))
+            return
+        self.settings.packs = {**self.settings.packs, nombre: list(ids)}
+        self._rebuild_packs_menu()
+        if self._save_settings():
+            self._show_toast(ngettext("Pack '{name}' guardado con {n} juego.",
+                                      "Pack '{name}' guardado con {n} juegos.",
+                                      len(ids)).format(name=nombre, n=len(ids)))
+
+    def _on_rename_pack(self, nombre: str):
+        if nombre not in self.settings.packs:
+            return
+        dialog, entry, _aviso = self._pack_name_dialog(
+            _("Renombrar pack"), _("Nombre nuevo para '{name}':").format(name=nombre),
+            nombre, _("Renombrar"), renaming=nombre)
+        dialog.connect("response", self._on_rename_pack_response, entry, nombre)
+        dialog.present(self.get_root())
+
+    def _on_rename_pack_response(self, dialog, response, entry, viejo: str):
+        if response != "ok" or viejo not in self.settings.packs:
+            return
+        nuevo, problema = packs.check_name(self.settings.packs, entry.get_text(),
+                                           renaming=viejo)
+        if problema is not None:
+            self._show_toast(self._pack_name_problem(problema, nuevo))
+            return
+        if nuevo == viejo:
+            return
+        self.settings.packs = packs.renamed(self.settings.packs, viejo, nuevo)
+        self._rebuild_packs_menu()
+        if self._save_settings():
+            self._show_toast(_("Pack '{old}' renombrado a '{new}'.").format(
+                old=viejo, new=nuevo))
+
+    def _on_delete_pack(self, nombre: str):
+        if nombre not in self.settings.packs:
+            return
+        dialog = Adw.AlertDialog(
+            heading=_("¿Borrar el pack '{name}'?").format(name=nombre),
+            body=_("Se borra solo la lista. Los juegos de la biblioteca y de la "
+                   "unidad no se tocan."))
+        dialog.add_response("cancel", _("Cancelar"))
+        dialog.add_response("delete", _("Borrar pack"))
+        dialog.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_default_response("cancel")
+        dialog.set_close_response("cancel")
+        dialog.connect("response", self._on_delete_pack_response, nombre)
+        dialog.present(self.get_root())
+
+    def _on_delete_pack_response(self, dialog, response, nombre: str):
+        if response != "delete" or nombre not in self.settings.packs:
+            return
+        self.settings.packs = {k: v for k, v in self.settings.packs.items()
+                               if k != nombre}
+        self._rebuild_packs_menu()
+        if self._save_settings():
+            self._show_toast(_("Se borró el pack '{name}'.").format(name=nombre))
 
     def _update_selection_label(self):
         """El renglón de lo elegido: "3 seleccionados · 12.4 GB (quedarán
