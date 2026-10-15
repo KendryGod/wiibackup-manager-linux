@@ -1139,6 +1139,16 @@ def convert(
     return result
 
 
+def _como_texto(valor) -> str:
+    """`valor` -lo que trae un `TimeoutExpired`: bytes, str o None- como
+    texto, con los bytes que no sean UTF-8 reemplazados."""
+    if valor is None:
+        return ""
+    if isinstance(valor, bytes):
+        return valor.decode("utf-8", "replace")
+    return valor
+
+
 def _run_cancellable(
     binary: str, *args: str, timeout: Optional[float] = DEFAULT_WIT_TIMEOUT,
     cancel: Optional[CancellationToken] = None,
@@ -1163,7 +1173,12 @@ def _run_cancellable(
         [binary, *args],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
+        # Con errores tolerantes, igual que `_run_with_progress`: `wit LIST
+        # --sections` imprime el nombre del disco con los bytes crudos de su
+        # cabecera (Shift-JIS en un disco japonés, medido con wit v3.05a), y
+        # en modo texto a secas `communicate()` levantaba UnicodeDecodeError
+        # y tumbaba el escaneo entero de la biblioteca.
+        encoding="utf-8", errors="replace",
     )
     if cancel is not None and not cancel.attach(proc):
         # La cancelación llegó entre el chequeo y el Popen: `attach` ya lo
@@ -1180,8 +1195,12 @@ def _run_cancellable(
             stdout, stderr = proc.communicate(timeout=5)
         except subprocess.TimeoutExpired:
             stdout, stderr = "", ""
-        exc.stdout = exc.stdout or stdout
-        exc.stderr = exc.stderr or stderr
+        # Lo que trae `exc` es lo leído antes del corte, y viene en BYTES
+        # aunque el proceso sea de texto (sumarlo después a un `str` daba
+        # TypeError). El segundo `communicate` ya devuelve todo decodificado;
+        # si no llegó a nada, se decodifica lo que había.
+        exc.stdout = stdout or _como_texto(exc.stdout)
+        exc.stderr = stderr or _como_texto(exc.stderr)
         return _timeout_result([binary, *args], exc, timeout)
     finally:
         if cancel is not None:
