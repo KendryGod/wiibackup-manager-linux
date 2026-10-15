@@ -47,7 +47,7 @@ def identify_file(path: Path, wit_binary: str = "wit") -> Optional[Game]:
 
     if suffix == ".iso":
         info = read_plain_iso_header(path)
-        if info is not None and (info.console == "gc"
+        if info is not None and (info.console == "gc" or info.title_unreadable
                                  or not title_is_usable(info.title)):
             info = _titulo_de_wit(info, path, wit_binary)
 
@@ -110,7 +110,9 @@ def _titulo_de_wit(info: DiscInfo, path: Path, wit_binary: str) -> DiscInfo:
     if not wit_wrapper.is_available(wit_binary):
         return info
     de_wit = _identify_with_wit(path, wit_binary)
-    if (de_wit is None or not de_wit.title
+    # Un título de `wit` que tampoco sirve para un nombre de archivo (los
+    # bytes que no son UTF-8 llegan como U+FFFD) no reemplaza al que había.
+    if (de_wit is None or not title_is_usable(de_wit.title)
             or de_wit.game_id.upper() != info.game_id.upper()):
         return info
     return dataclasses.replace(info, title=de_wit.title)

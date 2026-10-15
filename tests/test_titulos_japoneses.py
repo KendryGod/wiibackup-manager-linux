@@ -8,9 +8,11 @@ nombre del archivo. Ahora:
 - con un ID de región japonesa (cuarto carácter "J") se decodifica en
   Shift-JIS (y CP932, que lo extiende), y el resultado tiene que ser
   imprimible;
-- un título que igual queda ilegible (caracteres de reemplazo o no
-  imprimibles) nunca llega a un nombre de archivo: el escaneo usa el
-  título de la base de `wit` si lo hay, y si no, no se ofrece renombrar.
+- un título de la cabecera que igual queda ilegible cae al ID6 (como uno
+  vacío) y el escaneo busca el de la base de `wit`;
+- un título con caracteres de reemplazo o no imprimibles que llegue de otro
+  lado (la línea `name=` de `wit` para un CISO o WBFS) nunca llega a un
+  nombre de archivo: no se ofrece renombrar.
 
 Probado solo con cabeceras sintéticas, no con un ISO japonés real.
 """
@@ -65,13 +67,23 @@ def test_un_titulo_ascii_de_otra_region_sigue_igual(tmp_path):
     (b"RMCE01", b"\xff\xfe\x80 roto"),        # no es ASCII
     (b"RMCJ01", b"\xff\xfe\xfd"),              # ni Shift-JIS ni CP932 imprimible
 ])
-def test_un_titulo_ilegible_no_llega_al_nombre_de_archivo(tmp_path, game_id, titulo):
+def test_un_titulo_ilegible_de_la_cabecera_cae_al_id6(tmp_path, game_id, titulo):
+    """Ni "�" ni caracteres de uso privado invisibles: el ID6, como con un
+    título vacío (ver `test_titulo_ilegible_en_rutas.py`)."""
     iso = _iso(tmp_path / "Juego.iso", game_id, titulo)
     info = read_plain_iso_header(iso)
-    juego = _juego(iso, info.title, info.game_id)
 
-    # Ilegible a la vista ("�"), no caracteres de uso privado invisibles.
-    assert "\ufffd" in info.title
+    assert info.title == info.game_id and info.title_unreadable
+    juego = _juego(iso, info.title, info.game_id)
+    assert "\ufffd" not in game_model.standard_filename(juego)
+
+
+def test_un_titulo_con_reemplazo_no_llega_al_nombre_de_archivo(tmp_path):
+    """Un título con U+FFFD que llega de `wit` (la línea `name=` de un
+    CISO o WBFS con un nombre que no es UTF-8) no se renombra."""
+    juego = _juego(_iso(tmp_path / "Juego.iso", b"RMCE01", b"X"), "Mario\ufffd",
+                   "RMCE01")
+
     assert not game_model.title_is_usable(juego.title)
     assert not game_model.needs_rename(juego)
     with pytest.raises(library_ops.UnusableTitleError):
@@ -105,12 +117,11 @@ def test_un_titulo_legible_de_wii_no_le_pregunta_nada_a_wit(tmp_path, monkeypatc
     assert scanning.identify_file(iso).title == "MARIO KART WII"
 
 
-def test_sin_wit_un_titulo_ilegible_no_se_ofrece_renombrar(tmp_path, monkeypatch):
+def test_un_titulo_con_reemplazo_no_se_ofrece_renombrar(tmp_path):
     from wiibackup_manager.widgets.game_row import GameRow
 
-    iso = _iso(tmp_path / "Juego.iso", b"RMCE01", b"\xff\xfe roto")
-    monkeypatch.setattr(wit_wrapper, "is_available", lambda _b="wit": False)
-    juego = scanning.identify_file(iso)
+    juego = _juego(_iso(tmp_path / "Juego.wbfs", b"RMCE01", b"X"), "Mario\ufffd",
+                   "RMCE01")
 
     menu = GameRow._build_menu(types.SimpleNamespace(game=juego))
     etiquetas = [menu.get_item_attribute_value(i, "label").get_string()
@@ -121,8 +132,8 @@ def test_sin_wit_un_titulo_ilegible_no_se_ofrece_renombrar(tmp_path, monkeypatch
 def test_la_ventana_avisa_en_vez_de_renombrar(tmp_path):
     from wiibackup_manager.window import WiiBackupWindow
 
-    iso = _iso(tmp_path / "Juego.iso", b"RMCE01", b"\xff\xfe roto")
-    juego = _juego(iso, read_plain_iso_header(iso).title, "RMCE01")
+    iso = _iso(tmp_path / "Juego.iso", b"RMCE01", b"X")
+    juego = _juego(iso, "Mario\ufffd", "RMCE01")
     toasts = []
     ventana = types.SimpleNamespace(_show_toast=toasts.append,
                                     _reject_if_busy=lambda *a, **k: False)

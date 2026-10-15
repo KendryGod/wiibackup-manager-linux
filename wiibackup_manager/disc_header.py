@@ -88,6 +88,10 @@ class DiscInfo:
     source: str  # "iso" | "wit"
     console: str = "wii"  # "wii" | "gc"
     disc_number: int = 0  # 0 = disco 1, 1 = disco 2 (offset 0x06); no hay más
+    # El nombre interno de la cabecera no se pudo leer como texto y `title`
+    # es el ID6 (ver `read_plain_iso_header`): quien tenga otra fuente de
+    # título -la base de `wit`- la puede usar.
+    title_unreadable: bool = False
 
 
 # Número de disco: 0 = disco 1, 1 = disco 2, y NADA MÁS. Nintendo nunca
@@ -116,7 +120,7 @@ def _disc_number_or_first(value: int) -> int:
     return value if 0 <= value <= MAX_DISC_NUMBER else 0
 
 
-def _decode_title(raw: bytes, game_id: str) -> str:
+def _decode_title(raw: bytes, game_id: str) -> Optional[str]:
     """El nombre interno del disco como texto, según la región del ID6.
 
     Un disco japonés (cuarto carácter del ID: "J") lo guarda en Shift-JIS;
@@ -126,9 +130,9 @@ def _decode_title(raw: bytes, game_id: str) -> str:
     caracteres no imprimibles no cuenta: CP932 no falla con bytes que no
     son texto, los convierte en caracteres de uso privado.
 
-    Si nada da un texto limpio queda ASCII con reemplazo ("�"): el título
-    se ve raro, pero nunca llega a un nombre de archivo (ver
-    `game_model.title_is_usable`)."""
+    Si nada da un texto limpio devuelve None: quien llama cae al ID6. Antes
+    quedaba ASCII con reemplazo ("�"), y ese título terminaba en la carpeta
+    de Nintendont en la unidad (`games/�� [ID6]/`)."""
     codecs = ("shift_jis", "cp932") if game_id[3:4] == "J" else ()
     for codec in (*codecs, "ascii"):
         try:
@@ -137,7 +141,7 @@ def _decode_title(raw: bytes, game_id: str) -> str:
             continue
         if texto.isprintable():
             return texto
-    return raw.decode("ascii", errors="replace").strip()
+    return None
 
 
 def read_plain_iso_header(path: Path) -> Optional[DiscInfo]:
@@ -178,8 +182,11 @@ def read_plain_iso_header(path: Path) -> Optional[DiscInfo]:
     title_raw = data[HEADER_TITLE_OFFSET:HEADER_TITLE_OFFSET + HEADER_TITLE_MAX_LEN]
     title = _decode_title(title_raw.split(b"\x00", 1)[0], game_id)
 
+    # Un título ilegible cae al ID6, igual que uno vacío; `title_unreadable`
+    # avisa que vale la pena buscarlo en otro lado (`scanning._titulo_de_wit`).
     return DiscInfo(game_id=game_id, title=title or game_id, source="iso",
-                     console=console, disc_number=disc_number)
+                     console=console, disc_number=disc_number,
+                     title_unreadable=title is None)
 
 
 # --- Número de disco para CISO ---

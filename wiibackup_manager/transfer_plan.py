@@ -17,7 +17,7 @@ from typing import Optional
 
 from . import wit_wrapper
 from .disc_header import validate_game_id
-from .game_model import Game, sanitize_filename
+from .game_model import Game, sanitize_filename, title_is_usable
 
 
 def wbfs_dest_path(game: Game, drive_root: Path) -> Path:
@@ -66,7 +66,11 @@ def gc_dest_path(game: Game, drive_root: Path) -> Path:
     existente = _gc_game_folder(games_dir, game_id)
     if existente is not None:
         return existente / filename
-    folder = sanitize_filename(f"{game.title} [{game_id}]")
+    # Un título que no sirve para un nombre de archivo (con U+FFFD, o no
+    # imprimible) no va a la carpeta del cliente: queda el ID6, que es lo
+    # que la identifica para Nintendont y para `_gc_game_folder`.
+    titulo = game.title if title_is_usable(game.title) else game_id
+    folder = sanitize_filename(f"{titulo} [{game_id}]")
     return games_dir / folder / filename
 
 
