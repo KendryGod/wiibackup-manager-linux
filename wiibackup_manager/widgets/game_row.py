@@ -117,9 +117,11 @@ class GameRow(Adw.ActionRow):
     def _build_menu(self):
         from gi.repository import Gio
         menu = Gio.Menu()
-        # Un título que no sirve para un nombre de archivo (no se pudo
-        # decodificar) no se ofrece renombrar: ver `game_model.title_is_usable`.
-        if game_model.title_is_usable(self.game.title):
+        # Solo si renombrar cambia algo: no si ya tiene el nombre estándar
+        # (aunque sea en otra forma de normalización Unicode), ni si su
+        # título no sirve para un nombre de archivo (ver
+        # `game_model.needs_rename`).
+        if game_model.needs_rename(self.game):
             menu.append(_("Renombrar a estándar [ID]"), "row.rename")
         # Wii, entre ISO y WBFS; GameCube, entre CISO e ISO, los formatos
         # que lee Nintendont. Un GameCube en otro formato (un WBFS de una

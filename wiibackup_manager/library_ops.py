@@ -17,7 +17,7 @@ from typing import Callable, Optional
 
 from . import atomicfs, drives, fileops, formatting, oplog, transfer_plan, wit_wrapper
 from .fileops import _copy_with_progress, free_variant, rename_no_replace
-from .game_model import Game, standard_filename, title_is_usable
+from .game_model import Game, same_filename, standard_filename, title_is_usable
 from .i18n import _
 from .transfer_plan import existing_destination, game_dest_path, gc_group, wbfs_group
 
@@ -68,7 +68,9 @@ def rename_to_standard(game: Game, dry_run: bool = False,
         raise UnusableTitleError(unusable_title_message(game))
     new_name = standard_filename(game)
     new_path = game.path.with_name(new_name)
-    if new_path == game.path:
+    # Mismo nombre salvo la forma de normalización (NFC/NFD): renombrar no
+    # cambiaría nada que se vea (ver `game_model.same_filename`).
+    if same_filename(new_name, game.path.name):
         return game.path
 
     if dry_run:

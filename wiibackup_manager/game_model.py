@@ -67,10 +67,22 @@ def standard_filename(game: Game) -> str:
     return f"{safe_title} [{validate_game_id(game.game_id)}]{ext}"
 
 
+def same_filename(a: str, b: str) -> bool:
+    """True si `a` y `b` son el mismo nombre salvo la forma de
+    normalización Unicode (NFC/NFD).
+
+    `sanitize_filename` arma los nombres en NFKD ("é" como "e" + tilde
+    combinante), y un archivo con la "é" compuesta (NFC) se ve idéntico:
+    cambiar uno por el otro no es renombrar nada. Una diferencia de
+    compatibilidad (una letra de ancho completo, que NFKD convierte) sí
+    cuenta: NFC no la toca."""
+    return unicodedata.normalize("NFC", a) == unicodedata.normalize("NFC", b)
+
+
 def needs_rename(game: Game) -> bool:
-    """True si el archivo no está ya con el nombre estándar. Un juego cuyo
-    título no sirve para un nombre de archivo (`title_is_usable`) no se
-    renombra."""
+    """True si el archivo no está ya con el nombre estándar (ignorando la
+    forma de normalización, ver `same_filename`). Un juego cuyo título no
+    sirve para un nombre de archivo (`title_is_usable`) no se renombra."""
     if not title_is_usable(game.title):
         return False
-    return game.path.name != standard_filename(game)
+    return not same_filename(game.path.name, standard_filename(game))

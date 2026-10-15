@@ -2582,6 +2582,12 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             # igual, se avisa en vez de pasar "�" a un nombre de archivo.
             self._show_toast(library_ops.unusable_title_message(row.game))
             return
+        if not game_model.needs_rename(row.game):
+            # Ya tiene el nombre estándar (quizás en otra forma de
+            # normalización Unicode): "renombrarlo" no cambiaría nada.
+            self._show_toast(_("«{name}» ya tiene el nombre estándar ✓").format(
+                name=row.game.path.name))
+            return
         # Renombrar es instantáneo, pero mover el archivo bajo los pies de
         # una conversión o una transferencia en curso la rompe igual.
         if self._reject_if_busy(
