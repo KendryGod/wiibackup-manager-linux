@@ -121,7 +121,8 @@ def _titulo_de_wit(info: DiscInfo, path: Path, wit_binary: str) -> DiscInfo:
     return dataclasses.replace(info, title=de_wit.title)
 
 
-def find_game_files(root: Path, skipped: Optional[list] = None) -> list[Path]:
+def find_game_files(root: Path, skipped: Optional[list] = None,
+                    errors: Optional[list] = None) -> list[Path]:
     """Todos los ISO/WBFS/CISO/WDF que haya debajo de `root`, ordenados.
 
     Camina con `os.walk` y no con `Path.rglob` justamente por las carpetas
@@ -134,7 +135,9 @@ def find_game_files(root: Path, skipped: Optional[list] = None) -> list[Path]:
     `skipped` para que quien llame lo pueda informar.
 
     Con `skipped=None` el comportamiento es el de siempre: saltear y
-    seguir.
+    seguir. `errors`, si se pasa, recibe el `OSError` de cada carpeta
+    salteada, en el mismo orden: es lo que permite decir POR QUÉ no se
+    leyó (permisos, la unidad se desconectó, otro error).
 
     Lo oculto (empieza con punto) no se mira, salvo la raíz misma: ni
     carpetas -la papelera que GIO arma en la raíz de un disco externo,
@@ -146,6 +149,8 @@ def find_game_files(root: Path, skipped: Optional[list] = None) -> list[Path]:
     found: list[Path] = []
 
     def on_error(error: OSError) -> None:
+        if errors is not None:
+            errors.append(error)
         if skipped is None:
             return
         name = getattr(error, "filename", None)
@@ -169,6 +174,7 @@ def scan_library(
     wit_binary: str = "wit",
     progress_cb: Optional[Callable[[int, int], None]] = None,
     skipped_dirs: Optional[list] = None,
+    skipped_errors: Optional[list] = None,
 ) -> list[Game]:
     """Escanea recursivamente `root` buscando ISO/WBFS/CISO/WDF.
 
@@ -178,7 +184,7 @@ def scan_library(
     if not root.exists():
         return []
 
-    candidates = find_game_files(root, skipped_dirs)
+    candidates = find_game_files(root, skipped_dirs, skipped_errors)
 
     games: list[Game] = []
     total = len(candidates)

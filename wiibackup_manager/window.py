@@ -21,6 +21,14 @@ from .i18n import _, ngettext
 from .operations import OperationBusy, OperationKind, OperationOutcome
 
 
+def _se_desconecto(raiz: Path, causas: list) -> bool:
+    """Si las carpetas que no se pudieron leer bajo `raiz` fallaron porque
+    la unidad se fue (ver `drives.device_is_gone`), y no por permisos u
+    otra cosa."""
+    return any(drives.device_is_gone(known_dir=raiz, exc=causa)
+               for causa in (causas or [None]))
+
+
 class BatchSkip(Exception):
     """Una acción de `_run_batch` levanta esto para saltar un juego a
     propósito (ni error ni éxito), p. ej. porque ya existe el destino."""
@@ -1771,8 +1779,12 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
     # -------------------------------------------------------- Library --
     @staticmethod
-    def _describe_skipped(skipped: list) -> str:
-        """Texto para avisar qué carpetas quedaron afuera del escaneo."""
+    def _describe_skipped(skipped: list, causas=(), desconectada: bool = False) -> str:
+        """Texto para avisar qué carpetas quedaron afuera del escaneo, y
+        por qué: la unidad se desconectó, permisos, u otro error (se dice
+        cuál). Antes decía siempre "(permisos)", y con la biblioteca en un
+        USB que se desconecta a mitad mandaba a buscar el problema al lado
+        equivocado."""
         nombres = []
         for path in skipped:
             if str(path) not in nombres:
@@ -1780,6 +1792,24 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         preview = ", ".join(nombres[:2])
         mas = (_(" (+{n} más)").format(n=len(nombres) - 2)
                if len(nombres) > 2 else "")
+        if desconectada:
+            return ngettext(
+                "La unidad se desconectó durante el escaneo: no se pudo leer "
+                "{n} carpeta ({preview}{more}). Los juegos que haya adentro no "
+                "aparecen.",
+                "La unidad se desconectó durante el escaneo: no se pudieron "
+                "leer {n} carpetas ({preview}{more}). Los juegos que haya "
+                "adentro no aparecen.",
+                len(nombres)).format(n=len(nombres), preview=preview, more=mas)
+        otras = [c for c in causas if not isinstance(c, PermissionError)]
+        if otras:
+            return ngettext(
+                "No se pudo leer {n} carpeta ({error}): {preview}{more}. Los "
+                "juegos que haya adentro no aparecen.",
+                "No se pudieron leer {n} carpetas ({error}): {preview}{more}. "
+                "Los juegos que haya adentro no aparecen.",
+                len(nombres)).format(n=len(nombres), preview=preview, more=mas,
+                                     error=otras[0].strerror or otras[0])
         return ngettext(
             "No se pudo leer {n} carpeta (permisos): {preview}{more}. "
             "Los juegos que haya adentro no aparecen.",
@@ -1955,23 +1985,31 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 GLib.idle_add(self.progress_bar.set_fraction, done / max(total, 1))
 
             skipped: list = []
+            causas: list = []
             error = None
             try:
                 games = scanning.scan_library(root, self.settings.wit_binary, progress,
-                                              skipped_dirs=skipped)
+                                              skipped_dirs=skipped,
+                                              skipped_errors=causas)
             except Exception as e:
                 # `games = []` acá era una mentira peligrosa: "el escaneo
                 # falló" y "no hay juegos" se veían igual, y el usuario
                 # abría la app para encontrarse la biblioteca vacía sin
                 # saber que fue un error técnico.
                 games, error = None, f"{type(e).__name__}: {e}"
-            GLib.idle_add(self._on_scan_done, games, generation, op, skipped, error)
+            # Si la unidad de la biblioteca se fue a mitad, las carpetas que
+            # no se pudieron leer no son un problema de permisos. Se pregunta
+            # acá, en el hilo de fondo: mirar la unidad puede tardar.
+            desconectada = bool(skipped) and _se_desconecto(root, causas)
+            GLib.idle_add(self._on_scan_done, games, generation, op, skipped, error,
+                          causas, desconectada)
 
         threading.Thread(target=worker, daemon=True).start()
         return False  # para idle_add
 
     def _on_scan_done(self, games: list[Game] | None, generation: int, op=None,
-                       skipped: list | None = None, error: str | None = None):
+                       skipped: list | None = None, error: str | None = None,
+                       skipped_causes: list | None = None, skipped_gone: bool = False):
         self.ops.finish(op)
 
         # Resultado de un escaneo que ya quedó viejo (arrancó otro después):
@@ -1998,19 +2036,26 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 self.rescan_library()
             return False
 
-        # Carpetas que quedaron afuera por permisos. El escaneo corre solo
+        # Carpetas que no se pudieron leer. El escaneo corre solo
         # después de cada operación, así que avisar en cada uno sería un
         # toast cada treinta segundos: se avisa (y se anota en el
         # historial) solo cuando la lista de carpetas ilegibles cambia
         # respecto del escaneo anterior.
         ilegibles = {str(path) for path in (skipped or [])}
         if ilegibles and ilegibles != self._skipped_dirs:
-            mensaje = self._describe_skipped(sorted(ilegibles))
+            causas = skipped_causes or []
+            mensaje = self._describe_skipped(sorted(ilegibles), causas, skipped_gone)
             self._show_toast(mensaje)
-            self.op_log.record(OperationKind.SCANNING.value,
-                               _("{n} carpeta(s) sin permiso").format(
-                                   n=len(ilegibles)),
-                               oplog.STATUS_PARTIAL, mensaje)
+            if skipped_gone:
+                estado = oplog.STATUS_DISCONNECTED
+                objetivo = _("{n} carpeta(s) sin leer").format(n=len(ilegibles))
+            elif all(isinstance(c, PermissionError) for c in causas):
+                estado = oplog.STATUS_PARTIAL
+                objetivo = _("{n} carpeta(s) sin permiso").format(n=len(ilegibles))
+            else:
+                estado = oplog.STATUS_PARTIAL
+                objetivo = _("{n} carpeta(s) sin leer").format(n=len(ilegibles))
+            self.op_log.record(OperationKind.SCANNING.value, objetivo, estado, mensaje)
         self._skipped_dirs = ilegibles
 
         self._games = games
@@ -2266,11 +2311,13 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
         root = Path(folder.get_path())
         skipped: list = []
-        paths = scanning.find_game_files(root, skipped)
+        causas: list = []
+        paths = scanning.find_game_files(root, skipped, causas)
         if skipped:
             # Acá sí se avisa siempre: el usuario acaba de elegir esa
             # carpeta a propósito y tiene que saber que parte no se leyó.
-            self._show_toast(self._describe_skipped(skipped))
+            self._show_toast(self._describe_skipped(
+                skipped, causas, _se_desconecto(root, causas)))
         if not paths:
             self._show_toast(_("No se encontraron archivos válidos en esa carpeta."))
             return
@@ -2284,18 +2331,23 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
         paths: list[Path] = []
         skipped: list = []
+        causas: list = []
+        desconectada = False
         for f in files:
             raw_path = f.get_path()
             if not raw_path:
                 continue
             p = Path(raw_path)
             if p.is_dir():
-                paths.extend(scanning.find_game_files(p, skipped))
+                antes = len(causas)
+                paths.extend(scanning.find_game_files(p, skipped, causas))
+                if len(causas) > antes:
+                    desconectada = desconectada or _se_desconecto(p, causas[antes:])
             elif p.is_file() and p.suffix.lower() in game_model.VALID_EXTENSIONS:
                 paths.append(p)
 
         if skipped:
-            self._show_toast(self._describe_skipped(skipped))
+            self._show_toast(self._describe_skipped(skipped, causas, desconectada))
 
         if not paths:
             self._show_toast(
