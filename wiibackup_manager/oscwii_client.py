@@ -486,16 +486,22 @@ def icons_cache_dir() -> Path:
     return config.CACHE_DIR / ICONS_CACHE_DIRNAME
 
 
-def icon_cache_path(slug: str) -> Path:
-    """Ruta del ícono cacheado de `slug`.
+def safe_slug(slug: str) -> str:
+    """`slug` reducido a lo que puede ir en un nombre de archivo:
+    alfanuméricos, "-" y "_" ("app" si no queda nada).
 
-    `slug` viene de la API (contenido de red) y termina siendo parte de un
-    nombre de archivo: se sanea igual que `gametdb.cover_cache_path` sanea
-    la región, aunque los slugs reales de OSC ya sean alfanuméricos con
-    guiones -no hay que confiar ciegamente en que nunca traigan "/" o "..".
-    """
-    safe = "".join(ch for ch in slug if ch.isalnum() or ch in "-_") or "app"
-    return icons_cache_dir() / f"{safe}.png"
+    El slug viene de la API -contenido de red- y termina siendo parte de
+    nombres de archivo (el ícono cacheado, el ZIP descargado). Los slugs
+    reales de OSC ya son alfanuméricos con guiones, pero no hay que confiar
+    ciegamente en que nunca traigan "/" o "..": con "../x" el ZIP se
+    escribía fuera del directorio temporal."""
+    return "".join(ch for ch in slug if ch.isalnum() or ch in "-_") or "app"
+
+
+def icon_cache_path(slug: str) -> Path:
+    """Ruta del ícono cacheado de `slug` (saneado con `safe_slug`, igual
+    que `gametdb.cover_cache_path` sanea la región)."""
+    return icons_cache_dir() / f"{safe_slug(slug)}.png"
 
 
 def _looks_like_png(data: bytes) -> bool:

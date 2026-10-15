@@ -87,7 +87,7 @@ from typing import Callable, Optional
 
 from . import atomicfs, drives, formatting, library_ops, transfer_plan
 from .oscwii_client import (HomebrewApp, UnsafeDownloadURL,
-                            open_allowlisted, url_rejection_reason)
+                            open_allowlisted, safe_slug, url_rejection_reason)
 
 REQUEST_TIMEOUT = 20
 DOWNLOAD_CHUNK_SIZE = 256 * 1024
@@ -637,7 +637,9 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
                                  _detalle_de_io(e, dest_root, era_montaje))
 
         with tempfile.TemporaryDirectory(prefix="wiibackup-manager-oscwii-") as tmp_dir:
-            tmp_zip = Path(tmp_dir) / f"{app.slug}.zip"
+            # El slug es contenido de red: sin sanear, "../x" sacaba el ZIP
+            # del directorio temporal (ver `oscwii_client.safe_slug`).
+            tmp_zip = Path(tmp_dir) / f"{safe_slug(app.slug)}.zip"
 
             ok, err, computed_md5, computed_sha256 = _download_zip(
                 app, tmp_zip, cancel_event, on_progress)
