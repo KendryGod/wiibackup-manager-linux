@@ -1631,6 +1631,13 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         games = self._selected_games()
         if not games:
             return
+        # Los de GameCube se omiten con un aviso: `wit VERIFY` solo revisa
+        # discos de Wii (ver `_on_verify_requested`).
+        if all(g.console == "gc" for g in games):
+            self._show_toast(
+                _("Los juegos de GameCube no se verifican: la verificación de "
+                  "integridad solo funciona con discos de Wii."))
+            return
         if self._reject_if_busy(OperationKind.VERIFYING, read=[g.path for g in games],
                                  uses_progress_bar=True):
             return
@@ -1640,6 +1647,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             return
 
         def verify_one(g: Game, cancel):
+            if g.console == "gc":
+                raise BatchSkip(_("es de GameCube, no se verifica"))
             ok, _output = wit_wrapper.verify(g.path, self.settings.wit_binary,
                                               cancel=cancel)
             if not ok:
@@ -2741,6 +2750,15 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
     def _on_verify_requested(self, row: GameRow):
         game = row.game
+        if game.console == "gc":
+            # El menú no lo ofrece (ver `GameRow._build_menu`), pero si se
+            # llega igual se avisa en vez de correr un `wit VERIFY` que
+            # daría un veredicto falso (ver `wit_wrapper.verify_result`).
+            self._show_toast(
+                _("«{title}» es de GameCube y no se puede verificar: la "
+                  "verificación de integridad solo funciona con discos de "
+                  "Wii.").format(title=game.title))
+            return
         if not wit_wrapper.is_available(self.settings.wit_binary):
             self._show_toast(_("No se encontró 'wit'. Instalalo para poder verificar "
                                "(ver README)."))

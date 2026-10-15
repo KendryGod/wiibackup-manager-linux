@@ -126,7 +126,11 @@ class GameRow(Adw.ActionRow):
             menu.append(_("Convertir ISO ↔ WBFS"), "row.convert")
         elif self.game.fmt.upper() in ("CISO", "ISO"):
             menu.append(_("Convertir CISO ↔ ISO"), "row.convert")
-        menu.append(_("Verificar integridad"), "row.verify")
+        # `wit VERIFY` solo sabe revisar discos de Wii: con uno de GameCube
+        # sano sale con error, y con un GameCube dentro de un WBFS contesta
+        # OK sin revisar nada (ver `wit_wrapper.verify_result`).
+        if self.game.console != "gc":
+            menu.append(_("Verificar integridad"), "row.verify")
         menu.append(_("Eliminar"), "row.delete")
         return menu
 
