@@ -7,7 +7,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk, GLib, GObject  # noqa: E402
 
-from .. import gametdb
+from .. import game_model, gametdb
 from ..game_model import Game
 from ..i18n import _
 from . import gtk_helpers
@@ -117,7 +117,10 @@ class GameRow(Adw.ActionRow):
     def _build_menu(self):
         from gi.repository import Gio
         menu = Gio.Menu()
-        menu.append(_("Renombrar a estándar [ID]"), "row.rename")
+        # Un título que no sirve para un nombre de archivo (no se pudo
+        # decodificar) no se ofrece renombrar: ver `game_model.title_is_usable`.
+        if game_model.title_is_usable(self.game.title):
+            menu.append(_("Renombrar a estándar [ID]"), "row.rename")
         # Wii, entre ISO y WBFS; GameCube, entre CISO e ISO, los formatos
         # que lee Nintendont. Un GameCube en otro formato (un WBFS de una
         # versión anterior) no se convierte. La misma regla que

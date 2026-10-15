@@ -17,7 +17,7 @@ from typing import Callable, Optional
 
 from . import atomicfs, drives, fileops, formatting, oplog, transfer_plan, wit_wrapper
 from .fileops import _copy_with_progress, free_variant, rename_no_replace
-from .game_model import Game, standard_filename
+from .game_model import Game, standard_filename, title_is_usable
 from .i18n import _
 from .transfer_plan import existing_destination, game_dest_path, gc_group, wbfs_group
 
@@ -36,6 +36,17 @@ _FAT32_SIZE_LIMIT_BYTES = 4 * 1024 ** 3
 _MAX_RENAME_ATTEMPTS = 100
 
 
+class UnusableTitleError(ValueError):
+    """El título del juego no sirve para un nombre de archivo (ver
+    `game_model.title_is_usable`): no se renombra. El mensaje es para el
+    usuario."""
+
+
+def unusable_title_message(game: Game) -> str:
+    return _("«{name}» no se renombra: su título tiene caracteres que no se "
+             "pueden usar en un nombre de archivo.").format(name=game.path.name)
+
+
 def rename_to_standard(game: Game, dry_run: bool = False,
                         on_collision: str = "error") -> Path:
     """Renombra el archivo del juego a la convención 'Título [ID].ext'
@@ -49,7 +60,12 @@ def rename_to_standard(game: Game, dry_run: bool = False,
 
     Dos juegos con el mismo título y sin ID identificado dan el mismo
     nombre estándar: ese es el caso real de colisión, y en lote termina
-    como 'Título.iso' y 'Título (2).iso'."""
+    como 'Título.iso' y 'Título (2).iso'.
+
+    Un título que no sirve para un nombre de archivo levanta
+    `UnusableTitleError` sin tocar nada."""
+    if not title_is_usable(game.title):
+        raise UnusableTitleError(unusable_title_message(game))
     new_name = standard_filename(game)
     new_path = game.path.with_name(new_name)
     if new_path == game.path:

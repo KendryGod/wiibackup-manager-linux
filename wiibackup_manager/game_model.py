@@ -44,6 +44,14 @@ def sanitize_filename(name: str) -> str:
     return name or "untitled"
 
 
+def title_is_usable(title: str) -> bool:
+    """True si `title` sirve para armar un nombre de archivo: no vacío,
+    sin caracteres de reemplazo (U+FFFD, lo que deja un título que no se
+    pudo decodificar) y sin caracteres no imprimibles."""
+    return (bool(title.strip()) and "\ufffd" not in title
+            and title.isprintable())
+
+
 def standard_filename(game: Game) -> str:
     """Nombre estándar sugerido: 'Título [GAMEID].ext', como usa el
     WiiBackup Manager clásico y la mayoría de USB Loaders.
@@ -60,5 +68,9 @@ def standard_filename(game: Game) -> str:
 
 
 def needs_rename(game: Game) -> bool:
-    """True si el archivo no está ya con el nombre estándar."""
+    """True si el archivo no está ya con el nombre estándar. Un juego cuyo
+    título no sirve para un nombre de archivo (`title_is_usable`) no se
+    renombra."""
+    if not title_is_usable(game.title):
+        return False
     return game.path.name != standard_filename(game)

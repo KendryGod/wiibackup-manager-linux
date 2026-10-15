@@ -21,7 +21,7 @@ from .disc_header import (
     read_plain_iso_header,
     validate_game_id,
 )
-from .game_model import VALID_EXTENSIONS, Game
+from .game_model import VALID_EXTENSIONS, Game, title_is_usable
 
 
 def _format_from_suffix(path: Path) -> str:
@@ -46,8 +46,9 @@ def identify_file(path: Path, wit_binary: str = "wit") -> Optional[Game]:
 
     if suffix == ".iso":
         info = read_plain_iso_header(path)
-        if info is not None and info.console == "gc":
-            info = _titulo_gamecube_de_wit(info, path, wit_binary)
+        if info is not None and (info.console == "gc"
+                                 or not title_is_usable(info.title)):
+            info = _titulo_de_wit(info, path, wit_binary)
 
     if info is None and wit_wrapper.is_available(wit_binary):
         try:
@@ -91,17 +92,23 @@ def identify_file(path: Path, wit_binary: str = "wit") -> Optional[Game]:
     )
 
 
-def _titulo_gamecube_de_wit(info: DiscInfo, path: Path, wit_binary: str) -> DiscInfo:
-    """El título de un ISO de GameCube desde la base de títulos de `wit`,
-    por ID6: la misma con la que se identifica su CISO, que no se puede
-    leer directo. Sin esto, el mismo juego aparecía como "ZELDA OCARINA
-    MULTI PACK" (el nombre interno de la cabecera) en `.iso` y como "The
-    Legend of Zelda: Ocarina of Time / Master Quest" en `.ciso`.
+def _titulo_de_wit(info: DiscInfo, path: Path, wit_binary: str) -> DiscInfo:
+    """El título de un ISO desde la base de títulos de `wit`, por ID6.
+
+    Para GameCube, siempre: es la misma base con la que se identifica su
+    CISO, que no se puede leer directo. Sin esto, el mismo juego aparecía
+    como "ZELDA OCARINA MULTI PACK" (el nombre interno de la cabecera) en
+    `.iso` y como "The Legend of Zelda: Ocarina of Time / Master Quest" en
+    `.ciso`.
+
+    Para Wii, solo cuando el título de la cabecera no sirve para un nombre
+    de archivo (`title_is_usable`: no se pudo decodificar). Con todos los
+    ISO de Wii cambiaría lo que hace "Renombrar a estándar [ID]" con toda
+    una biblioteca ya renombrada, y sumaría un `wit` por ISO a cada
+    escaneo.
 
     Si `wit` no está, no puede leerlo o devuelve otro ID, queda el título
-    de la cabecera. Solo GameCube: en Wii cambiaría lo que hace "Renombrar
-    a estándar [ID]" con toda una biblioteca ya renombrada, y sumaría un
-    `wit` por ISO a cada escaneo."""
+    de la cabecera."""
     if not wit_wrapper.is_available(wit_binary):
         return info
     try:

@@ -116,6 +116,30 @@ def _disc_number_or_first(value: int) -> int:
     return value if 0 <= value <= MAX_DISC_NUMBER else 0
 
 
+def _decode_title(raw: bytes, game_id: str) -> str:
+    """El nombre interno del disco como texto, según la región del ID6.
+
+    Un disco japonés (cuarto carácter del ID: "J") lo guarda en Shift-JIS;
+    antes se decodificaba siempre en ASCII con reemplazo y "マリオカートWii"
+    salía como "�}���I�J�[�gWii". Se prueba Shift-JIS y después CP932 (la
+    variante de Microsoft, que suma algunos símbolos), y un resultado con
+    caracteres no imprimibles no cuenta: CP932 no falla con bytes que no
+    son texto, los convierte en caracteres de uso privado.
+
+    Si nada da un texto limpio queda ASCII con reemplazo ("�"): el título
+    se ve raro, pero nunca llega a un nombre de archivo (ver
+    `game_model.title_is_usable`)."""
+    codecs = ("shift_jis", "cp932") if game_id[3:4] == "J" else ()
+    for codec in (*codecs, "ascii"):
+        try:
+            texto = raw.decode(codec).strip()
+        except UnicodeDecodeError:
+            continue
+        if texto.isprintable():
+            return texto
+    return raw.decode("ascii", errors="replace").strip()
+
+
 def read_plain_iso_header(path: Path) -> Optional[DiscInfo]:
     """Lee el header de una ISO de Wii o GameCube sin envolver. Devuelve
     None si el archivo no parece ser un disco válido de ninguna de las dos
@@ -152,7 +176,7 @@ def read_plain_iso_header(path: Path) -> Optional[DiscInfo]:
     disc_number = _disc_number_or_first(data[DISC_NUMBER_OFFSET])
 
     title_raw = data[HEADER_TITLE_OFFSET:HEADER_TITLE_OFFSET + HEADER_TITLE_MAX_LEN]
-    title = title_raw.split(b"\x00", 1)[0].decode("ascii", errors="replace").strip()
+    title = _decode_title(title_raw.split(b"\x00", 1)[0], game_id)
 
     return DiscInfo(game_id=game_id, title=title or game_id, source="iso",
                      console=console, disc_number=disc_number)

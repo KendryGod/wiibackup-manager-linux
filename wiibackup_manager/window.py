@@ -1585,6 +1585,13 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         # confirmación.
         pendientes = [g for g in games if game_model.needs_rename(g)]
         if not pendientes:
+            ilegibles = [g for g in games if not game_model.title_is_usable(g.title)]
+            if ilegibles:
+                self._show_toast(
+                    _("No hay nada que renombrar: {n} juego(s) tienen un título "
+                      "que no se puede usar como nombre de archivo.").format(
+                          n=len(ilegibles)))
+                return
             self._show_toast(_("Todos esos juegos ya tienen el nombre estándar ✓"))
             return
 
@@ -2570,6 +2577,11 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         dialog.present(self)
 
     def _on_rename_requested(self, row: GameRow):
+        if not game_model.title_is_usable(row.game.title):
+            # El menú no lo ofrece (ver `GameRow._build_menu`); si se llega
+            # igual, se avisa en vez de pasar "�" a un nombre de archivo.
+            self._show_toast(library_ops.unusable_title_message(row.game))
+            return
         # Renombrar es instantáneo, pero mover el archivo bajo los pies de
         # una conversión o una transferencia en curso la rompe igual.
         if self._reject_if_busy(
