@@ -74,6 +74,7 @@ como ya hace `queue_manager.TransferQueue` para las transferencias.
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import stat
 import tempfile
@@ -100,6 +101,10 @@ DOWNLOAD_CHUNK_SIZE = 256 * 1024
 # que `gametdb.WIITDB_MAX_UNCOMPRESSED`.
 MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 MAX_UNCOMPRESSED_TOTAL_BYTES = 512 * 1024 * 1024
+
+# Clúster que se asume si no se puede leer el del destino: el de una unidad
+# que preparó Modo Fábrica (`drives.WII_USB_SECTORS_PER_CLUSTER` × 512).
+DEFAULT_CLUSTER_BYTES = 32 * 1024
 
 # Carpetas de primer nivel donde SÍ se puede extraer. "apps" es la
 # convención general de Homebrew Channel (ver el comentario de
@@ -564,6 +569,25 @@ def _instalar_todo(zf: zipfile.ZipFile, unidades: dict, sueltos: list,
 
 
 # -------------------------------------------------------------------- API --
+def _cluster_size(path: Path) -> int:
+    """Lo que ocupa como mínimo un archivo en el sistema de archivos de
+    `path` (el clúster, en FAT32), o `DEFAULT_CLUSTER_BYTES` si no se puede
+    leer."""
+    try:
+        st = os.statvfs(path)
+    except OSError:
+        return DEFAULT_CLUSTER_BYTES
+    return st.f_frsize or st.f_bsize or DEFAULT_CLUSTER_BYTES
+
+
+def _space_needed(members: list, cluster: int) -> int:
+    """Lo que van a ocupar `members` en el destino: cada archivo redondeado
+    al clúster. Sumar los tamaños exactos daba de menos con muchos archivos
+    chicos -en FAT32 cada uno ocupa al menos 32 KB-, y la instalación
+    fallaba a mitad con el disco lleno después de descargar."""
+    return sum(-(-info.file_size // cluster) * cluster for info in members)
+
+
 def _estado_de_io(exc, dest_root, era_montaje: bool = False) -> InstallStatus:
     """`IO_ERROR`, salvo que lo que pasó sea que ya no está la unidad.
 
@@ -665,7 +689,7 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
             try:
                 members = [i for i in zf.infolist() if not i.is_dir()]
 
-                needed = sum(i.file_size for i in members)
+                needed = _space_needed(members, _cluster_size(dest_root))
                 free = transfer_plan.free_space(dest_root)
                 if free is not None and needed > free:
                     return InstallResult(
