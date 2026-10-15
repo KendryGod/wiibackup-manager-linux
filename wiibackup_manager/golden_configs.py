@@ -90,6 +90,7 @@ llegaba a dispararse con una instalación real.
 """
 from __future__ import annotations
 
+import os
 import shutil
 from dataclasses import dataclass
 from enum import Enum
@@ -99,6 +100,7 @@ from typing import TYPE_CHECKING, Optional
 from . import oplog
 from .atomicfs import atomic_write_target
 from .fsutil import installed_data_dirs
+from .i18n import N_, _
 from .oscwii_client import HomebrewApp
 
 if TYPE_CHECKING:
@@ -164,6 +166,9 @@ GOLDEN_CONFIGS: dict = {
 
 class GoldenConfigStatus(Enum):
     APPLIED = "applied"
+    # Ya había una configuración en el destino y se dejó como estaba (ver
+    # `maybe_apply`). No es un error.
+    KEPT_EXISTING = "kept_existing"
     ASSET_MISSING = "asset_missing"
     ASSET_CORRUPT = "asset_corrupt"
     IO_ERROR = "io_error"
@@ -299,6 +304,18 @@ def maybe_apply(app: HomebrewApp, dest_root: Path,
             GoldenConfigStatus.SKIPPED_INSTALL_FAILED, app.slug, spec.label,
             error="la instalación de la app no terminó bien; no se tocó nada")
 
+    dest_path = Path(dest_root) / spec.dest_relative
+    if os.path.lexists(dest_path):
+        # Ya hay una configuración en el destino -la del cliente, o la que
+        # dejó una instalación anterior-: no se pisa, tampoco con
+        # "Reinstalar". Antes se reemplazaba siempre, y actualizar
+        # Nintendont en una SD ya configurada borraba esa configuración.
+        result = GoldenConfigResult(
+            GoldenConfigStatus.KEPT_EXISTING, app.slug, spec.label,
+            dest_path=dest_path)
+        _log(op_log, result)
+        return result
+
     asset_path = find_asset(spec.asset_relative)
     if asset_path is None:
         result = GoldenConfigResult(
@@ -315,7 +332,6 @@ def maybe_apply(app: HomebrewApp, dest_root: Path,
         _log(op_log, result)
         return result
 
-    dest_path = Path(dest_root) / spec.dest_relative
     try:
         _copy_atomic(asset_path, dest_path)
     except OSError as e:
@@ -331,8 +347,19 @@ def maybe_apply(app: HomebrewApp, dest_root: Path,
     return result
 
 
+# Nombre de la nota que queda en el historial cuando la configuración
+# maestra NO se aplica porque ya había una (sin traducir: la traducción se
+# aplica al mostrarlo, igual que con `OperationKind.value`).
+KEPT_OPERATION = N_("Configuración maestra no aplicada")
+
+
 def _log(op_log: Optional[oplog.OperationLog], result: GoldenConfigResult) -> None:
     if op_log is None:
+        return
+    if result.status is GoldenConfigStatus.KEPT_EXISTING:
+        op_log.record(KEPT_OPERATION, result.label, oplog.STATUS_OK,
+                      _("ya había un {name} en la unidad y se dejó como "
+                        "estaba").format(name=result.dest_path.name))
         return
     status = oplog.STATUS_ERROR if result.status.is_error else oplog.STATUS_OK
     detail = result.error if result.status.is_error else str(result.dest_path)

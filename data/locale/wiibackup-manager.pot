@@ -9,7 +9,7 @@ msgstr ""
 "Project-Id-Version: WiiBackup Manager\n"
 "Report-Msgid-Bugs-To: https://github.com/KendryGod/wiibackup-manager-linux/"
 "issues\n"
-"POT-Creation-Date: 2026-10-15 04:32-0600\n"
+"POT-Creation-Date: 2026-10-15 04:40-0600\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -184,6 +184,15 @@ msgstr ""
 
 #: wiibackup_manager/gametdb.py:452
 msgid "Título traducido"
+msgstr ""
+
+#: wiibackup_manager/golden_configs.py:353
+msgid "Configuración maestra no aplicada"
+msgstr ""
+
+#: wiibackup_manager/golden_configs.py:361
+#, python-brace-format
+msgid "ya había un {name} en la unidad y se dejó como estaba"
 msgstr ""
 
 #: wiibackup_manager/library_ops.py:61 wiibackup_manager/library_ops.py:72
@@ -989,21 +998,28 @@ msgstr ""
 msgid "Se aplicó la configuración maestra de '{name}'."
 msgstr ""
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:616
+#: wiibackup_manager/widgets/homebrew_store_view.py:610
+#, python-brace-format
+msgid ""
+"'{name}' se instaló. Ya había un {file} en la unidad y se dejó como estaba: "
+"no se aplicó la configuración maestra."
+msgstr ""
+
+#: wiibackup_manager/widgets/homebrew_store_view.py:623
 #, python-brace-format
 msgid "'{name}' se instaló. {detail}"
 msgstr ""
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:621
+#: wiibackup_manager/widgets/homebrew_store_view.py:628
 #, python-brace-format
 msgid "Instalación de '{name}' cancelada."
 msgstr ""
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:623
+#: wiibackup_manager/widgets/homebrew_store_view.py:630
 msgid "Error al instalar"
 msgstr ""
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:626
+#: wiibackup_manager/widgets/homebrew_store_view.py:633
 #, python-brace-format
 msgid "No se pudo instalar '{name}': {detail}"
 msgstr ""

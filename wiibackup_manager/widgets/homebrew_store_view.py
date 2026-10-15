@@ -604,6 +604,13 @@ class HomebrewStoreView(Gtk.Box):
                 self._show_toast(
                     _("Se aplicó la configuración maestra de '{name}'.")
                     .format(name=app.name))
+            elif (golden_result is not None and golden_result.status
+                  is golden_configs.GoldenConfigStatus.KEPT_EXISTING):
+                self._show_toast(
+                    _("'{name}' se instaló. Ya había un {file} en la unidad y "
+                      "se dejó como estaba: no se aplicó la configuración "
+                      "maestra.").format(name=app.name,
+                                          file=golden_result.dest_path.name))
             # Mismo criterio que el aviso de la config maestra: la app
             # quedó instalada (la tarjeta sigue en DONE), pero si el
             # respaldo de la versión anterior no se pudo borrar hay una
