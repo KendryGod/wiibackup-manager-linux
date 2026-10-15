@@ -65,9 +65,13 @@ class _Hilo:
         self._target()
 
 
-def test_el_escaneo_pregunta_si_la_unidad_se_fue(tmp_path, monkeypatch):
+@pytest.mark.parametrize("parcial", [[], ["juego_que_alcanzo_a_leer"]],
+                         ids=["vacio", "parcial"])
+def test_el_escaneo_pregunta_si_la_unidad_se_fue(tmp_path, monkeypatch, parcial):
     """De punta a punta en la ventana: el escaneo saltea una carpeta, la
-    unidad ya no responde y el aviso (y el historial) lo dicen."""
+    unidad ya no responde y el aviso (y el historial) lo dicen. La lista
+    que había se conserva, igual que cuando el escaneo falla: lo que
+    alcanzó a leer (nada, o una parte) no describe la biblioteca."""
     from wiibackup_manager import window
     from wiibackup_manager.operations import OperationManager
     from wiibackup_manager.window import WiiBackupWindow
@@ -78,7 +82,7 @@ def test_el_escaneo_pregunta_si_la_unidad_se_fue(tmp_path, monkeypatch):
     def _scan(root, wit_binary, progress, skipped_dirs=None, skipped_errors=None):
         skipped_dirs.append(root / "wbfs")
         skipped_errors.append(OSError(errno.EIO, "Input/output error"))
-        return []
+        return list(parcial)
 
     monkeypatch.setattr(window.scanning, "scan_library", _scan)
     monkeypatch.setattr(drives, "device_is_gone", lambda **_k: True)
@@ -98,8 +102,14 @@ def test_el_escaneo_pregunta_si_la_unidad_se_fue(tmp_path, monkeypatch):
         setattr(ventana, nombre, types.MethodType(getattr(WiiBackupWindow, nombre), ventana))
     ventana._describe_skipped = WiiBackupWindow._describe_skipped
 
+    ventana._games = ["juego_previo"]
+    repintadas = []
+    ventana._populate_list = lambda: repintadas.append(list(ventana._games))
+
     ventana.rescan_library()
 
+    assert ventana._games == ["juego_previo"]
+    assert repintadas == []
     [aviso] = toasts
     assert "desconect" in aviso and "permisos" not in aviso
     [entrada] = historial.entries()

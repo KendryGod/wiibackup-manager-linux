@@ -2061,6 +2061,20 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             self.op_log.record(OperationKind.SCANNING.value, objetivo, estado, mensaje)
         self._skipped_dirs = ilegibles
 
+        if skipped_gone:
+            # La unidad se fue a mitad del escaneo: lo que alcanzó a leer
+            # -nada, o una parte- no describe la biblioteca. Se conserva la
+            # última lista conocida, igual que cuando el escaneo falla (ver
+            # arriba); el sondeo de disponibilidad vuelve a escanear cuando
+            # la unidad cambie.
+            self.progress_bar.set_visible(False)
+            self.set_title(_("WiiBackup Manager — {n} juegos").format(
+                n=len(self._games)))
+            if self._rescan_pending:
+                self._rescan_pending = False
+                self.rescan_library()
+            return False
+
         self._games = games
         self._apply_sort()
         self.progress_bar.set_visible(False)
