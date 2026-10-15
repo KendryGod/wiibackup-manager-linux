@@ -1535,7 +1535,9 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                             huerfanos = library_ops.convert_gamecube(
                                 game, dest, target_ext, wit_binary,
                                 bytes_progress_cb=on_progress, cancel=cancel,
-                                op_log=self.op_log)
+                                op_log=self.op_log,
+                                on_phase=lambda texto: GLib.idle_add(
+                                    self.progress_bar.set_text, texto))
                             if huerfanos:
                                 GLib.idle_add(oplog.record_orphaned_backup, self.op_log,
                                               game.title,
@@ -2779,7 +2781,9 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                     huerfanos = library_ops.convert_gamecube(
                         game, dest, target_ext, self.settings.wit_binary,
                         bytes_progress_cb=on_progress, cancel=cancel,
-                        op_log=self.op_log)
+                        op_log=self.op_log,
+                        on_phase=lambda texto: GLib.idle_add(
+                            self.progress_bar.set_text, texto))
                     ok = True
                     error_wit = ""
                 else:

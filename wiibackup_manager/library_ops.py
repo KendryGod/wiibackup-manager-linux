@@ -545,7 +545,8 @@ def _un_archivo(dest: Path) -> list:
 def convert_gamecube(game: Game, dest: Path, target_ext: str, wit_binary: str = "wit",
                      *, bytes_progress_cb: Optional[Callable[[int], None]] = None,
                      cancel: Optional["wit_wrapper.CancellationToken"] = None,
-                     op_log=None) -> list:
+                     op_log=None,
+                     on_phase: Optional[Callable[[Optional[str]], None]] = None) -> list:
     """Convierte el juego de GameCube `game` entre CISO e ISO
     (`target_ext`, el que da `conversion_target`) y lo deja en `dest`. El
     original no se toca.
@@ -561,6 +562,10 @@ def convert_gamecube(game: Game, dest: Path, target_ext: str, wit_binary: str = 
     Lo que ya hubiera en `dest` se aparta y vuelve a su lugar si algo falla
     (`DestinationGuard`), y lo nuevo se baja a la unidad antes de descartar
     lo viejo.
+
+    `on_phase(texto)`, si se pasa, recibe el texto de la fase en curso para
+    la barra de progreso ("Comprobando…" mientras se compara el resultado
+    con el original) y `None` cuando vuelve a mostrarse el porcentaje.
 
     Devuelve los respaldos que no se pudieron borrar aunque todo salió
     bien (ver `DestinationGuard.orphaned_backups`)."""
@@ -589,7 +594,16 @@ def convert_gamecube(game: Game, dest: Path, target_ext: str, wit_binary: str = 
         # Primero a la unidad y después la comprobación: así `wit CMP` lee
         # lo que la unidad guardó, no lo que quedó en la caché.
         fileops.flush_and_drop_cache([dest], cancel=cancel)
-        motivo = _gamecube_conversion_problem(game, dest, a_iso, wit_binary, cancel)
+        # `wit CMP` lee los dos discos enteros: que la barra lo diga en vez
+        # de quedarse en 97 % sin texto. Vuelve al porcentaje al terminar,
+        # salga bien o no.
+        if on_phase is not None:
+            on_phase(_("Comprobando…"))
+        try:
+            motivo = _gamecube_conversion_problem(game, dest, a_iso, wit_binary, cancel)
+        finally:
+            if on_phase is not None:
+                on_phase(None)
         if motivo:
             raise GameCubeConversionError(
                 _("{name} no quedó bien ({reason}) y se descartó; el original "

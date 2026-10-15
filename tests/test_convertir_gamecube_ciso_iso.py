@@ -488,3 +488,54 @@ def test_con_wit_real_un_resultado_de_otro_juego_se_descarta(tmp_path):
         library_ops.convert_gamecube(juego, tmp_path / "Prueba.ciso", ".ciso", "wit")
 
     assert sorted(p.name for p in tmp_path.iterdir()) == ["Prueba.iso"]
+
+
+# ------------------------------------------- Texto de la barra al comparar --
+# Mientras corre `wit CMP` (lee los dos discos enteros) la barra quedaba en
+# 97 % sin decir nada. Ahora dice "Comprobando…" y vuelve al porcentaje al
+# terminar, con éxito o no.
+def _textos_al_comparar(monkeypatch, ventana):
+    textos, vistos = [], []
+    ventana.progress_bar = types.SimpleNamespace(set_fraction=lambda _f: None,
+                                                 set_text=textos.append)
+    real = wit_wrapper.images_match
+
+    def _cmp(a, b, binary="wit", cancel=None):
+        vistos.append(list(textos))
+        return real(a, b, binary, cancel)
+
+    monkeypatch.setattr(wit_wrapper, "images_match", _cmp)
+    return textos, vistos
+
+
+def test_la_barra_dice_comprobando_mientras_compara(ventana, biblio, wit_gc, monkeypatch):
+    textos, vistos = _textos_al_comparar(monkeypatch, ventana)
+
+    _convertir(ventana, _juego(biblio, "Zelda.ciso"))
+
+    assert vistos == [["Comprobando…"]]
+    assert textos[-1] is None
+
+
+def test_si_la_comparacion_falla_la_barra_tambien_vuelve(ventana, biblio, wit_gc,
+                                                        monkeypatch):
+    wit_gc.coincide = False
+    textos, vistos = _textos_al_comparar(monkeypatch, ventana)
+
+    _convertir(ventana, _juego(biblio, "Zelda.ciso"))
+
+    assert vistos == [["Comprobando…"]] and textos[-1] is None
+
+
+def test_en_lote_la_barra_dice_comprobando_en_cada_juego(ventana, biblio, wit_gc,
+                                                        monkeypatch):
+    zelda = _juego(biblio, "Zelda.ciso")
+    tp = _juego(biblio, "TP.iso", game_id="GZ2E01")
+    wit_gc.ids["TP"] = "GZ2E01"
+    ventana._selected_games = lambda: [zelda, tp]
+    textos, vistos = _textos_al_comparar(monkeypatch, ventana)
+
+    ventana._on_batch_convert()
+
+    assert [v[-1] for v in vistos] == ["Comprobando…", "Comprobando…"]
+    assert textos[-1] is None
