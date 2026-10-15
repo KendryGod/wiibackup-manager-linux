@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import sys
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -51,10 +52,7 @@ def identify_file(path: Path, wit_binary: str = "wit") -> Optional[Game]:
             info = _titulo_de_wit(info, path, wit_binary)
 
     if info is None and wit_wrapper.is_available(wit_binary):
-        try:
-            info = wit_wrapper.identify(path, wit_binary)
-        except wit_wrapper.WitNotFoundError:
-            info = None
+        info = _identify_with_wit(path, wit_binary)
 
     # El número de disco de una ISO plana ya viene en `info` (se leyó junto
     # con el resto del header). Para CISO, `wit` no lo expone en ningún
@@ -111,14 +109,30 @@ def _titulo_de_wit(info: DiscInfo, path: Path, wit_binary: str) -> DiscInfo:
     de la cabecera."""
     if not wit_wrapper.is_available(wit_binary):
         return info
-    try:
-        de_wit = wit_wrapper.identify(path, wit_binary)
-    except wit_wrapper.WitNotFoundError:
-        return info
+    de_wit = _identify_with_wit(path, wit_binary)
     if (de_wit is None or not de_wit.title
             or de_wit.game_id.upper() != info.game_id.upper()):
         return info
     return dataclasses.replace(info, title=de_wit.title)
+
+
+def _identify_with_wit(path: Path, wit_binary: str) -> Optional[DiscInfo]:
+    """`wit_wrapper.identify`, sin que un fallo con ESTE archivo tumbe el
+    escaneo de toda la biblioteca: cualquier error -una salida que no se
+    pudo leer, un `OSError`, un corte por tiempo, `wit` que desapareció-
+    cuenta como "wit no lo pudo identificar", y quien llama sigue con lo que
+    se sabe sin `wit` (el título de la cabecera, o sin identificar). Antes
+    solo se atrapaba `WitNotFoundError`, y la ventana mostraba "No se pudo
+    escanear la biblioteca" sin listar nada. Una cancelación sí sigue."""
+    try:
+        return wit_wrapper.identify(path, wit_binary)
+    except wit_wrapper.OperationCancelled:
+        raise
+    except Exception as e:  # noqa: BLE001 - un archivo no puede tumbar el escaneo
+        if not isinstance(e, wit_wrapper.WitNotFoundError):
+            print(f"[wiibackup-manager] wit no pudo leer {path}: "
+                  f"{type(e).__name__}: {e}", file=sys.stderr)
+        return None
 
 
 def find_game_files(root: Path, skipped: Optional[list] = None,
