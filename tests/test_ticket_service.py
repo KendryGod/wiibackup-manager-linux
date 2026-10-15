@@ -196,17 +196,16 @@ def test_el_usado_se_calcula_como_total_menos_libre(tmp_path):
     assert data.used_ratio == pytest.approx(0.5)
 
 
-def test_una_unidad_que_no_se_puede_medir_no_rompe_el_ticket(tmp_path):
+def test_una_unidad_que_no_se_puede_medir_da_un_error_claro(tmp_path):
     """Si la unidad se desconectó entre que el usuario apretó el botón y
-    esto corrió, el resto del ticket -que es lo que le importa al
-    cliente- sigue siendo válido."""
+    esto corrió, el ticket no sale con capacidad 0 B como si nada: da un
+    error que dice qué unidad no se pudo leer."""
     def falla(_path):
-        raise OSError("unidad desconectada")
+        raise OSError(5, "Input/output error")
 
-    data = ticket_service.collect_ticket_data(
-        tmp_path, usage=falla, filesystem=lambda _p: None)
-    assert (data.total_bytes, data.used_bytes, data.free_bytes) == (0, 0, 0)
-    assert data.used_ratio is None
+    with pytest.raises(ticket_service.DriveUnreadable, match=str(tmp_path)):
+        ticket_service.collect_ticket_data(
+            tmp_path, usage=falla, filesystem=lambda _p: None)
 
 
 # ========================================================= Filesystem --
@@ -282,13 +281,12 @@ def test_una_unidad_vacia_da_un_ticket_de_ceros(tmp_path):
     assert data.contents == ticket_service.DriveContents(0, 0, 0)
 
 
-def test_una_unidad_que_ya_no_existe_no_rompe(tmp_path):
-    """Nada de esto puede levantar una excepción: el ticket es de solo
-    lectura y tiene que degradar a ceros, no explotar."""
-    data = ticket_service.collect_ticket_data(
-        tmp_path / "no-existe", usage=_uso(0, 0), filesystem=lambda _p: None)
-    assert data.contents.wii_games == 0
-    assert data.filesystem == "Desconocido"
+def test_una_unidad_que_ya_no_existe_da_un_error_claro(tmp_path):
+    """Antes salía un ticket de "0 Wii · 0 GameCube · 0 Homebrew, 0 B,
+    Desconocido" de una unidad que no estaba: un comprobante falso."""
+    with pytest.raises(ticket_service.DriveUnreadable, match="no-existe"):
+        ticket_service.collect_ticket_data(
+            tmp_path / "no-existe", usage=_uso(0, 0), filesystem=lambda _p: None)
 
 
 # ================================================== Nombre de archivo --

@@ -824,6 +824,15 @@ class TransferView(Gtk.Box):
 
         destino = Path(archivo.get_path())
         origen = self._dest_path
+        if not origen.is_dir():
+            # La unidad se desconectó mientras se completaban los datos del
+            # ticket: un PDF de una unidad que no está sería un comprobante
+            # falso.
+            self._show_toast(
+                _("La unidad {name} ya no está disponible: conectala y volvé "
+                  "a generar el ticket.").format(name=origen.name or origen))
+            self._update_ticket_button()
+            return
         # Se toman AHORA, en el hilo de GTK: el worker no tiene que leer
         # `self.settings` mientras el diálogo de Ajustes lo puede estar
         # cambiando.

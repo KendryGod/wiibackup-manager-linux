@@ -39,6 +39,7 @@ título de la caché de GameTDB (ver `collect_ticket_data`).
 """
 from __future__ import annotations
 
+import errno
 import os
 import re
 import shutil
@@ -51,6 +52,7 @@ from typing import Callable, Optional
 from . import drives
 from .disc_header import is_valid_game_id
 from .game_model import VALID_EXTENSIONS, sanitize_filename
+from .i18n import _
 
 # Las tres carpetas de primer nivel que la app crea en una unidad
 # preparada. Los nombres son los que esperan los programas de la Wii, no
@@ -95,18 +97,23 @@ def _es_visible(nombre: str) -> bool:
     return not nombre.startswith(".")
 
 
-def _entradas(directorio: Path) -> list:
-    """Contenido de `directorio` como lista de `os.DirEntry`, o vacío si
-    no se puede leer.
+class DriveUnreadable(OSError):
+    """La unidad del ticket no se pudo leer: no está, se desconectó
+    mientras se la leía, o dio un error de E/S. El mensaje es para el
+    usuario."""
 
-    Que una carpeta ilegible devuelva 0 y no una excepción es a propósito:
-    el ticket es un resumen informativo y vale mucho más entregarlo con un
-    número incompleto que no poder generarlo porque la unidad tiene una
-    carpeta con permisos raros."""
+
+def _entradas(directorio: Path) -> list:
+    """Contenido visible de `directorio` como lista de `os.DirEntry`.
+
+    Una carpeta que no existe no tiene nada -una unidad sin `games/` es
+    normal-: lista vacía. Cualquier otro error al leerla se propaga. Antes
+    se tragaba todo, y con la unidad desconectada salía un ticket de "0
+    juegos": un comprobante falso, peor que ningún ticket."""
     try:
         with os.scandir(directorio) as it:
             return [e for e in it if _es_visible(e.name)]
-    except OSError:
+    except (FileNotFoundError, NotADirectoryError):
         return []
 
 
@@ -415,10 +422,10 @@ def collect_ticket_data(
     permite probar el cálculo de capacidad sin necesitar un pendrive de
     verdad montado.
 
-    Si no se puede leer el espacio (la unidad se desconectó entre que el
-    usuario apretó el botón y esto corrió), los tres tamaños quedan en 0
-    en vez de fallar: el resto del ticket -que es lo que le importa al
-    cliente- sigue siendo válido.
+    Si la unidad no se puede leer -no está, se desconecta mientras se la
+    lee, da un error de E/S, o no se puede medir su espacio- levanta
+    `DriveUnreadable` con un mensaje para el usuario, en vez de armar un
+    ticket de ceros.
 
     `title_lookup(game_id)` da el título de cada juego de la lista; por
     defecto es `gametdb.cached_title`, que mira solo la copia de GameTDB
@@ -429,10 +436,27 @@ def collect_ticket_data(
         from . import gametdb
         title_lookup = gametdb.cached_title
     try:
+        # La raíz tiene que poder leerse: una unidad que no está no es una
+        # unidad vacía.
+        dispositivo = os.stat(drive_root).st_dev
+        with os.scandir(drive_root):
+            pass
         medida = usage(drive_root)
         total_bytes, free_bytes = medida.total, medida.free
-    except OSError:
-        total_bytes = free_bytes = 0
+        wii = list_wii_games(drive_root, title_lookup)
+        gamecube = list_gamecube_games(drive_root, title_lookup)
+        homebrew = count_homebrew_apps(drive_root)
+        # Si se desconectó mientras se la leía, las carpetas que ya no
+        # estaban contaron como vacías: la raíz tiene que seguir ahí, y en
+        # el mismo dispositivo (desmontada, la carpeta del punto de montaje
+        # queda en el disco de abajo).
+        if os.stat(drive_root).st_dev != dispositivo:
+            raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT),
+                                    str(drive_root))
+    except OSError as e:
+        raise DriveUnreadable(
+            _("No se pudo leer la unidad {path} ({error}). ¿Está conectada?")
+            .format(path=drive_root, error=e.strerror or e)) from e
 
     # "Usado" se calcula como total - libre, y no con el `used` que
     # devuelve el sistema, por la misma razón que lo hace
@@ -441,9 +465,6 @@ def collect_ticket_data(
     # `free`, y lo que le importa a quien lee el ticket es cuánto del
     # pendrive NO puede usar.
     used_bytes = max(total_bytes - free_bytes, 0)
-
-    wii = list_wii_games(drive_root, title_lookup)
-    gamecube = list_gamecube_games(drive_root, title_lookup)
 
     return TicketData(
         client_name=client_name.strip(),
@@ -458,7 +479,7 @@ def collect_ticket_data(
         contents=DriveContents(
             wii_games=len(wii),
             gamecube_games=len(gamecube),
-            homebrew_apps=count_homebrew_apps(drive_root),
+            homebrew_apps=homebrew,
         ),
         console=(console or ConsoleInfo()).stripped(),
         games=tuple(wii + gamecube),
