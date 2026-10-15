@@ -13,6 +13,22 @@ from gi.repository import Adw, Gio, Gtk  # noqa: E402
 from ..i18n import _
 
 
+def local_path(gfile) -> Path | None:
+    """La ruta local de lo que devolvió un selector, o None si no tiene.
+
+    Una ubicación sin ruta local (un teléfono por MTP, un recurso SMB sin
+    gvfs-fuse) devuelve None en `get_path()`, y `Path(None)` levantaba
+    TypeError adentro del callback: no pasaba nada y quedaba solo un
+    traceback en la terminal. Quien llama avisa con `no_local_path_message`."""
+    ruta = gfile.get_path() if gfile is not None else None
+    return Path(ruta) if ruta else None
+
+
+def no_local_path_message() -> str:
+    return _("Esa ubicación no tiene una ruta local: elegí una carpeta de este "
+             "equipo o de una unidad montada.")
+
+
 def safe_initial_folder(preferred: str | Path | None = None) -> Gio.File:
     """Gio.File para usar como carpeta inicial de un Gtk.FileDialog.
 

@@ -389,7 +389,11 @@ class HomebrewStoreView(Gtk.Box):
             return
         if not folder:
             return
-        self._manual_path = Path(folder.get_path())
+        path = gtk_helpers.local_path(folder)
+        if path is None:
+            self._show_toast(gtk_helpers.no_local_path_message())
+            return
+        self._manual_path = path
         self._refresh_dest_choices()
 
     # ----------------------------------------------------------- Catálogo --

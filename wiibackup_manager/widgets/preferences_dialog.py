@@ -10,6 +10,7 @@ from gi.repository import Adw, Gtk  # noqa: E402
 
 from .. import config, styles, wit_wrapper
 from ..i18n import _
+from . import gtk_helpers
 
 
 class PreferencesDialog(Adw.PreferencesDialog):
@@ -103,9 +104,12 @@ class PreferencesDialog(Adw.PreferencesDialog):
         except Exception:
             return
         if folder:
-            path = folder.get_path()
-            self.settings.library_path = path
-            self._library_row.set_subtitle(path)
+            path = gtk_helpers.local_path(folder)
+            if path is None:
+                self.add_toast(Adw.Toast(title=gtk_helpers.no_local_path_message()))
+                return
+            self.settings.library_path = str(path)
+            self._library_row.set_subtitle(str(path))
 
     def _pick_wbfs_folder(self, *_args):
         dialog = Gtk.FileDialog(title=_("Elegí la carpeta/unidad WBFS"))
@@ -117,9 +121,12 @@ class PreferencesDialog(Adw.PreferencesDialog):
         except Exception:
             return
         if folder:
-            path = folder.get_path()
-            self.settings.wbfs_drive_path = path
-            self._wbfs_row.set_subtitle(path)
+            path = gtk_helpers.local_path(folder)
+            if path is None:
+                self.add_toast(Adw.Toast(title=gtk_helpers.no_local_path_message()))
+                return
+            self.settings.wbfs_drive_path = str(path)
+            self._wbfs_row.set_subtitle(str(path))
 
     def _on_region_changed(self, row, _param):
         idx = row.get_selected()

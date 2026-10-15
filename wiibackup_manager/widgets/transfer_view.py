@@ -822,7 +822,10 @@ class TransferView(Gtk.Box):
         if not archivo or self._dest_path is None:
             return
 
-        destino = Path(archivo.get_path())
+        destino = gtk_helpers.local_path(archivo)
+        if destino is None:
+            self._show_toast(gtk_helpers.no_local_path_message())
+            return
         origen = self._dest_path
         if not origen.is_dir():
             # La unidad se desconectó mientras se completaban los datos del
@@ -981,7 +984,10 @@ class TransferView(Gtk.Box):
             return
         if not folder:
             return
-        path = Path(folder.get_path())
+        path = gtk_helpers.local_path(folder)
+        if path is None:
+            self._show_toast(gtk_helpers.no_local_path_message())
+            return
         row = Adw.ActionRow(title=path.name or str(path), subtitle=str(path))
         row.set_use_markup(False)
         row.dest_path = path

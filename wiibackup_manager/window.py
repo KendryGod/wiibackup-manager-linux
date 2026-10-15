@@ -1184,7 +1184,10 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             return
         if not folder:
             return
-        dest_root = Path(folder.get_path())
+        dest_root = gtk_helpers.local_path(folder)
+        if dest_root is None:
+            self._show_toast(gtk_helpers.no_local_path_message())
+            return
         # GameCube nunca pasa por `wit` (se copia tal cual, ver
         # `library_ops.send_to_wbfs_drive`): la falta de `wit` solo bloquea a
         # los juegos de Wii que no sean ya WBFS.
@@ -2293,8 +2296,13 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         if not files:
             return
 
-        paths = [Path(files.get_item(i).get_path()) for i in range(files.get_n_items())]
-        self._start_import(paths)
+        locales = [gtk_helpers.local_path(files.get_item(i))
+                   for i in range(files.get_n_items())]
+        paths = [p for p in locales if p is not None]
+        if len(paths) != len(locales):
+            self._show_toast(gtk_helpers.no_local_path_message())
+        if paths:
+            self._start_import(paths)
 
     def _on_add_folder(self, *_args):
         dialog = Gtk.FileDialog(title=_("Agregar carpeta completa"))
@@ -2309,7 +2317,10 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         if folder is None:
             return
 
-        root = Path(folder.get_path())
+        root = gtk_helpers.local_path(folder)
+        if root is None:
+            self._show_toast(gtk_helpers.no_local_path_message())
+            return
         skipped: list = []
         causas: list = []
         paths = scanning.find_game_files(root, skipped, causas)
