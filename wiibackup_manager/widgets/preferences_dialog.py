@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import dataclasses
+
 import gi
 
 gi.require_version("Gtk", "4.0")
@@ -81,7 +83,15 @@ class PreferencesDialog(Adw.PreferencesDialog):
         scheme_row.connect("notify::selected", self._on_scheme_changed)
         group4.add(scheme_row)
 
-        self.connect("closed", lambda *_a: self.on_saved(self.settings))
+        # Al cerrar se guarda solo si algo cambió: guardar siempre pisaba
+        # config.json con lo que hubiera en memoria aunque nadie hubiera
+        # tocado nada.
+        self._al_abrir = dataclasses.asdict(settings)
+        self.connect("closed", self._on_closed)
+
+    def _on_closed(self, *_args):
+        if dataclasses.asdict(self.settings) != self._al_abrir:
+            self.on_saved(self.settings)
 
     def _pick_library_folder(self, *_args):
         dialog = Gtk.FileDialog(title=_("Elegí la carpeta de tu biblioteca"))

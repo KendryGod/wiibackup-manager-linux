@@ -11,8 +11,9 @@ import os
 import sys
 import tempfile
 from dataclasses import dataclass, asdict, field, fields
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import ClassVar, Optional
 
 APP_ID = "com.gamefixsps.WiiBackupManager"
 
@@ -139,6 +140,14 @@ class Settings:
     # blanco, para imprimir sin gastar tinta). Ver `TICKET_THEMES`.
     ticket_theme: str = TICKET_THEME_DARK
 
+    # Lo que `load` tuvo que hacer con un config.json que no se podía usar:
+    # si lo encontró dañado, y dónde lo dejó guardado aparte (None si no lo
+    # pudo apartar). No son preferencias -`ClassVar` las deja afuera de los
+    # campos, y con eso de `asdict` y del archivo-: son para que la ventana
+    # avise.
+    config_was_damaged: ClassVar[bool] = False
+    damaged_copy: ClassVar[Optional[Path]] = None
+
     @classmethod
     def load(cls) -> "Settings":
         """Lee la configuración del disco, cayendo a los valores por defecto
@@ -148,7 +157,13 @@ class Settings:
         JSON a mano y dejó `auto_scan_on_start: "si"` (texto en vez de
         booleano), se pierde solo esa preferencia y no las otras cuatro.
         Sin esto el valor entraba tal cual al dataclass y reventaba recién
-        más tarde, en cualquier lugar que lo usara."""
+        más tarde, en cualquier lugar que lo usara.
+
+        Si el archivo entero no se puede usar -no se puede leer, está
+        vacío, no es JSON o no es un objeto- se aparta como
+        `config.json.corrupto-<fecha>` ANTES de seguir con los valores por
+        defecto (ver `_damaged`). Si no, el primer guardado lo pisaba y con
+        él se iban los destinos guardados y los datos de "Mi taller"."""
         defaults = cls()
         if not CONFIG_FILE.exists():
             return defaults
@@ -156,14 +171,10 @@ class Settings:
         try:
             data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError, ValueError) as e:
-            print(f"[wiibackup-manager] config.json ilegible ({e}); "
-                  "se usan los valores por defecto.", file=sys.stderr)
-            return defaults
+            return cls._damaged(f"ilegible ({e})")
 
         if not isinstance(data, dict):
-            print("[wiibackup-manager] config.json no contiene un objeto JSON; "
-                  "se usan los valores por defecto.", file=sys.stderr)
-            return defaults
+            return cls._damaged("no contiene un objeto JSON")
 
         values = {}
         for f in fields(cls):
@@ -181,6 +192,15 @@ class Settings:
                 continue
             values[f.name] = value
 
+        if "library_path" in values:
+            biblioteca = _valid_library_path(values["library_path"])
+            if biblioteca is None:
+                print(f"[wiibackup-manager] config.json: 'library_path' no es una "
+                      f"ruta absoluta ({values['library_path']!r}); se usa el valor "
+                      f"por defecto ({defaults.library_path!r}).", file=sys.stderr)
+                del values["library_path"]
+            else:
+                values["library_path"] = biblioteca
         if "dest_presets" in values:
             values["dest_presets"] = clean_presets(values["dest_presets"])
         if "shop_whatsapp" in values:
@@ -193,10 +213,57 @@ class Settings:
 
         return cls(**values)
 
+    @classmethod
+    def _damaged(cls, motivo: str) -> "Settings":
+        """Los valores por defecto, con el config.json que no se pudo usar
+        apartado para que el primer guardado no lo pise."""
+        settings = cls()
+        settings.config_was_damaged = True
+        settings.damaged_copy = _set_aside_damaged_config()
+        destino = (f"se guardó aparte como {settings.damaged_copy.name}"
+                   if settings.damaged_copy is not None
+                   else "no se pudo guardar aparte")
+        print(f"[wiibackup-manager] config.json {motivo}: {destino}; se usan "
+              "los valores por defecto.", file=sys.stderr)
+        return settings
+
     def save(self) -> None:
         """Guarda la configuración de forma atómica (ver
         `write_text_atomic`, compartida con el historial y las listas exportadas)."""
         write_text_atomic(CONFIG_FILE, json.dumps(asdict(self), indent=2))
+
+
+def _valid_library_path(value: str) -> Optional[str]:
+    """`value` como ruta absoluta (con `~` expandido), o None si no lo es.
+
+    Una ruta vacía o relativa no es una biblioteca: se resolvía contra la
+    carpeta desde donde se lanzó la app, y el escaneo recorría eso."""
+    texto = value.strip()
+    if not texto:
+        return None
+    ruta = Path(texto).expanduser()
+    return str(ruta) if ruta.is_absolute() else None
+
+
+def _set_aside_damaged_config() -> Optional[Path]:
+    """Renombra el config.json que no se pudo usar a
+    `config.json.corrupto-<fecha>` (con un sufijo si ese nombre ya está) y
+    devuelve dónde quedó, o None si no se pudo.
+
+    Un rename y no una copia: alcanza con que el directorio admita
+    escritura -lo mismo que necesita después `save`-, aunque el archivo
+    mismo no se pueda leer."""
+    base = f"{CONFIG_FILE.name}.corrupto-{datetime.now():%Y-%m-%d-%H%M%S}"
+    destino = CONFIG_FILE.with_name(base)
+    numero = 2
+    while destino.exists():
+        destino = CONFIG_FILE.with_name(f"{base}-{numero}")
+        numero += 1
+    try:
+        os.rename(CONFIG_FILE, destino)
+    except OSError:
+        return None
+    return destino
 
 
 def try_save(settings: Settings) -> Optional[str]:

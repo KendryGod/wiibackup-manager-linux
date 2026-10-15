@@ -404,6 +404,15 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         toolbar_view.add_top_bar(self._library_banner)
         self._update_library_banner()
 
+        # config.json dañado (ver `config.Settings.load`): se apartó y la
+        # app arrancó con los valores por defecto. Queda a la vista hasta
+        # que el usuario lo cierra.
+        self._config_banner = Adw.Banner(button_label=_("Entendido"))
+        self._config_banner.connect(
+            "button-clicked", lambda *_a: self._config_banner.set_revealed(False))
+        toolbar_view.add_top_bar(self._config_banner)
+        self._update_config_banner()
+
         # Aviso del Recovery Manager. Arranca oculto y se revela solo si el
         # escaneo de fondo encuentra algo: cuando no hay restos -el caso
         # normal- la app no dice absolutamente nada.
@@ -1769,6 +1778,20 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                       path=self.settings.library_path)
             )
             self._library_banner.set_revealed(True)
+
+    def _update_config_banner(self):
+        if not self.settings.config_was_damaged:
+            return
+        if self.settings.damaged_copy is not None:
+            texto = _("Tu configuración estaba dañada y no se pudo leer: quedó "
+                      "guardada aparte en {path} y la app arrancó con los "
+                      "valores por defecto.").format(path=self.settings.damaged_copy)
+        else:
+            texto = _("Tu configuración estaba dañada y no se pudo leer ni "
+                      "guardar aparte: la app arrancó con los valores por "
+                      "defecto.")
+        self._config_banner.set_title(texto)
+        self._config_banner.set_revealed(True)
 
     def _poll_library_availability(self):
         available = config.library_path_available(self.settings)
