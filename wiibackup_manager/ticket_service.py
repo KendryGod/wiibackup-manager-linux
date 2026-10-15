@@ -360,7 +360,7 @@ def filesystem_label(fstype: Optional[str]) -> str:
     muestra como "Desconocido" y no se disimula: es más honesto que
     afirmar un formato que no se pudo verificar."""
     if not fstype:
-        return "Desconocido"
+        return _("Desconocido")
     return _FILESYSTEM_LABELS.get(fstype.lower(), fstype.upper())
 
 
@@ -499,5 +499,6 @@ def suggested_filename(client_name: str = "",
     fecha = (when or datetime.now()).strftime("%Y-%m-%d")
     nombre = client_name.strip()
     if nombre:
-        return sanitize_filename(f"Ticket {nombre} {fecha}") + ".pdf"
-    return f"Ticket {fecha}.pdf"
+        return sanitize_filename(_("Ticket {client} {date}").format(
+            client=nombre, date=fecha)) + ".pdf"
+    return _("Ticket {date}").format(date=fecha) + ".pdf"

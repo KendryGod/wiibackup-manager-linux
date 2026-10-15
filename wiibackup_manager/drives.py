@@ -319,7 +319,8 @@ def eject_mount_point(path: Path) -> tuple[bool, str]:
     además apaga eléctricamente la unidad removible cuando el hardware lo
     soporta) y si no está disponible cae a `gio mount -u`."""
     if not is_mount_point(path):
-        return False, f"'{path}' no es un punto de montaje: no hace falta expulsarlo."
+        return False, _("'{path}' no es un punto de montaje: no hace falta "
+                        "expulsarlo.").format(path=path)
 
     device = _block_device_for(path)
     if device:
@@ -336,11 +337,11 @@ def eject_mount_point(path: Path) -> tuple[bool, str]:
             # desconectar sin más riesgo que el de un USB ya desmontado.
             subprocess.run(["udisksctl", "power-off", "-b", device],
                             capture_output=True, text=True, timeout=30)
-            return True, "Unidad expulsada de forma segura."
+            return True, _("Unidad expulsada de forma segura.")
         if result is not None:
             stderr = result.stderr.strip()
             if "not authorized" not in stderr.lower():
-                return False, stderr or "No se pudo desmontar la unidad."
+                return False, stderr or _("No se pudo desmontar la unidad.")
 
     try:
         result = subprocess.run(
@@ -348,11 +349,11 @@ def eject_mount_point(path: Path) -> tuple[bool, str]:
             capture_output=True, text=True, timeout=30,
         )
     except (OSError, subprocess.TimeoutExpired) as e:
-        return False, f"No se pudo expulsar la unidad: {e}"
+        return False, _("No se pudo expulsar la unidad: {error}").format(error=e)
 
     if result.returncode == 0:
-        return True, "Unidad expulsada de forma segura."
-    return False, result.stderr.strip() or "No se pudo desmontar la unidad."
+        return True, _("Unidad expulsada de forma segura.")
+    return False, result.stderr.strip() or _("No se pudo desmontar la unidad.")
 
 
 # ================================================================== #
@@ -931,14 +932,15 @@ def verify_still_safe(device: BlockDevice, *, run=subprocess.run) -> None:
     `DeviceIdentityMismatchError` si algo no cierra."""
     if not is_removable_block_device(device.path):
         raise UnsafeDeviceError(
-            f"{device.path} ya no es un dispositivo removible (o "
-            "desapareció). Se aborta el formateo por seguridad.")
+            _("{dev} ya no es un dispositivo removible (o desapareció). Se "
+              "aborta el formateo por seguridad.").format(dev=device.path))
     tamano_actual = device_size_bytes(device.path)
     if tamano_actual is None or tamano_actual != device.size_bytes:
         raise DeviceChangedError(
-            f"El tamaño de {device.path} cambió desde que se confirmó "
-            f"({device.size_bytes} → {tamano_actual} bytes). Puede ser "
-            "otro dispositivo: se aborta el formateo por seguridad.")
+            _("El tamaño de {dev} cambió desde que se confirmó ({before} → "
+              "{after} bytes). Puede ser otro dispositivo: se aborta el "
+              "formateo por seguridad.").format(
+                  dev=device.path, before=device.size_bytes, after=tamano_actual))
     # Si no se pudo determinar la identidad al listar el dispositivo (ver
     # `BlockDevice.identity`), no hay nada contra qué comparar: no tener
     # el dato no es lo mismo que poder confirmar que cambió.
@@ -946,10 +948,12 @@ def verify_still_safe(device: BlockDevice, *, run=subprocess.run) -> None:
         identidad_actual = device_identity(device.path, run=run)
         if identidad_actual != device.identity:
             raise DeviceIdentityMismatchError(
-                f"La identidad física de {device.path} cambió desde que "
-                f"se confirmó ({device.identity} → {identidad_actual}). "
-                "Puede ser otro dispositivo del mismo tamaño reconectado "
-                "en el mismo puerto: se aborta el formateo por seguridad.")
+                _("La identidad física de {dev} cambió desde que se confirmó "
+                  "({before} → {after}). Puede ser otro dispositivo del mismo "
+                  "tamaño reconectado en el mismo puerto: se aborta el "
+                  "formateo por seguridad.").format(
+                      dev=device.path, before=device.identity,
+                      after=identidad_actual))
 
 
 def check_no_critical_mounts(device: BlockDevice) -> None:
@@ -960,9 +964,9 @@ def check_no_critical_mounts(device: BlockDevice) -> None:
     criticos = mounted_critical_paths(device.path)
     if criticos:
         raise CriticalMountError(
-            f"{device.path} tiene una partición montada en "
-            f"{', '.join(sorted(criticos))}, que es un punto de montaje "
-            "del sistema operativo. Se aborta el formateo.")
+            _("{dev} tiene una partición montada en {mounts}, que es un punto "
+              "de montaje del sistema operativo. Se aborta el formateo.").format(
+                  dev=device.path, mounts=", ".join(sorted(criticos))))
 
 
 def _unmount_all(device_path, *, run=subprocess.run) -> None:
@@ -1021,9 +1025,13 @@ def _mount_as_user(partition, *, run=subprocess.run,
         if time.monotonic() - inicio >= timeout:
             break
         time.sleep(0.5)
+    if ultimo_error:
+        raise RuntimeError(
+            _("{partition} se formateó pero no se pudo montar después: "
+              "{error}").format(partition=partition, error=ultimo_error))
     raise RuntimeError(
-        f"{partition} se formateó pero no se pudo montar después"
-        + (f": {ultimo_error}" if ultimo_error else "."))
+        _("{partition} se formateó pero no se pudo montar después.").format(
+            partition=partition))
 
 
 def _check_mount_writable(mount_point: Path) -> None:
@@ -1035,15 +1043,16 @@ def _check_mount_writable(mount_point: Path) -> None:
         info = os.stat(mount_point)
     except OSError as e:
         raise MountNotWritableError(
-            f"No se pudo revisar el punto de montaje {mount_point}: {e}") from e
+            _("No se pudo revisar el punto de montaje {path}: {error}").format(
+                path=mount_point, error=e)) from e
     uid = os.getuid()
     if info.st_uid != uid or not os.access(mount_point, os.W_OK):
         raise MountNotWritableError(
-            f"La unidad quedó montada en {mount_point}, pero ese montaje "
-            f"pertenece al usuario {info.st_uid} (la app corre como {uid}) "
-            "o no admite escritura. En FAT32 los permisos los fija el "
-            "montaje: desmontala y volvé a montarla desde el gestor de "
-            "archivos como tu usuario.")
+            _("La unidad quedó montada en {path}, pero ese montaje pertenece "
+              "al usuario {owner} (la app corre como {uid}) o no admite "
+              "escritura. En FAT32 los permisos los fija el montaje: "
+              "desmontala y volvé a montarla desde el gestor de archivos como "
+              "tu usuario.").format(path=mount_point, owner=info.st_uid, uid=uid))
 
 
 def partitions_of(device_path, *, run=subprocess.run) -> list[Path]:

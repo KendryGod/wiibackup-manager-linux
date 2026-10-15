@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import config
-from .i18n import _
+from .i18n import N_, _
 
 # Estados posibles de una operación terminada.
 STATUS_OK = "ok"
@@ -63,10 +63,10 @@ MAX_ENTRIES = 500
 
 # Nombre (sin traducir, mismo criterio que `OperationKind.value`) de la
 # entrada que avisa que un respaldo temporal quedó ocupando espacio.
-ORPHANED_BACKUP_OPERATION = "Respaldo temporal no eliminado"
+ORPHANED_BACKUP_OPERATION = N_("Respaldo temporal no eliminado")
 # Y la que avisa que un reemplazo se cortó y el original NO volvió a su
 # nombre: sigue entero, apartado con un nombre oculto.
-UNRESTORED_BACKUP_OPERATION = "Original sin restaurar"
+UNRESTORED_BACKUP_OPERATION = N_("Original sin restaurar")
 
 
 @dataclass(frozen=True)

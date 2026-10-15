@@ -84,7 +84,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self._cancel_token = wit_wrapper.CancellationToken()
         # Qué se avisa al tocar "Cancelar": lo pone la operación que está
         # usando la barra en ese momento (enviar o convertir).
-        self._cancel_message = "Cancelando…"
+        self._cancel_message = _("Cancelando…")
         # Que el usuario ya confirmó que quiere cerrar con algo peligroso
         # en curso. Sin esto, el `self.close()` que dispara el diálogo
         # volvería a entrar a `_on_close_request`, que volvería a
@@ -946,17 +946,17 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         # estado, al revés que `notes`. Sin esa distinción, borrar juegos de
         # una unidad sin papelera -que es exactamente lo que el usuario
         # confirmó- quedaba anotado como "Terminada con errores".
-        detail_parts = [f"{ok} ok"]
+        detail_parts = [_("{n} ok").format(n=ok)]
         if summary_note:
             detail_parts.append(summary_note)
         if skipped:
-            detail_parts.append(f"{len(skipped)} omitido(s)")
+            detail_parts.append(_("{n} omitido(s)").format(n=len(skipped)))
         if notes:
             detail_parts.append("; ".join(notes[:3]))
             if len(notes) > 3:
-                detail_parts.append(f"(+{len(notes) - 3} más)")
+                detail_parts.append(_("(+{n} más)").format(n=len(notes) - 3))
         if errors:
-            detail_parts.append(f"{len(errors)} con error")
+            detail_parts.append(_("{n} con error").format(n=len(errors)))
             # Los primeros motivos concretos: son el dato por el que
             # alguien abre el historial después de que algo falle.
             detail_parts.append("; ".join(errors[:3]))
@@ -1028,7 +1028,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
     # ------------------------------------------------------ Acciones en lote --
     def _run_batch(self, games: list[Game], title: str, action_fn,
-                    kind: OperationKind, cancel_message: str = "Cancelando…",
+                    kind: OperationKind, cancel_message: str | None = None,
                     summary_note: str = ""):
         """Corre `action_fn(game, cancel)` para cada juego en un hilo
         aparte, mostrando progreso, botón de cancelar y un resumen final de
@@ -1072,7 +1072,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             self._show_toast(_("No se puede ahora: {detail}.").format(detail=e.detail))
             return
 
-        cancel = self._begin_cancellable_progress(title, cancel_message)
+        cancel = self._begin_cancellable_progress(
+            title, cancel_message or _("Cancelando…"))
         total = len(games)
 
         def worker():
@@ -1243,16 +1244,16 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             # El plan (cuánto va a ocupar cada juego en el destino) se arma
             # acá y no en el hilo de GTK: implica preguntarle a `wit` por
             # cada juego y con un lote grande congelaría la ventana.
-            GLib.idle_add(self.progress_bar.set_text, "Calculando espacio necesario…")
+            GLib.idle_add(self.progress_bar.set_text, _("Calculando espacio necesario…"))
             plan = transfer_plan.plan_transfer(games, wit_binary)
             total_bytes = sum(item.output_bytes for item in plan)
             libres_ahora = transfer_plan.free_space(dest_root)
             if libres_ahora is not None and total_bytes > libres_ahora:
                 GLib.idle_add(
                     self._on_send_done, 0,
-                    [f"No entra en el destino: se necesitan "
-                     f"{formatting.format_size(total_bytes)} y hay "
-                     f"{formatting.format_size(libres_ahora)} libres"],
+                    [_("No entra en el destino: se necesitan {need} y hay {free} "
+                       "libres").format(need=formatting.format_size(total_bytes),
+                                        free=formatting.format_size(libres_ahora))],
                     False, [], op, self._describe_target(games))
                 return
 
@@ -1293,9 +1294,10 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 libres = transfer_plan.free_space(dest_root)
                 if libres is not None and necesario > libres:
                     errors.append(
-                        f"{game.title}: no entra en el destino "
-                        f"(necesita {formatting.format_size(necesario)}, "
-                        f"quedan {formatting.format_size(libres)})"
+                        _("{title}: no entra en el destino (necesita {need}, "
+                          "quedan {free})").format(
+                              title=game.title, need=formatting.format_size(necesario),
+                              free=formatting.format_size(libres))
                     )
                     bytes_failed += item.output_bytes
                     continue
@@ -1556,7 +1558,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             # Lo seleccionado, no solo lo convertible: el historial tiene
             # que nombrar el lote que pidió el usuario (los omitidos van en
             # el detalle).
-            GLib.idle_add(self._on_batch_done, "Convirtiendo", ok, errors, skipped, op,
+            GLib.idle_add(self._on_batch_done, _("Convirtiendo"), ok, errors, skipped, op,
                           self._describe_target(seleccionados), cancelled)
 
         threading.Thread(target=worker, daemon=True).start()
@@ -1573,7 +1575,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         no tiene en pantalla sería una sorpresa desagradable."""
         games = self._selected_games() or self._visible_games()
         if not games:
-            self._show_toast("No hay juegos para renombrar.")
+            self._show_toast(_("No hay juegos para renombrar."))
             return
         self._start_batch_rename(games)
 
@@ -1583,7 +1585,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         # confirmación.
         pendientes = [g for g in games if game_model.needs_rename(g)]
         if not pendientes:
-            self._show_toast("Todos esos juegos ya tienen el nombre estándar ✓")
+            self._show_toast(_("Todos esos juegos ya tienen el nombre estándar ✓"))
             return
 
         if self._reject_if_busy(OperationKind.RENAMING,
@@ -1639,11 +1641,12 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 # resumen del lote: escribir acá una entrada de historial
                 # aparte rompía el patrón de "una acción del usuario, una
                 # entrada de historial" que sigue el resto de la app.
-                return f"guardado como {nuevo.name} ('{esperado}' estaba ocupado)"
+                return _("guardado como {name} ('{expected}' estaba ocupado)").format(
+                    name=nuevo.name, expected=esperado)
             return None
 
-        self._run_batch(games, "Renombrando", rename_one, OperationKind.RENAMING,
-                         cancel_message="Cancelando el renombrado…")
+        self._run_batch(games, _("Renombrando"), rename_one, OperationKind.RENAMING,
+                         cancel_message=_("Cancelando el renombrado…"))
 
     def _on_batch_verify(self):
         games = self._selected_games()
@@ -2148,7 +2151,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         extension = "csv" if fmt == formatting.EXPORT_CSV else "txt"
         dialog = Gtk.FileDialog(title=_("Guardar la lista de juegos"))
         dialog.set_initial_name(
-            f"biblioteca-wii-{time.strftime('%Y-%m-%d')}.{extension}")
+            _("biblioteca-wii-{date}.{ext}").format(date=time.strftime("%Y-%m-%d"),
+                                                    ext=extension))
         dialog.set_initial_folder(gtk_helpers.safe_initial_folder())
         filtro = Gtk.FileFilter()
         if fmt == formatting.EXPORT_CSV:
@@ -2364,9 +2368,10 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 if len(src_paths) == 1:
                     gtk_helpers.confirm_overwrite(
                         self,
-                        f"Ya existe un archivo en la biblioteca con ese nombre:\n"
-                        f"{dest.name}\n\nAgregar '{src.name}' lo va a reemplazar. "
-                        "Esta acción no se puede deshacer.",
+                        _("Ya existe un archivo en la biblioteca con ese nombre:\n"
+                          "{name}\n\nAgregar '{src}' lo va a reemplazar. Esta "
+                          "acción no se puede deshacer.").format(name=dest.name,
+                                                                  src=src.name),
                         lambda: self._start_import(src_paths, overwrite=True),
                     )
                     return
@@ -2450,10 +2455,12 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 try:
                     game = scanning.identify_file(src, self.settings.wit_binary)
                 except Exception as e:
-                    errors.append(f"{src.name}: no se pudo leer ({e})")
+                    errors.append(_("{name}: no se pudo leer ({error})").format(
+                        name=src.name, error=e))
                     continue
                 if game is None:
-                    errors.append(f"{src.name}: no se pudo identificar el juego")
+                    errors.append(_("{name}: no se pudo identificar el juego").format(
+                        name=src.name))
                     continue
 
                 if game.game_id != UNKNOWN_GAME_ID and game.game_id in known_ids:
@@ -2465,13 +2472,14 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                         dest = copiar(src, dest)
                     except FileExistsError:
                         errors.append(
-                            f"{game.title}: apareció otro archivo llamado "
-                            f"'{dest.name}' en la biblioteca y no se encontró "
-                            "un nombre libre; no se copió nada"
+                            _("{title}: apareció otro archivo llamado '{name}' en "
+                              "la biblioteca y no se encontró un nombre libre; no "
+                              "se copió nada").format(title=game.title, name=dest.name)
                         )
                         continue
                     except OSError as e:
-                        errors.append(f"{game.title}: no se pudo copiar ({e.strerror or e})")
+                        errors.append(_("{title}: no se pudo copiar ({error})").format(
+                            title=game.title, error=e.strerror or e))
                         continue
 
                 if game.game_id != UNKNOWN_GAME_ID:
@@ -2487,25 +2495,28 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                          errors: list[str] | None = None):
         renamed = renamed or []
         errors = errors or []
-        detail_parts = [f"{len(added)} agregado(s)"]
+        detail_parts = [_("{n} agregado(s)").format(n=len(added))]
         if skipped:
-            detail_parts.append(f"{len(skipped)} ya estaban en la biblioteca")
+            detail_parts.append(_("{n} ya estaban en la biblioteca").format(n=len(skipped)))
         if renamed:
-            detail_parts.append(f"{len(renamed)} renombrado(s) para no pisar otro archivo")
+            detail_parts.append(_("{n} renombrado(s) para no pisar otro archivo").format(
+                n=len(renamed)))
         if errors:
             preview = "; ".join(errors[:3])
-            mas = f" (+{len(errors) - 3} más)" if len(errors) > 3 else ""
-            detail_parts.append(f"{len(errors)} con error: {preview}{mas}")
+            mas = (_(" (+{n} más)").format(n=len(errors) - 3)
+                   if len(errors) > 3 else "")
+            detail_parts.append(_("{n} con error: {preview}{more}").format(
+                n=len(errors), preview=preview, more=mas))
         # "ningún juego" y no "0 juegos": cuando todos los archivos ya
         # estaban en la biblioteca (o ninguno se pudo identificar) la
         # entrada del historial quedaba como "Agregando juegos · 0 juegos",
         # que se lee como si se hubiera roto algo.
         if not added:
-            target = "ningún juego"
+            target = _("ningún juego")
         elif len(added) == 1:
             target = added[0]
         else:
-            target = f"{len(added)} juegos"
+            target = _("{n} juegos").format(n=len(added))
 
         # El estado tiene que reflejar lo que pasó de verdad: "completada"
         # con dos archivos que no entraron es exactamente la clase de dato
@@ -2524,10 +2535,11 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         ))
         parts = []
         if added:
-            parts.append(f"{len(added)} juego(s) nuevo(s) agregado(s)")
+            parts.append(_("{n} juego(s) nuevo(s) agregado(s)").format(n=len(added)))
         if skipped:
             if len(skipped) <= 5:
-                parts.append(f"{len(skipped)} omitido(s) por ya existir: " + ", ".join(skipped))
+                parts.append(_("{n} omitido(s) por ya existir: {names}").format(
+                    n=len(skipped), names=", ".join(skipped)))
             else:
                 parts.append(_("{n} omitido(s) por ya existir en la biblioteca")
                              .format(n=len(skipped)))
@@ -2702,9 +2714,9 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                             ok = True
                     huerfanos = guard.orphaned_backups
                     error_wit = "" if ok else result.stderr.strip()[:200]
-                detail = (f"a {dest.name}" if ok else error_wit)
-                msg = (f"Convertido a {dest.name}" if ok
-                       else f"Error al convertir: {error_wit}")
+                detail = (_("a {name}").format(name=dest.name) if ok else error_wit)
+                msg = (_("Convertido a {name}").format(name=dest.name) if ok
+                       else _("Error al convertir: {error}").format(error=error_wit))
                 # El guard ya intentó borrar el respaldo al salir del
                 # `with`. Si no pudo, la conversión igual salió bien: el
                 # aviso se suma al mensaje y va como entrada propia del
@@ -2721,8 +2733,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                 # medio escribir: no es un error, no hay nada que reportar
                 # como fallo.
                 cancelled = True
-                detail = "cancelada por el usuario"
-                msg = f"Conversión de '{game.title}' cancelada."
+                detail = _("cancelada por el usuario")
+                msg = _("Conversión de '{title}' cancelada.").format(title=game.title)
             except library_ops.RollbackFailedError as e:
                 if library_ops.replace_cut_by_disconnect(e, dest.parent):
                     # La biblioteca está en un USB que se desenchufó a mitad
@@ -2745,8 +2757,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             except Exception as e:
                 if cancel.cancelled:
                     cancelled = True
-                    detail = "cancelada por el usuario"
-                    msg = f"Conversión de '{game.title}' cancelada."
+                    detail = _("cancelada por el usuario")
+                    msg = _("Conversión de '{title}' cancelada.").format(title=game.title)
                 elif drives.device_is_gone(known_dir=dest.parent, exc=e):
                     # La biblioteca puede estar en un USB: convertir ahí y
                     # que se desconecte a mitad da un error de I/O crudo
@@ -2759,7 +2771,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
                     # Ya dice qué pasó y que el original quedó como estaba.
                     msg = detail = str(e)
                 else:
-                    ok, msg = False, f"Error al convertir: {e}"
+                    ok, msg = False, _("Error al convertir: {error}").format(error=e)
                     detail = str(e)
             finally:
                 # Liberar el archivo antes del rescan: si no, el escaneo
@@ -2811,15 +2823,16 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             # correr. Los dos quedan como error, pero con motivos
             # distintos.
             status = oplog.STATUS_ERROR
-            detail = "la verificación encontró errores en el archivo"
+            detail = _("la verificación encontró errores en el archivo")
             try:
                 ok, _output = wit_wrapper.verify(game.path, self.settings.wit_binary)
                 if ok:
                     status, detail = oplog.STATUS_OK, ""
-                msg = (f"'{game.title}' verificado OK ✓" if ok
-                       else f"'{game.title}' con errores ✗")
+                msg = (_("'{title}' verificado OK ✓") if ok
+                       else _("'{title}' con errores ✗")).format(title=game.title)
             except Exception as e:
-                msg = f"No se pudo verificar '{game.title}': {e}"
+                msg = _("No se pudo verificar '{title}': {error}").format(
+                    title=game.title, error=e)
                 detail = str(e)
             finally:
                 GLib.idle_add(self.ops.finish, op, OperationOutcome(
@@ -2899,9 +2912,8 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         error = config.try_save(settings)
         if error:
             self._show_toast(
-                f"No se pudo guardar la configuración: {error}. "
-                "Los cambios valen para esta sesión."
-            )
+                _("No se pudo guardar la configuración: {error}. Los cambios "
+                  "valen para esta sesión.").format(error=error))
         config.ensure_dirs(settings)
         styles.apply_color_scheme(settings.color_scheme)
         self._library_available = config.library_path_available(settings)

@@ -398,7 +398,8 @@ class GameControl:
         """Nombre para mostrar, aclarando si es opcional. Los obligatorios
         van sin aclaración: son el caso normal y ponerles "(obligatorio)"
         a todos convertiría la lista en ruido."""
-        return self.label if self.required else f"{self.label} (opcional)"
+        return self.label if self.required else _("{label} (opcional)").format(
+            label=self.label)
 
 
 @dataclass

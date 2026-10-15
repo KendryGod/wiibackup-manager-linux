@@ -86,6 +86,7 @@ from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
 
 from . import atomicfs, drives, formatting, library_ops, transfer_plan
+from .i18n import _
 from .oscwii_client import (HomebrewApp, UnsafeDownloadURL,
                             open_allowlisted, safe_slug, url_rejection_reason)
 
@@ -211,13 +212,13 @@ def _download_zip(app: HomebrewApp, dest_path: Path,
         # de seguirla y valida también la URL final: nada de lo que se
         # escribe acá puede venir de un host que no esté en la lista.
         with open_allowlisted(app.zip_url, REQUEST_TIMEOUT,
-                              "la URL de descarga del catálogo") as resp:
+                              _("la URL de descarga del catálogo")) as resp:
             if resp.status != 200:
-                return False, f"status HTTP {resp.status}", "", ""
+                return False, _("status HTTP {status}").format(status=resp.status), "", ""
 
             total = resp.length or app.zip_compressed_size
             if total is not None and total > MAX_DOWNLOAD_BYTES:
-                return False, "el archivo declarado supera el límite esperado", "", ""
+                return False, _("el archivo declarado supera el límite esperado"), "", ""
 
             written = 0
             with dest_path.open("wb") as f:
@@ -228,7 +229,7 @@ def _download_zip(app: HomebrewApp, dest_path: Path,
                         break
                     written += len(chunk)
                     if written > MAX_DOWNLOAD_BYTES:
-                        return False, "la descarga supera el límite esperado", "", ""
+                        return False, _("la descarga supera el límite esperado"), "", ""
                     f.write(chunk)
                     md5.update(chunk)
                     sha256.update(chunk)
@@ -257,13 +258,13 @@ def _verify_hash(app: HomebrewApp, computed_md5: str, computed_sha256: str) -> O
     no reescribir el pipeline de instalación."""
     if app.zip_sha256:
         if computed_sha256.lower() != app.zip_sha256.strip().lower():
-            return (f"el SHA-256 no coincide (esperado {app.zip_sha256}, "
-                    f"descargado {computed_sha256})")
+            return _("el SHA-256 no coincide (esperado {expected}, descargado "
+                     "{found})").format(expected=app.zip_sha256, found=computed_sha256)
         return None
     if app.zip_md5:
         if computed_md5.lower() != app.zip_md5.strip().lower():
-            return (f"el MD5 no coincide (esperado {app.zip_md5}, "
-                    f"descargado {computed_md5})")
+            return _("el MD5 no coincide (esperado {expected}, descargado "
+                     "{found})").format(expected=app.zip_md5, found=computed_md5)
         return None
     return None
 
@@ -349,13 +350,14 @@ def _check_name_collisions(infos: list) -> Optional[str]:
         if previa_es_carpeta != es_carpeta:
             archivo = ruta_previa if not previa_es_carpeta else ruta
             carpeta = ruta if not previa_es_carpeta else ruta_previa
-            return (f'"{archivo}" es un archivo y "{carpeta}" necesita ese '
-                    f"mismo nombre como carpeta")
+            return _('"{file}" es un archivo y "{folder}" necesita ese mismo '
+                     'nombre como carpeta').format(file=archivo, folder=carpeta)
         if ruta_previa != ruta:
-            return (f'"{ruta_previa}" y "{ruta}" son el mismo nombre en el '
-                    f"destino (FAT32/exFAT no distingue mayúsculas)")
+            return _('"{first}" y "{second}" son el mismo nombre en el destino '
+                     '(FAT32/exFAT no distingue mayúsculas)').format(
+                         first=ruta_previa, second=ruta)
         if not es_carpeta:
-            return f'"{ruta}" aparece dos veces en el ZIP'
+            return _('"{path}" aparece dos veces en el ZIP').format(path=ruta)
         return None
 
     for info in infos:
@@ -387,7 +389,8 @@ def _validate_zip(zip_path: Path, dest_root: Path) -> tuple:
     try:
         zf = zipfile.ZipFile(zip_path)
     except (zipfile.BadZipFile, OSError) as e:
-        return None, InstallStatus.BAD_ZIP, f"el archivo descargado no es un ZIP válido ({e})"
+        return None, InstallStatus.BAD_ZIP, _(
+            "el archivo descargado no es un ZIP válido ({error})").format(error=e)
 
     # Un solo punto de salida para el error: así, pase lo que pase adentro
     # del try, `zf` se cierra siempre que NO se vaya a devolver abierto (y
@@ -398,14 +401,15 @@ def _validate_zip(zip_path: Path, dest_root: Path) -> tuple:
         bad_member = zf.testzip()
         if bad_member is not None:
             status = InstallStatus.BAD_ZIP
-            error = f"el ZIP está corrupto o truncado (falló {bad_member})"
+            error = _("el ZIP está corrupto o truncado (falló {member})").format(
+                member=bad_member)
         else:
             total_uncompressed = 0
             for info in zf.infolist():
                 total_uncompressed += info.file_size
                 if total_uncompressed > MAX_UNCOMPRESSED_TOTAL_BYTES:
                     status = InstallStatus.BAD_ZIP
-                    error = "el contenido descomprimido supera el límite esperado"
+                    error = _("el contenido descomprimido supera el límite esperado")
                     break
 
                 if info.is_dir():
@@ -421,14 +425,16 @@ def _validate_zip(zip_path: Path, dest_root: Path) -> tuple:
                 mode = info.external_attr >> 16
                 if mode and stat.S_ISLNK(mode):
                     status = InstallStatus.UNSAFE_ZIP
-                    error = f"el ZIP contiene un symlink ({info.filename}), rechazado"
+                    error = _("el ZIP contiene un symlink ({name}), rechazado").format(
+                        name=info.filename)
                     break
 
                 if not _is_safe_member(info.filename, dest_root):
                     status = InstallStatus.UNSAFE_ZIP
-                    error = (f"entrada fuera de las carpetas permitidas "
-                            f"({', '.join(_ALLOWED_TOP_LEVEL_DIRS)}) en el "
-                            f"ZIP ({info.filename}), rechazado")
+                    error = _("entrada fuera de las carpetas permitidas "
+                              "({allowed}) en el ZIP ({name}), rechazado").format(
+                                  allowed=", ".join(_ALLOWED_TOP_LEVEL_DIRS),
+                                  name=info.filename)
                     break
 
             # Recién con todas las entradas validadas de a una tiene
@@ -440,11 +446,11 @@ def _validate_zip(zip_path: Path, dest_root: Path) -> tuple:
                 motivo = _check_name_collisions(zf.infolist())
                 if motivo is not None:
                     status = InstallStatus.UNSAFE_ZIP
-                    error = (f"el ZIP tiene entradas que colisionan en el "
-                            f"destino: {motivo}; rechazado")
+                    error = _("el ZIP tiene entradas que colisionan en el "
+                              "destino: {reason}; rechazado").format(reason=motivo)
     except (zipfile.BadZipFile, OSError, EOFError) as e:
         status = InstallStatus.BAD_ZIP
-        error = f"el ZIP está corrupto o truncado ({e})"
+        error = _("el ZIP está corrupto o truncado ({error})").format(error=e)
 
     if status is not None:
         zf.close()
@@ -614,8 +620,8 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
         if drives.is_critical_system_path(dest_root):
             return InstallResult(
                 InstallStatus.UNSAFE_DEST_ROOT, app.slug,
-                f"{dest_root} es una ruta crítica del sistema operativo, "
-                "se rechaza como destino de instalación")
+                _("{path} es una ruta crítica del sistema operativo, se rechaza "
+                  "como destino de instalación").format(path=dest_root))
 
         # Antes de crear nada en el destino: si la URL que trae el
         # catálogo no está en la lista blanca, esta instalación no va a
@@ -627,8 +633,8 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
         if url_err is not None:
             return InstallResult(
                 InstallStatus.UNSAFE_URL, app.slug,
-                f"la URL de descarga de la app fue rechazada: {url_err} "
-                f"({app.zip_url})")
+                _("la URL de descarga de la app fue rechazada: {reason} "
+                  "({url})").format(reason=url_err, url=app.zip_url))
 
         try:
             (dest_root / "apps").mkdir(parents=True, exist_ok=True)
@@ -664,8 +670,9 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
                 if free is not None and needed > free:
                     return InstallResult(
                         InstallStatus.NO_SPACE, app.slug,
-                        f"necesita {formatting.format_size(needed)} y quedan "
-                        f"{formatting.format_size(free)} en el destino")
+                        _("necesita {need} y quedan {free} en el destino").format(
+                            need=formatting.format_size(needed),
+                            free=formatting.format_size(free)))
 
                 unidades, sueltos = _group_members(members)
                 total = len(members)
@@ -687,7 +694,7 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
 
     except CancelRequested:
         return InstallResult(InstallStatus.CANCELLED, app.slug,
-                             "instalación cancelada")
+                             _("instalación cancelada"))
     except UnsafeDownloadURL as e:
         # Sale de `_download_zip` (o de una redirección rechazada a mitad
         # de la descarga): la app no se instaló y nada del destino se

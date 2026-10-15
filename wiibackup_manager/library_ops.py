@@ -112,8 +112,8 @@ class MultiGameContainerError(RuntimeError):
     def __init__(self, path: Path, contenido: list["wit_wrapper.DiscInfo"]):
         ids = ", ".join(juego.game_id for juego in contenido)
         super().__init__(
-            f"{path} es un WBFS multi-juego ({ids}); no se puede copiar "
-            "directo a un destino de un solo juego.")
+            _("{path} es un WBFS multi-juego ({ids}); no se puede copiar "
+              "directo a un destino de un solo juego.").format(path=path, ids=ids))
         self.path = path
         self.contenido = contenido
 
@@ -143,11 +143,12 @@ class RollbackFailedError(RuntimeError):
         self.pending = list(pending)
         self.original_error = original_error
         detalle = "; ".join(
-            f"{original} (respaldo en {respaldo})"
+            _("{original} (respaldo en {backup})").format(original=original,
+                                                         backup=respaldo)
             for original, respaldo in self.pending)
         super().__init__(
-            "No se pudo restaurar el archivo original después de un "
-            f"error: {detalle}")
+            _("No se pudo restaurar el archivo original después de un "
+              "error: {detail}").format(detail=detalle))
 
     def user_message(self) -> str:
         """El mensaje para mostrarle al usuario -no `str(self)` a secas:

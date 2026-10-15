@@ -232,21 +232,24 @@ def _asset_is_valid(spec: GoldenConfigSpec, asset_path: Path) -> tuple:
     try:
         size = asset_path.stat().st_size
     except OSError as e:
-        return False, f"no se pudo leer el archivo maestro ({e})"
+        return False, _("no se pudo leer el archivo maestro ({error})").format(error=e)
 
     if size < spec.min_size_bytes:
-        return False, (f"el archivo maestro mide {size} bytes; se esperaban "
-                       f"al menos {spec.min_size_bytes}")
+        return False, _("el archivo maestro mide {size} bytes; se esperaban al "
+                        "menos {minimum}").format(size=size,
+                                                   minimum=spec.min_size_bytes)
 
     if spec.magic is not None:
         try:
             with asset_path.open("rb") as f:
                 header = f.read(len(spec.magic))
         except OSError as e:
-            return False, f"no se pudo leer el archivo maestro ({e})"
+            return False, _("no se pudo leer el archivo maestro ({error})").format(
+                error=e)
         if header != spec.magic:
-            return False, (f"el archivo maestro no tiene la firma esperada "
-                           f"({header.hex()} != {spec.magic.hex()})")
+            return False, _("el archivo maestro no tiene la firma esperada "
+                            "({found} != {expected})").format(
+                                found=header.hex(), expected=spec.magic.hex())
 
     return True, ""
 
@@ -302,7 +305,7 @@ def maybe_apply(app: HomebrewApp, dest_root: Path,
     if not install_result.ok:
         return GoldenConfigResult(
             GoldenConfigStatus.SKIPPED_INSTALL_FAILED, app.slug, spec.label,
-            error="la instalación de la app no terminó bien; no se tocó nada")
+            error=_("la instalación de la app no terminó bien; no se tocó nada"))
 
     dest_path = Path(dest_root) / spec.dest_relative
     if os.path.lexists(dest_path):
@@ -320,7 +323,8 @@ def maybe_apply(app: HomebrewApp, dest_root: Path,
     if asset_path is None:
         result = GoldenConfigResult(
             GoldenConfigStatus.ASSET_MISSING, app.slug, spec.label,
-            error=f"no se encontró el archivo maestro ({spec.asset_relative})")
+            error=_("no se encontró el archivo maestro ({path})").format(
+                path=spec.asset_relative))
         _log(op_log, result)
         return result
 
@@ -328,7 +332,8 @@ def maybe_apply(app: HomebrewApp, dest_root: Path,
     if not ok:
         result = GoldenConfigResult(
             GoldenConfigStatus.ASSET_CORRUPT, app.slug, spec.label,
-            error=f"archivo maestro inválido, no se copió nada: {reason}")
+            error=_("archivo maestro inválido, no se copió nada: {reason}").format(
+                reason=reason))
         _log(op_log, result)
         return result
 
@@ -346,6 +351,10 @@ def maybe_apply(app: HomebrewApp, dest_root: Path,
     _log(op_log, result)
     return result
 
+
+# Nombre de la entrada del historial cuando se aplica la configuración
+# maestra (o falla al aplicarse).
+APPLIED_OPERATION = N_("Configuración maestra aplicada")
 
 # Nombre de la nota que queda en el historial cuando la configuración
 # maestra NO se aplica porque ya había una (sin traducir: la traducción se
@@ -366,4 +375,4 @@ def _log(op_log: Optional[oplog.OperationLog], result: GoldenConfigResult) -> No
     # Nombre de operación sin traducir (mismo criterio que
     # `OperationKind.value`, ver operations.py): la traducción se aplica
     # al mostrarlo, no al guardarlo.
-    op_log.record("Configuración maestra aplicada", result.label, status, detail)
+    op_log.record(APPLIED_OPERATION, result.label, status, detail)

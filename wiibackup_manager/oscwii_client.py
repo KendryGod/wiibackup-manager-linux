@@ -72,6 +72,7 @@ from typing import Callable, Optional
 from . import config
 from .atomicfs import atomic_write_target
 from .fsutil import PNG_MAGIC
+from .i18n import _
 from .inflight import InflightRegistry
 
 OSC_API_BASE = "https://hbb1.oscwii.org"
@@ -119,34 +120,37 @@ def url_rejection_reason(url: str) -> Optional[str]:
         host = parts.hostname
         username = parts.username
     except ValueError as e:
-        return f"la URL no se pudo interpretar ({e})"
+        return _("la URL no se pudo interpretar ({error})").format(error=e)
 
     scheme = parts.scheme.lower()
     if scheme not in ALLOWED_URL_SCHEMES:
-        return (f"esquema {scheme or '(ninguno)'} no permitido; solo "
-                f"{', '.join(sorted(ALLOWED_URL_SCHEMES))}")
+        return _("esquema {scheme} no permitido; solo {allowed}").format(
+            scheme=scheme or _("(ninguno)"),
+            allowed=", ".join(sorted(ALLOWED_URL_SCHEMES)))
     if username is not None:
-        return "la URL trae credenciales embebidas"
+        return _("la URL trae credenciales embebidas")
     if not host:
-        return "la URL no tiene host"
+        return _("la URL no tiene host")
 
     # Un punto final ("hbb1.oscwii.org.") resuelve al mismo lugar en DNS
     # pero no coincidiría con el literal de la lista: se normaliza para no
     # rechazar por eso a un host que sí está permitido.
     host = host.lower().rstrip(".")
     if host not in ALLOWED_DOWNLOAD_HOSTS:
-        return (f"host {host} no permitido; solo "
-                f"{', '.join(sorted(ALLOWED_DOWNLOAD_HOSTS))}")
+        return _("host {host} no permitido; solo {allowed}").format(
+            host=host, allowed=", ".join(sorted(ALLOWED_DOWNLOAD_HOSTS)))
     return None
 
 
 def ensure_url_allowed(url: str, que_es: str) -> None:
     """Igual que `url_rejection_reason`, pero levantando
     `UnsafeDownloadURL` para los lugares donde no hay un valor de retorno
-    que revisar (el handler de redirecciones, adentro de urllib)."""
+    que revisar (el handler de redirecciones, adentro de urllib). `que_es`
+    nombra la URL en el mensaje ("la URL del ícono"), ya traducido."""
     motivo = url_rejection_reason(url)
     if motivo is not None:
-        raise UnsafeDownloadURL(f"{que_es} fue rechazada: {motivo} ({url})")
+        raise UnsafeDownloadURL(_("{what} fue rechazada: {reason} ({url})").format(
+            what=que_es, reason=motivo, url=url))
 
 
 class AllowlistRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -168,12 +172,12 @@ class AllowlistRedirectHandler(urllib.request.HTTPRedirectHandler):
             # el socket de la respuesta colgando.
             fp.close()
             raise UnsafeDownloadURL(
-                f"la descarga fue redirigida a una URL rechazada: "
-                f"{motivo} ({newurl})")
+                _("la descarga fue redirigida a una URL rechazada: {reason} "
+                  "({url})").format(reason=motivo, url=newurl))
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def open_allowlisted(url: str, timeout: float, que_es: str = "la URL"):
+def open_allowlisted(url: str, timeout: float, que_es: Optional[str] = None):
     """Único camino por el que esta app abre una descarga cuya URL vino
     del catálogo (íconos acá, ZIPs en `oscwii_installer`): valida la URL
     ANTES de abrir el socket, valida cada redirección antes de seguirla, y
@@ -181,7 +185,7 @@ def open_allowlisted(url: str, timeout: float, que_es: str = "la URL"):
     camino que no pase por el handler. Devuelve la respuesta abierta (para
     usar con `with`); levanta `UnsafeDownloadURL` si algo de eso no pasa,
     y lo que levante urllib para los errores de red normales."""
-    ensure_url_allowed(url, que_es)
+    ensure_url_allowed(url, que_es or _("la URL"))
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     # Opener propio en vez de `urlopen`: el `urlopen` global usa el
     # `HTTPRedirectHandler` de urllib, que sigue cualquier salto sin
@@ -189,7 +193,7 @@ def open_allowlisted(url: str, timeout: float, que_es: str = "la URL"):
     opener = urllib.request.build_opener(AllowlistRedirectHandler)
     resp = opener.open(req, timeout=timeout)
     try:
-        ensure_url_allowed(resp.geturl(), "la URL final de la descarga")
+        ensure_url_allowed(resp.geturl(), _("la URL final de la descarga"))
     except BaseException:
         resp.close()
         raise
@@ -341,10 +345,10 @@ def _parse_apps(raw: bytes) -> tuple:
     try:
         parsed = json.loads(raw)
     except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as e:
-        return None, f"JSON inválido ({e})"
+        return None, _("JSON inválido ({error})").format(error=e)
 
     if not isinstance(parsed, list):
-        return None, "la respuesta no es una lista JSON"
+        return None, _("la respuesta no es una lista JSON")
 
     if not parsed:
         return (), None
@@ -352,7 +356,7 @@ def _parse_apps(raw: bytes) -> tuple:
     apps = tuple(app for item in parsed
                  if (app := HomebrewApp.from_api_dict(item)) is not None)
     if not apps:
-        return None, "ningún elemento de la respuesta tiene el formato esperado"
+        return None, _("ningún elemento de la respuesta tiene el formato esperado")
     return apps, None
 
 
@@ -365,7 +369,7 @@ def _fetch_remote() -> tuple:
             OSC_CONTENTS_URL, headers={"User-Agent": USER_AGENT})
         with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
             if resp.status != 200:
-                return None, f"status HTTP {resp.status}"
+                return None, _("status HTTP {status}").format(status=resp.status)
             raw = resp.read()
     except urllib.error.HTTPError as e:
         return None, f"HTTP {e.code}"
@@ -380,7 +384,7 @@ def _load_cache() -> tuple:
     (None, motivo) si no hay caché o está corrupto."""
     path = contents_cache_path()
     if not path.exists():
-        return None, "no hay ninguna lista guardada de una sesión anterior"
+        return None, _("no hay ninguna lista guardada de una sesión anterior")
     try:
         raw = path.read_bytes()
     except OSError as e:
@@ -436,7 +440,7 @@ def list_apps() -> AppListResult:
         return AppListResult(status=FetchStatus.STALE_CACHE, apps=cached, error=err)
 
     return AppListResult(status=FetchStatus.ERROR, apps=(),
-                         error=err or cache_err or "motivo desconocido")
+                         error=err or cache_err or _("motivo desconocido"))
 
 
 # --- Versión en segundo plano, para no bloquear la UI ---
@@ -544,7 +548,7 @@ def get_icon_path(app: HomebrewApp, force: bool = False) -> Optional[Path]:
     icons_cache_dir().mkdir(parents=True, exist_ok=True)
     try:
         with open_allowlisted(app.icon_url, REQUEST_TIMEOUT,
-                              "la URL del ícono") as resp:
+                              _("la URL del ícono")) as resp:
             if resp.status != 200:
                 return None
             data = resp.read()
