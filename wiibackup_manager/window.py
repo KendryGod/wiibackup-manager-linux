@@ -2402,11 +2402,14 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         un solo archivo, y con un nombre alternativo si es un lote.
         `overwrite=True` es la respuesta afirmativa de esa pregunta."""
         dest_dir = Path(self.settings.library_path)
-        try:
-            dest_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            self._show_toast(_("No se pudo escribir en la carpeta de biblioteca: {error}")
-                             .format(error=e))
+        # Sin crearla si no está (salvo la de por defecto): con la unidad de
+        # la biblioteca sin montar, los juegos terminaban en el disco
+        # interno, debajo del punto de montaje (ver
+        # `config.ensure_library_dir`).
+        if not config.ensure_library_dir(self.settings):
+            self._show_toast(_("La carpeta de la biblioteca no está disponible: "
+                               "{path}. Si está en una unidad, conectala.")
+                             .format(path=dest_dir))
             return
 
         known_ids = {g.game_id for g in self._games if g.game_id != UNKNOWN_GAME_ID}

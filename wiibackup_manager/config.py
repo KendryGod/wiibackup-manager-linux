@@ -69,6 +69,10 @@ def write_text_atomic(path: Path, payload: str, encoding: str = "utf-8") -> None
         raise
 
 
+# La carpeta de la biblioteca del primer arranque: la única que la app crea
+# sola (ver `ensure_library_dir`).
+DEFAULT_LIBRARY_PATH = str(Path.home() / "WiiGames")
+
 TICKET_THEME_DARK = "dark"
 TICKET_THEME_LIGHT = "light"
 TICKET_THEMES = (TICKET_THEME_DARK, TICKET_THEME_LIGHT)
@@ -97,7 +101,7 @@ def parse_hex_color(value: str) -> Optional[tuple]:
 
 @dataclass
 class Settings:
-    library_path: str = str(Path.home() / "WiiGames")
+    library_path: str = DEFAULT_LIBRARY_PATH
     wbfs_drive_path: str = ""
     cover_region: str = "EN"
     wit_binary: str = "wit"
@@ -313,18 +317,31 @@ def clean_presets(raw) -> list:
     return presets
 
 
-def ensure_dirs(settings: Settings) -> None:
+def ensure_library_dir(settings: Settings) -> bool:
+    """Deja lista la carpeta de la biblioteca y dice si se puede usar.
+
+    Solo se crea sola la carpeta POR DEFECTO (`DEFAULT_LIBRARY_PATH`, la
+    del primer arranque). Una que eligió el usuario y no está es casi
+    siempre una unidad sin montar: un USB (`/run/media/...`, donde además
+    no hay permiso para crear nada), o un disco en fstab con su punto de
+    montaje en una carpeta propia, como `~/Externo`. Crearla ahí dejaba la
+    biblioteca en el disco interno, debajo del punto de montaje: no
+    aparecía el aviso de "unidad no disponible", y lo que se agregara
+    quedaba escondido cuando se montaba el disco."""
+    biblioteca = Path(settings.library_path)
+    if biblioteca.is_dir():
+        return True
+    if biblioteca != Path(DEFAULT_LIBRARY_PATH):
+        return False
     try:
-        Path(settings.library_path).mkdir(parents=True, exist_ok=True)
+        biblioteca.mkdir(parents=True, exist_ok=True)
     except OSError:
-        # library_path puede apuntar a un punto de montaje externo que no
-        # está conectado en este momento (ej. /run/media/usuario/DISCO/...).
-        # En ese caso mkdir(parents=True) fallaría al intentar crear
-        # directorios padre donde el usuario no tiene permiso de escritura
-        # (/run/media/usuario). No hay nada que crear ahí: la app debe
-        # abrir igual con la biblioteca vacía y esperar a que el usuario
-        # conecte la unidad.
-        pass
+        return False
+    return True
+
+
+def ensure_dirs(settings: Settings) -> None:
+    ensure_library_dir(settings)
     COVERS_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
