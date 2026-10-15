@@ -178,6 +178,18 @@ def _log_cover_fetch_failed(game_id: str, console: str,
           f"(consola={console}): {detail}", file=sys.stderr)
 
 
+def cached_cover(game_id: str, region: str = "EN",
+                 console: str = DEFAULT_CONSOLE) -> Optional[Path]:
+    """La carátula que ya está en la caché para ese juego, región y
+    consola, o None si no está, está cortada o el ID no es un ID6. No
+    baja nada: es para quien solo quiere usar lo que hay (copiarlas a la
+    unidad para USB Loader GX, ver usbloader_covers.py)."""
+    if not is_valid_game_id(game_id):
+        return None
+    path = cover_cache_path(game_id, region, console)
+    return path if _is_valid_cached_cover(path) else None
+
+
 def get_cover_path(game_id: str, region: str = "EN", force: bool = False,
                    console: str = DEFAULT_CONSOLE) -> Optional[Path]:
     """Devuelve la ruta local de la carátula, descargándola si hace falta.

@@ -82,6 +82,7 @@ class OperationKind(Enum):
     INSTALLING_HOMEBREW = N_("Instalando homebrew")
     CHECKING_MEMORY = N_("Verificando la memoria")
     FORMATTING = N_("Formateando la unidad")
+    COPYING_COVERS = N_("Copiando carátulas")
 
     @property
     def label(self) -> str:
@@ -172,7 +173,9 @@ READ_ONLY_KINDS = frozenset(
 # atómico: pasó o no pasó), `DELETING` (mover a la papelera también), e
 # `IMPORTING`, que escribe en un temporal oculto y recién al final lo
 # mueve al destino -si se corta, el original del usuario sigue intacto y
-# el resto lo encuentra el Recovery Manager.
+# el resto lo encuentra el Recovery Manager-. `COPYING_COVERS` es igual:
+# cada carátula va a un temporal oculto y entra con un rename, y lo peor
+# que deja es ese temporal, que USB Loader GX no mira.
 INTERRUPT_UNSAFE_KINDS = frozenset(
     {OperationKind.CHECKING_MEMORY, OperationKind.FORMATTING,
      OperationKind.TRANSFERRING, OperationKind.CONVERTING,

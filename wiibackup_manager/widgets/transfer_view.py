@@ -13,8 +13,10 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, Gtk, GLib  # noqa: E402
 
-from .. import config, drives, formatting, gametdb, packs, transfer_plan
+from .. import (config, drives, formatting, gametdb, oplog, packs, transfer_plan,
+                usbloader_covers)
 from ..game_model import Game
+from ..operations import OperationBusy, OperationKind, OperationOutcome
 from ..queue_manager import (JobStatus, TransferJob, TransferQueue,
                              format_phase_times)
 from ..i18n import _, ngettext
@@ -305,6 +307,9 @@ class TransferView(Gtk.Box):
         # Mientras "Seleccionar todos" tilda casilla por casilla: una sola
         # cuenta al final y no una por juego.
         self._bulk_toggle = False
+        # La copia de carátulas para USB Loader GX en curso: su bandera de
+        # corte (la prende `shutdown`), o None si no hay ninguna.
+        self._covers_cancel: threading.Event | None = None
 
         self._build_ui()
         GLib.timeout_add_seconds(3, self._poll_drives)
@@ -391,11 +396,24 @@ class TransferView(Gtk.Box):
             self.dest_space_bar.remove_offset_value(offset)
         self.dest_space_bar.set_visible(False)
 
+        # Carátulas para USB Loader GX (ver usbloader_covers.py): al lado
+        # del espacio libre y no en la fila de botones de arriba, que ya
+        # ocupa el ancho de la ventana. Se apaga si la unidad no tiene USB
+        # Loader GX.
+        self.covers_button = Gtk.Button(label=_("Copiar carátulas a la unidad"),
+                                        valign=Gtk.Align.CENTER, sensitive=False)
+        self.covers_button.connect("clicked", self._on_covers_clicked)
+        self.dest_space_label.set_hexpand(True)
+        self.dest_space_label.set_wrap(True)
+        espacio = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        espacio.append(self.dest_space_label)
+        espacio.append(self.covers_button)
+
         dest_space_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         dest_space_box.set_margin_start(12)
         dest_space_box.set_margin_end(12)
         dest_space_box.set_margin_bottom(8)
-        dest_space_box.append(self.dest_space_label)
+        dest_space_box.append(espacio)
         dest_space_box.append(self.dest_space_bar)
 
         self.append(dest_group)
@@ -823,6 +841,7 @@ class TransferView(Gtk.Box):
         selección tuviera que acordarse de llamar a los dos."""
         self._update_eject_button()
         self._update_ticket_button()
+        self._update_covers_button()
 
     def _update_ticket_button(self):
         """El ticket se habilita con cualquier destino elegido que exista,
@@ -960,6 +979,123 @@ class TransferView(Gtk.Box):
             mensaje += " " + _("Salió sin los datos del taller: cargalos en "
                                "Ajustes → General → Mi taller.")
         self._show_toast(mensaje)
+
+    # ---------------------------------------------- Carátulas USB Loader GX --
+    def _update_covers_button(self):
+        """Prendido solo con un destino que tenga USB Loader GX
+        (`apps/usbloader_gx/`) y sin otra copia de carátulas en curso. Es
+        un `stat` de una carpeta, como el del ticket: alcanza para el hilo
+        de GTK. Lo demás -GXGlobal.cfg, los juegos- se mira al copiar."""
+        dest = self._dest_path
+        tiene_loader = dest is not None and os.path.isdir(dest / usbloader_covers.APP_DIR)
+        copiando = self._covers_cancel is not None
+        self.covers_button.set_sensitive(tiene_loader and not copiando)
+        if copiando:
+            texto = _("Copiando carátulas…")
+        elif dest is None:
+            texto = _("Elegí primero un destino.")
+        elif not tiene_loader:
+            texto = _("Esta unidad no tiene USB Loader GX (falta la carpeta "
+                      "apps/usbloader_gx). Instalalo desde la Homebrew Store y "
+                      "después copiale las carátulas.")
+        else:
+            texto = _("Copia a apps/usbloader_gx/images/2D las carátulas que la "
+                      "app ya bajó, para los juegos que hay en la unidad. No pisa "
+                      "las que ya estén.")
+        self.covers_button.set_tooltip_text(texto)
+
+    def _on_covers_clicked(self, *_args):
+        dest = self._dest_path
+        if dest is None or self._covers_cancel is not None:
+            return
+        # Ni compartir la unidad con la cola: que una carátula no le quite
+        # ni un segundo -ni un error- a la copia de un juego.
+        if self.queue.is_writing_to(dest):
+            self._show_toast(_("Esperá a que la cola termine con esta unidad para "
+                               "copiar las carátulas."))
+            return
+        # Declarada como operación: mientras dure no se puede expulsar ni
+        # formatear la unidad, y la cola espera su turno.
+        try:
+            op = self.ops.start(OperationKind.COPYING_COVERS,
+                                write=[dest / usbloader_covers.COVERS_2D_DIR],
+                                resources=drives.resources_for_mount_point(dest))
+        except OperationBusy as e:
+            self._show_toast(_("No se puede ahora: {detail}.").format(detail=e.detail))
+            return
+        region = self.settings.cover_region
+        cancelar = self._covers_cancel = threading.Event()
+        self._update_dest_buttons()
+
+        def worker():
+            resultado, error = None, None
+            try:
+                resultado = usbloader_covers.copy_drive_covers(
+                    dest, region, should_stop=cancelar.is_set)
+            except Exception as e:  # noqa: BLE001 - se le muestra al usuario
+                error = (e.strerror if isinstance(e, OSError) else None) or str(e)
+            finally:
+                self.ops.finish(op, self._covers_outcome(dest, resultado, error))
+            GLib.idle_add(self._on_covers_done, resultado, error)
+
+        threading.Thread(target=worker, daemon=True, name="usbloader-covers").start()
+
+    @staticmethod
+    def _covers_outcome(dest: Path, resultado, error):
+        """La entrada del historial: solo si se intentó escribir algo."""
+        if error is not None:
+            return OperationOutcome(oplog.STATUS_ERROR, dest.name or str(dest), error)
+        if resultado is None or not (resultado.copied or resultado.failed):
+            return None
+        detalle = TransferView._covers_message(resultado, None)
+        estado = oplog.STATUS_ERROR if resultado.failed else oplog.STATUS_OK
+        return OperationOutcome(estado, dest.name or str(dest), detalle)
+
+    def _on_covers_done(self, resultado, error):
+        self._covers_cancel = None
+        if not gtk_helpers.widget_is_alive(self):
+            return False
+        self._update_dest_buttons()
+        if resultado is not None and resultado.copied:
+            self._update_dest_space_label()
+        self._show_toast(self._covers_message(resultado, error))
+        return False
+
+    @staticmethod
+    def _covers_message(resultado, error) -> str:
+        if error is not None:
+            return _("No se pudieron copiar las carátulas: {error}").format(error=error)
+        destino = resultado.target
+        if destino.problem == usbloader_covers.NO_LOADER:
+            return _("Esta unidad no tiene USB Loader GX (falta la carpeta "
+                     "apps/usbloader_gx): no se copió nada.")
+        if destino.problem == usbloader_covers.OTHER_PATH:
+            return _("USB Loader GX en esta unidad lee las carátulas 2D de {path}: "
+                     "no se copió nada.").format(path=destino.configured)
+        partes = []
+        if resultado.copied:
+            n = len(resultado.copied)
+            partes.append(ngettext("{n} copiada", "{n} copiadas", n).format(n=n))
+        if resultado.existing:
+            n = len(resultado.existing)
+            partes.append(ngettext("{n} ya estaba", "{n} ya estaban", n).format(n=n))
+        if resultado.missing:
+            n = len(resultado.missing)
+            partes.append(ngettext("{n} juego sin carátula guardada en este equipo",
+                                   "{n} juegos sin carátula guardada en este equipo",
+                                   n).format(n=n))
+        if resultado.failed:
+            n = len(resultado.failed)
+            partes.append(ngettext("{n} no se pudo copiar", "{n} no se pudieron copiar",
+                                   n).format(n=n))
+        if not partes and not resultado.stopped:
+            return _("No hay juegos en la unidad para copiarles la carátula.")
+        mensaje = _("Carátulas para USB Loader GX: {detail}.").format(
+            detail=", ".join(partes)) if partes else ""
+        if resultado.stopped:
+            mensaje = (mensaje + " " if mensaje else "") + _(
+                "Se cortó antes de terminar: revisá que la unidad siga conectada.")
+        return mensaje
 
     def _update_eject_button(self):
         if self._dest_path is not None and drives.is_mount_point(self._dest_path):
@@ -1649,3 +1785,5 @@ class TransferView(Gtk.Box):
         esto el proceso igual terminaría, pero dejando un `wit` a medio
         escribir sobre una unidad que el usuario está por desenchufar."""
         self.queue.shutdown()
+        if self._covers_cancel is not None:
+            self._covers_cancel.set()

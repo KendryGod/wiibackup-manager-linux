@@ -442,6 +442,31 @@ resuelve.
 tiene permisos de lectura, la app la saltea y te avisa cuáles fueron;
 fijate en la pestaña Log.
 
+## Límites conocidos
+
+**Carátulas para USB Loader GX: no se probó en una Wii real.** El botón
+"Copiar carátulas a la unidad" (pestaña Transferir) copia las carátulas
+que la app ya bajó de GameTDB a `apps/usbloader_gx/images/2D/<ID6>.png`,
+que es donde USB Loader GX las busca por defecto cuando arranca desde esa
+unidad. Eso sale de leer su código fuente
+([wiidev/usbloadergx](https://github.com/wiidev/usbloadergx), release
+v4.0-r1283: `source/settings/CSettings.cpp`,
+`source/StartUpProcess.cpp` y `source/GUI/LoadCoverImage.cpp`), no de
+probarlo en la consola. Lo que hay que saber:
+
+- Se activa solo si la unidad tiene USB Loader GX (`apps/usbloader_gx/`).
+  Si su `GXGlobal.cfg` manda las carátulas 2D a otra carpeta (por ejemplo
+  a la SD), no copia nada y avisa adónde apunta.
+- Si el cliente lanza USB Loader GX desde una SD que también lo tiene, lo
+  lee todo de la SD y las carátulas de la unidad no se usan. Eso no se ve
+  desde la PC.
+- Copia solo las que ya están en la caché de este equipo (las que se ven
+  en Juegos, en la región elegida en Preferencias); no baja nada ni pisa
+  ninguna que ya esté en la unidad.
+- Reinstalar o actualizar USB Loader GX desde la Homebrew Store reemplaza
+  su carpeta entera, con las carátulas adentro: después hay que volver a
+  copiarlas.
+
 ## Reportar un error o pedir una función
 
 Los reportes van a
