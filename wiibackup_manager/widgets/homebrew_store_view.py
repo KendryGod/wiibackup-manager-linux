@@ -27,7 +27,7 @@ from .. import (drives, formatting, golden_configs, oplog, oscwii_client,
 from ..i18n import _
 from ..oscwii_client import HomebrewApp
 from ..oscwii_installer import InstallStatus
-from ..operations import OperationBusy, OperationKind
+from ..operations import OperationBusy, OperationKind, OperationOutcome
 from . import gtk_helpers
 
 ICON_WIDTH = 160
@@ -100,6 +100,22 @@ _INSTALL_STATUS_LABELS = {
     InstallStatus.DEVICE_DISCONNECTED: _("Se desconectó la unidad"),
     InstallStatus.ROLLBACK_FAILED: _("Error grave: no se pudo restaurar la versión anterior"),
 }
+
+
+def _install_outcome(app: HomebrewApp, result) -> OperationOutcome:
+    """Lo que queda en el historial de una instalación. Sin esto
+    `ops.finish` no anotaba nada y la instalación no dejaba rastro."""
+    if result.ok:
+        return OperationOutcome(
+            oplog.STATUS_OK, app.name,
+            _("{n} archivo(s)").format(n=len(result.installed_paths)))
+    if result.status is InstallStatus.CANCELLED:
+        return OperationOutcome(oplog.STATUS_CANCELLED, app.name)
+    if result.status is InstallStatus.DEVICE_DISCONNECTED:
+        return OperationOutcome(oplog.STATUS_DISCONNECTED, app.name, result.error)
+    return OperationOutcome(
+        oplog.STATUS_ERROR, app.name,
+        result.error or _INSTALL_STATUS_LABELS.get(result.status, ""))
 
 
 class HomebrewAppCard(Gtk.Box):
@@ -583,7 +599,7 @@ class HomebrewStoreView(Gtk.Box):
         return False
 
     def _on_install_done(self, app: HomebrewApp, result, op, golden_result=None) -> bool:
-        self.ops.finish(op)
+        self.ops.finish(op, _install_outcome(app, result))
 
         if result.ok:
             state = _InstallState(kind=_CardState.DONE, fraction=1.0,

@@ -666,14 +666,23 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self._factory_pulse_id = GLib.timeout_add(150, self._pulse_factory_progress)
 
         def worker():
+            # El resultado va al historial, igual que el formateo de
+            # "Verificar Memoria": sin `OperationOutcome`, `ops.finish` no
+            # anota nada.
+            resultado = OperationOutcome(oplog.STATUS_ERROR, str(device.path))
             try:
                 punto_montaje = drives.format_as_wii_usb(device)
             except Exception as e:  # noqa: BLE001
+                resultado = OperationOutcome(oplog.STATUS_ERROR, str(device.path),
+                                             str(e))
                 GLib.idle_add(self._on_factory_format_done, False, str(e))
             else:
+                resultado = OperationOutcome(
+                    oplog.STATUS_OK, str(device.path),
+                    _("FAT32 en {path}").format(path=punto_montaje))
                 GLib.idle_add(self._on_factory_format_done, True, str(punto_montaje))
             finally:
-                self.ops.finish(op)
+                self.ops.finish(op, resultado)
 
         threading.Thread(target=worker, daemon=True, name="factory-format").start()
 
