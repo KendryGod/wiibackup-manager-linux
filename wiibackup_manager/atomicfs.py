@@ -4,12 +4,13 @@ Tres partes de la app resuelven el mismo problema -"reemplazar X sin que
 exista un instante en el que X esté a medio escribir, y sin perder lo que
 había si algo falla"- sobre cosas distintas:
 
-- `gametdb`, `oscwii_client`, `golden_configs` y el extractor de ZIP de
-  `oscwii_installer` reemplazan UN ARCHIVO chico que se escribe de una.
+- `gametdb`, `oscwii_client` y `golden_configs` reemplazan UN ARCHIVO
+  chico que se escribe de una.
 - `fileops._copy_with_progress` reemplaza UN ARCHIVO grande que se copia
   de a bloques, con progreso, cancelación y `fsync`.
-- `oscwii_installer` reemplaza UNA CARPETA entera (la app de Homebrew),
-  y `library_ops.DestinationGuard` aparta UN GRUPO de archivos (las partes de
+- `oscwii_installer` reemplaza VARIAS RUTAS juntas -las carpetas y los
+  archivos sueltos de una app de Homebrew- (`StagedSwap`), y
+  `library_ops.DestinationGuard` aparta UN GRUPO de archivos (las partes de
   un WBFS dividido) mientras `wit` escribe encima.
 
 Los tres terminaban reimplementando el mismo mecanismo: armar un nombre
@@ -171,14 +172,14 @@ def atomic_write_target(dest: Path, *, mkparents: bool = False) -> Iterator[Path
 
     Así `dest` nunca existe a medio escribir: o está el contenido viejo
     entero, o el nuevo entero, nunca una mezcla. Es la primitiva para
-    quien escribe el archivo de una (`write_bytes`, `copyfile`, copiar un
-    miembro de un ZIP); quien necesita el archivo abierto -para escribir
+    quien escribe el archivo de una (`write_bytes`, `copyfile`); quien
+    necesita el archivo abierto -para escribir
     de a bloques, o para bajarlo a disco antes de intercambiar- tiene
     `atomic_write_stream`.
 
     `mkparents=True` crea la carpeta de `dest` antes de empezar, para
-    quienes escriben a una ruta que puede no existir todavía (el extractor
-    de ZIP, la copia de configs maestras).
+    quienes escriben a una ruta que puede no existir todavía (la copia de
+    configs maestras, el PDF del ticket).
 
     NO hace `fsync`: para lo que se guarda con esto -cachés que se pueden
     volver a bajar y copias de archivos chicos- alcanza con la atomicidad
@@ -187,8 +188,7 @@ def atomic_write_target(dest: Path, *, mkparents: bool = False) -> Iterator[Path
 
     Un bloque que no escribe nada deja un `dest` VACÍO, no un error: el
     temporal lo crea `mkstemp` por adelantado (de ahí sale la unicidad del
-    nombre). Es el resultado correcto para el único caso real que llega
-    acá, un miembro de ZIP de 0 bytes."""
+    nombre)."""
     with _temp_sibling(dest, mkparents) as (fd, tmp):
         # Los usuarios de esta forma abren la ruta ellos mismos, así que
         # el descriptor se cierra en el acto. El archivo -y con él el
@@ -392,10 +392,10 @@ def staged_directory(target_dir: Path, *, staging_marca: str = "staging",
     """Arma una carpeta de staging hermana de `target_dir` para llenarla, y
     al salir sin excepción la deja EN EL LUGAR de `target_dir`.
 
-    El orden importa y es lo que hace que valga la pena: la staging se
-    llena ENTERA primero y el destino no se toca hasta que eso salió bien.
-    Si el bloque falla -o se cancela- se borra la staging y `target_dir`
-    queda exactamente como estaba, sin haber sido tocado ni un instante.
+    Es `StagedSwap` con una sola ruta: la staging se llena ENTERA primero y
+    el destino no se toca hasta que eso salió bien. Si el bloque falla -o
+    se cancela- se borra la staging y `target_dir` queda exactamente como
+    estaba, sin haber sido tocado ni un instante.
 
     El intercambio, ya con la staging completa:
 
@@ -412,49 +412,166 @@ def staged_directory(target_dir: Path, *, staging_marca: str = "staging",
        candidatos rescatables a mano es mejor que borrar alguno de los
        dos por las dudas.
     """
-    target_dir = Path(target_dir)
-    parent = target_dir.parent
-    parent.mkdir(parents=True, exist_ok=True)
-
-    staging = hidden_sibling(target_dir, staging_marca)
-    # Por si quedó una staging huérfana de un intento anterior con el
-    # mismo PID: no debería pasar, pero `rmtree` de algo que no existe no
-    # es un error (`ignore_errors=True`).
-    shutil.rmtree(staging, ignore_errors=True)
-    staging.mkdir()
-
-    handle = StagedDirectory(path=staging)
+    tx = StagedSwap(staging_marca=staging_marca, backup_marca=backup_marca)
+    handle = StagedDirectory(path=tx.stage_dir(target_dir))
     try:
         yield handle
     except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
+        tx.abort()
         raise
+    handle.orphaned_backups = tx.commit()
 
-    if not target_dir.exists():
-        try:
-            os.replace(staging, target_dir)
-        except BaseException:
-            shutil.rmtree(staging, ignore_errors=True)
-            raise
-        return
 
-    aside = SetAside(backup_marca)
+def _borrar(ruta: Path) -> None:
+    """Borra un archivo o una carpeta entera, sin quejarse si ya no está o
+    no se puede: es la limpieza de algo que NUNCA llegó a reemplazar nada."""
     try:
-        aside.move_aside(target_dir)
+        if ruta.is_dir() and not ruta.is_symlink():
+            shutil.rmtree(ruta, ignore_errors=True)
+        else:
+            ruta.unlink(missing_ok=True)
     except OSError:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise
+        pass
 
-    try:
-        os.replace(staging, target_dir)
-    except OSError as e:
-        pendientes = aside.restore()
+
+class StagedSwap:
+    """Reemplaza VARIAS rutas -carpetas y archivos- de una sola vez: o
+    quedan todas las nuevas, o todas como estaban.
+
+    Hace falta cuando una operación toca más de una cosa que solo tiene
+    sentido junta: una app de Homebrew con su carpeta `apps/<App>/` y sus
+    perfiles sueltos en `controllers/` (ver `oscwii_installer`).
+    Reemplazarlas una por una deja, si algo falla a mitad -o el usuario
+    cancela-, la primera nueva y la segunda vieja, sin forma de volver.
+
+    Uso:
+
+        tx = StagedSwap(staging_marca=..., backup_marca=...)
+        try:
+            carpeta = tx.stage_dir(destino_1)    # se llena acá
+            archivo = tx.stage_file(destino_2)   # se escribe acá
+        except BaseException:
+            tx.abort()
+            raise
+        huerfanos = tx.commit()
+
+    Dos fases, y el destino no se toca en la primera:
+
+    1. Preparar: cada ruta nueva se arma ENTERA en un nombre oculto hermano
+       de su destino (`stage_dir` / `stage_file`). Si algo falla acá,
+       `abort()` borra lo preparado y nada del destino cambió.
+    2. `commit()`: lo que ya existía se aparta a un respaldo oculto
+       (`SetAside`) y lo preparado entra en su lugar, ruta por ruta. Los
+       respaldos se borran recién cuando entraron TODAS. Si algo falla a
+       mitad -o `confirm()`, que corre con todo ya adentro, levanta-, lo
+       nuevo vuelve a su nombre de staging, cada respaldo vuelve a su
+       lugar y se borra lo preparado. Si ese deshacer también falla, se
+       levanta `SwapRollbackFailed` y NO se borra nada: ni lo preparado
+       (la versión nueva entera) ni los respaldos (la anterior).
+
+    Las carpetas que hubo que crear para preparar (p. ej. `controllers/`
+    si la unidad no la tenía) se quitan al abortar o deshacer si quedaron
+    vacías: un intento fallido no deja rastros."""
+
+    def __init__(self, *, staging_marca: str = "staging",
+                 backup_marca: str = "respaldo") -> None:
+        self._staging_marca = staging_marca
+        self._aside = SetAside(backup_marca)
+        # (destino, preparado), en el orden en que se prepararon.
+        self._preparados: list = []
+        self._intercambiados: list = []
+        self._carpetas_creadas: list = []
+
+    def _crear_carpeta(self, carpeta: Path) -> None:
+        faltan = []
+        while not carpeta.exists() and carpeta.parent != carpeta:
+            faltan.append(carpeta)
+            carpeta = carpeta.parent
+        for c in reversed(faltan):
+            try:
+                c.mkdir()
+            except FileExistsError:
+                continue
+            self._carpetas_creadas.append(c)
+
+    def _quitar_carpetas_creadas(self) -> None:
+        for c in reversed(self._carpetas_creadas):
+            try:
+                c.rmdir()
+            except OSError:
+                pass
+        self._carpetas_creadas.clear()
+
+    def stage_dir(self, target: Path) -> Path:
+        """Carpeta oculta, vacía y hermana de `target`, para llenarla con
+        lo que va a ocupar su lugar."""
+        target = Path(target)
+        self._crear_carpeta(target.parent)
+        staging = hidden_sibling(target, self._staging_marca)
+        # Por si quedó una de un intento anterior con el mismo PID: no
+        # debería pasar, pero tiene que arrancar vacía.
+        shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir()
+        self._preparados.append((target, staging))
+        return staging
+
+    def stage_file(self, target: Path) -> Path:
+        """Archivo oculto, vacío y hermano de `target` (`.{nombre}.parcial-…`,
+        como `atomic_write_target`), para escribir lo que va a ocupar su
+        lugar."""
+        target = Path(target)
+        self._crear_carpeta(target.parent)
+        fd, nombre = tempfile.mkstemp(dir=target.parent,
+                                      prefix=f".{target.name}.{MARCA_PARCIAL}-")
+        os.close(fd)
+        tmp = Path(nombre)
+        self._preparados.append((target, tmp))
+        _ajustar_permisos(tmp)
+        return tmp
+
+    def abort(self) -> None:
+        """Borra lo preparado. El destino no se tocó."""
+        for _destino, preparado in self._preparados:
+            _borrar(preparado)
+        self._preparados.clear()
+        self._quitar_carpetas_creadas()
+
+    def commit(self, confirm: Optional[Callable[[], None]] = None) -> list:
+        """Pone todo lo preparado en su lugar y devuelve los respaldos que
+        no se pudieron borrar. `confirm()`, si se pasa, corre con todo ya
+        intercambiado y antes de borrar los respaldos: es la última
+        oportunidad de echarse atrás (si levanta, se deshace todo y la
+        excepción sigue)."""
+        try:
+            while self._preparados:
+                destino, preparado = self._preparados[0]
+                if os.path.lexists(destino):
+                    self._aside.move_aside(destino)
+                os.replace(preparado, destino)
+                self._intercambiados.append(self._preparados.pop(0))
+            if confirm is not None:
+                confirm()
+        except BaseException as e:
+            self._deshacer(e)
+            raise
+        self._intercambiados.clear()
+        self._carpetas_creadas.clear()
+        return self._aside.discard()
+
+    def _deshacer(self, motivo: BaseException) -> None:
+        # Lo nuevo vuelve a su nombre de staging (al revés de como entró),
+        # así el respaldo encuentra libre su lugar: una carpeta no se puede
+        # mover encima de otra que no está vacía.
+        for destino, preparado in reversed(self._intercambiados):
+            try:
+                os.replace(destino, preparado)
+            except OSError:
+                pass
+        pendientes = self._aside.restore()
         if pendientes:
-            raise SwapRollbackFailed(pendientes, e) from e
-        # Se pudo restaurar la versión anterior: lo nuevo fracasó pero el
-        # destino quedó funcional, así que no hace falta conservar la
-        # staging.
-        shutil.rmtree(staging, ignore_errors=True)
-        raise
-
-    handle.orphaned_backups = aside.discard()
+            raise SwapRollbackFailed(pendientes, motivo) from motivo
+        for _destino, preparado in self._intercambiados + self._preparados:
+            _borrar(preparado)
+        self._intercambiados.clear()
+        self._preparados.clear()
+        self._quitar_carpetas_creadas()

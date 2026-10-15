@@ -853,7 +853,7 @@ def homebrew_app_installed(leftover: Leftover) -> bool:
     carpeta con algo adentro (una carpeta vacía no es una app instalada).
 
     El instalador solo pone en el destino una staging completa
-    (`atomicfs.staged_directory`), así que un respaldo con la app
+    (`atomicfs.StagedSwap`), así que un respaldo con la app
     instalada al lado es la versión ANTERIOR: quedó porque se cortó -o
     falló- su borrado después de un intercambio que sí salió bien, y por
     eso mismo puede estar a medio borrar. Restaurarlo encima cambiaría una

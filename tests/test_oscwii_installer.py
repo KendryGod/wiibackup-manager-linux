@@ -150,34 +150,32 @@ def test_install_app_con_destino_valido_instala_normal(tmp_path, monkeypatch):
     assert (dest_root / "apps" / "TestApp" / "meta.xml").read_bytes() == b"<app/>"
 
 
-# ------------------------------------------------------- _extract_member --
-def test_extraccion_cortada_no_deja_temporales_en_la_unidad(tmp_path, monkeypatch):
+# ------------------------------------------ Extracción cortada a mitad --
+@pytest.mark.parametrize("entrada", ["apps/TestApp/boot.dol", "controllers/perfil.ini"])
+def test_extraccion_cortada_no_deja_temporales_en_la_unidad(tmp_path, monkeypatch,
+                                                            entrada):
     """Una extracción que se corta a mitad (unidad desconectada, disco
-    lleno) no puede dejar un `.boot.dol.parcial-<pid>` tirado en la unidad
-    del usuario.
-
-    Mientras `_extract_member` armaba el temporal a mano era el único de
-    los cuatro lugares con este patrón que no limpiaba ante un error; al
-    pasar a `atomicfs.atomic_write_target` la limpieza quedó
-    garantizada para todos. Esta prueba es la guarda de que no se
-    vuelva a perder."""
-    zip_path = tmp_path / "app.zip"
-    _make_zip(zip_path, {"apps/TestApp/boot.dol": b"A" * 100})
+    lleno) no puede dejar un `.boot.dol.parcial-…` ni una staging tirados
+    en la unidad del usuario, ni en una carpeta de la app ni con un archivo
+    suelto. Ni siquiera la carpeta `controllers/` que hubo que crear."""
     dest_root = tmp_path / "usb"
     (dest_root / "apps").mkdir(parents=True)
+
+    def _fake_download_zip(app, dest_path, cancel_event, on_progress):
+        _make_zip(dest_path, {entrada: b"A" * 100})
+        return True, "", "", ""
+    monkeypatch.setattr(oscwii_installer, "_download_zip", _fake_download_zip)
 
     def _falla_a_mitad(src, dst, *a, **kw):
         dst.write(b"AA")  # algo ya se escribió al temporal
         raise OSError("unidad desconectada")
     monkeypatch.setattr(oscwii_installer.shutil, "copyfileobj", _falla_a_mitad)
 
-    with zipfile.ZipFile(zip_path) as zf:
-        info = zf.infolist()[0]
-        with pytest.raises(OSError):
-            oscwii_installer._extract_member(zf, info, dest_root)
+    result = oscwii_installer.install_app(_fake_app(), dest_root)
 
-    quedaron = list((dest_root / "apps" / "TestApp").iterdir())
-    assert quedaron == [], f"quedaron temporales huérfanos: {quedaron}"
+    assert result.status is InstallStatus.IO_ERROR, result.error
+    quedaron = sorted(str(p.relative_to(dest_root)) for p in dest_root.rglob("*"))
+    assert quedaron == ["apps"], f"quedaron temporales huérfanos: {quedaron}"
 
 
 # ---------------------------------------------- Colisiones de nombres --

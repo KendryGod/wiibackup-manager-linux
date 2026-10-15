@@ -609,7 +609,7 @@ class HomebrewStoreView(Gtk.Box):
             # respaldo de la versión anterior no se pudo borrar hay una
             # carpeta oculta ocupando espacio que el usuario no va a
             # encontrar solo. Se avisa y se anota en el historial en vez
-            # de dejarlo pasar (ver `oscwii_installer._stage_and_swap_unit`).
+            # de dejarlo pasar (ver `oscwii_installer._instalar_todo`).
             if result.orphaned_backups:
                 aviso = formatting.format_orphaned_backups(result.orphaned_backups)
                 self._show_toast(

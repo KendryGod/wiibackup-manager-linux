@@ -249,8 +249,8 @@ def _asset_is_valid(spec: GoldenConfigSpec, asset_path: Path) -> tuple:
 # --------------------------------------------------------------- Copia --
 def _copy_atomic(src: Path, dest: Path) -> None:
     """Copia `src` a `dest` de forma atómica (ver
-    `atomicfs.atomic_write_target`, el mismo helper que usan
-    `oscwii_installer._extract_member` y `gametdb._store_cover`). Levanta
+    `atomicfs.atomic_write_target`, el mismo helper que usa
+    `gametdb._store_cover`). Levanta
     OSError si algo falla; quien llama lo convierte en un
     `GoldenConfigResult` de error."""
     with atomic_write_target(dest, mkparents=True) as tmp:
