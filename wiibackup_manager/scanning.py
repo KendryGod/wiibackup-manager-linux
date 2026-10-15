@@ -127,7 +127,15 @@ def find_game_files(root: Path, skipped: Optional[list] = None) -> list[Path]:
     `skipped` para que quien llame lo pueda informar.
 
     Con `skipped=None` el comportamiento es el de siempre: saltear y
-    seguir."""
+    seguir.
+
+    Lo oculto (empieza con punto) no se mira, salvo la raíz misma: ni
+    carpetas -la papelera que GIO arma en la raíz de un disco externo,
+    `.Trash-1000/files/`, devolvía a la lista los juegos recién
+    eliminados- ni archivos -el `._Juego.iso` que deja macOS aparecía como
+    un juego sin identificar-. Los restos de la app también son ocultos
+    (`.Juego.iso.parcial-…`); esos los busca el Recovery Manager, que tiene
+    su propio recorrido (`recovery_service._iter_entries`)."""
     found: list[Path] = []
 
     def on_error(error: OSError) -> None:
@@ -136,9 +144,12 @@ def find_game_files(root: Path, skipped: Optional[list] = None) -> list[Path]:
         name = getattr(error, "filename", None)
         skipped.append(Path(name) if name else Path(root))
 
-    for dirpath, _dirnames, filenames in os.walk(root, onerror=on_error):
+    for dirpath, dirnames, filenames in os.walk(root, onerror=on_error):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
         base = Path(dirpath)
         for name in filenames:
+            if name.startswith("."):
+                continue
             path = base / name
             if path.suffix.lower() in VALID_EXTENSIONS and path.is_file():
                 found.append(path)
