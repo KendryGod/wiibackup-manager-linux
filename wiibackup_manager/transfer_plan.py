@@ -229,6 +229,42 @@ def free_space(path: Path) -> Optional[int]:
         return None
 
 
+def games_on_drive(games, drive_root: Path) -> Optional[set]:
+    """Las rutas (`game.path`) de los juegos de `games` que ya están en
+    `drive_root`, con la misma pregunta que se hace antes de copiar
+    (`existing_destination`: en GameCube cuenta el mismo disco con la otra
+    extensión y la carpeta que ya es del juego aunque tenga otro título).
+    Solo lee carpetas: nada de `wit`.
+
+    None si la unidad no se puede leer -se desconectó, no hay permiso-,
+    antes de mirar o después: quien muestra "Ya en la unidad" saca las
+    marcas en vez de dejarlas sobre una unidad que no está. Un juego que
+    no se puede mirar (ID inválido, una carpeta ilegible) cuenta como que
+    no está: una marca de más haría creer que el cliente se lleva un juego
+    que no tiene; una de menos, como mucho, que la cola lo saltee al
+    copiar."""
+    root = Path(drive_root)
+    if not _se_puede_listar(root):
+        return None
+    presentes = set()
+    for game in games:
+        try:
+            if existing_destination(game, root) is not None:
+                presentes.add(game.path)
+        except (ValueError, OSError):
+            continue
+    return presentes if _se_puede_listar(root) else None
+
+
+def _se_puede_listar(carpeta: Path) -> bool:
+    try:
+        with os.scandir(carpeta) as entradas:
+            next(entradas, None)
+    except OSError:
+        return False
+    return True
+
+
 # Un disco de Wii de una capa son 4.7 GB; los de doble capa, 8.5 GB. Se
 # usan como cota superior cuando no hay forma de saber el tamaño real.
 _WII_SINGLE_LAYER_BYTES = 4_699_979_776
@@ -249,6 +285,66 @@ _WBFS_OVERHEAD = 1.05
 # Formatos cuyo tamaño de archivo NO es una cota superior del WBFS final:
 # guardan el disco de forma compacta y al pasarlos a WBFS pueden crecer.
 _COMPACT_FORMATS = {"CISO", "WDF"}
+
+
+# Cómo queda lo elegido en Transferir respecto del espacio libre (ver
+# `SelectionEstimate.level`).
+SELECTION_UNKNOWN = "unknown"  # sin destino, o sin saber cuánto lugar hay
+SELECTION_OK = "ok"
+SELECTION_TIGHT = "warn"       # entra, pero con menos margen que `_WBFS_OVERHEAD`
+SELECTION_FULL = "full"        # no entra
+
+
+@dataclass(frozen=True)
+class SelectionEstimate:
+    """Cuánto ocupa lo elegido en Transferir y si entra en el destino.
+
+    Es la cuenta rápida que se muestra mientras se tildan juegos: la suma
+    del tamaño de los archivos, sin preguntarle nada a `wit` (eso sería un
+    `wit` por juego en cada click). Un juego que en una unidad FAT32 va en
+    partes de 4 GB son los mismos bytes, así que no cambia el total. Para
+    un ISO de Wii es una cota alta -copiado como WBFS ocupa menos, sin el
+    relleno del disco-, y por eso la cola vuelve a mirar el espacio con el
+    tamaño real antes de cada juego.
+
+    `count` son todos los elegidos; `needed`, lo que suman los que todavía
+    no están en el destino (`already` cuenta los que sí: la cola los
+    saltea). `free` es None si no hay destino o no se pudo leer."""
+
+    count: int
+    already: int
+    needed: int
+    free: Optional[int]
+
+    @property
+    def remaining(self) -> Optional[int]:
+        """Lo que quedaría libre después de copiar; negativo si no entra."""
+        return None if self.free is None else self.free - self.needed
+
+    @property
+    def level(self) -> str:
+        if self.free is None:
+            return SELECTION_UNKNOWN
+        if self.needed > self.free:
+            return SELECTION_FULL
+        # Entra, pero con menos margen que lo que puede variar el tamaño
+        # real en la unidad (bloques y tabla del WBFS): el mismo margen que
+        # usa `estimate_transfer_size`.
+        if self.needed * _WBFS_OVERHEAD > self.free:
+            return SELECTION_TIGHT
+        return SELECTION_OK
+
+
+def estimate_selection(games, free: Optional[int],
+                       on_drive=frozenset()) -> SelectionEstimate:
+    """La `SelectionEstimate` de `games` contra `free` bytes libres.
+    `on_drive` son las rutas (`game.path`) de los que ya están en el
+    destino, como las devuelve `games_on_drive`: no suman."""
+    games = list(games)
+    a_copiar = [g for g in games if g.path not in on_drive]
+    return SelectionEstimate(count=len(games), already=len(games) - len(a_copiar),
+                             needed=sum(max(g.size_bytes, 0) for g in a_copiar),
+                             free=free)
 
 
 def estimate_transfer_size(game: Game, wit_binary: str = "wit") -> int:

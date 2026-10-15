@@ -46,6 +46,23 @@ class TransferGameRow(Adw.ActionRow):
         self._cover_widget, self._cover = build_cover_widget()
         self.add_prefix(self._cover_widget)
 
+        # "Ya en la unidad": su lugar en el destino elegido ya está ocupado
+        # (ver `TransferView._refresh_on_drive_marks`). Discreta y escondida
+        # hasta saberlo: es un dato, no un error.
+        self.on_drive = False
+        self.on_drive_label = Gtk.Label(label=_("Ya en la unidad"),
+                                        valign=Gtk.Align.CENTER, visible=False)
+        self.on_drive_label.add_css_class("dim-label")
+        self.on_drive_label.add_css_class("caption")
+        self.on_drive_label.set_tooltip_text(
+            _("Este juego ya está en la unidad elegida. En una tanda se saltea; "
+              "si lo transferís solo, se pregunta antes de reemplazarlo."))
+        self.add_suffix(self.on_drive_label)
+
+    def set_on_drive(self, value: bool):
+        self.on_drive = value
+        self.on_drive_label.set_visible(value)
+
     def load_cover_async(self):
         """Igual que en GameRow: la carátula se pide al pool compartido de
         `gametdb` (nunca más de 6 descargas simultáneas en toda la app) y se
@@ -273,6 +290,21 @@ class TransferView(Gtk.Box):
         # que el sondeo detecte cuando uno se conecta o se va. Ver
         # `_preset_availability`.
         self._known_preset_state: dict = {}
+        # Bytes libres del destino elegido según el último
+        # `_update_dest_space_label` (None sin destino o si no se pudo
+        # leer): con eso el contador de lo elegido dice si entra.
+        self._dest_free: int | None = None
+        # "Ya en la unidad" (ver `_refresh_on_drive_marks`): las rutas de
+        # los juegos marcados, el destino para el que se calcularon, y el
+        # número de pedido con el que se descarta un cálculo que llega
+        # tarde (otra unidad, otra lista).
+        self._on_drive_paths: set = set()
+        self._marks_root: Path | None = None
+        self._marks_gen = 0
+        self._marks_busy = False
+        # Mientras "Seleccionar todos" tilda casilla por casilla: una sola
+        # cuenta al final y no una por juego.
+        self._bulk_toggle = False
 
         self._build_ui()
         GLib.timeout_add_seconds(3, self._poll_drives)
@@ -385,6 +417,19 @@ class TransferView(Gtk.Box):
         games_header.append(select_all_btn)
         games_header.append(deselect_all_btn)
         self.append(games_header)
+
+        # Lo elegido y si entra en el destino, al día con cada casilla. En
+        # su propio renglón y no en el encabezado, para que un "no entra"
+        # no quede cortado en una ventana angosta.
+        self.selection_label = Gtk.Label(xalign=0, wrap=True, visible=False,
+                                         margin_start=12, margin_end=12,
+                                         margin_bottom=4)
+        self.selection_label.set_tooltip_text(
+            _("Suma del tamaño de los archivos elegidos, sin los que ya están en "
+              "la unidad (la cola los saltea). Un ISO de Wii ocupa menos al "
+              "copiarse; la cola vuelve a comprobar el espacio antes de cada "
+              "juego."))
+        self.append(self.selection_label)
 
         self.game_list = Gtk.ListBox()
         self.game_list.set_selection_mode(Gtk.SelectionMode.NONE)
@@ -690,6 +735,7 @@ class TransferView(Gtk.Box):
         self._dest_path = getattr(row, "dest_path", None) if row else None
         self._update_dest_space_label()
         self._update_dest_buttons()
+        self._refresh_on_drive_marks()
 
     # Umbrales de la barra de uso de disco del destino. Debajo de WARN la
     # barra va verde, entre WARN y FULL amarilla, y de FULL para arriba
@@ -725,16 +771,23 @@ class TransferView(Gtk.Box):
         self.dest_space_bar.set_visible(True)
 
     def _update_dest_space_label(self):
+        # El contador de lo elegido usa el mismo dato: se actualiza al final
+        # de cada camino, también cuando el destino ya no se puede leer.
         if self._dest_path is None:
+            self._dest_free = None
             self.dest_space_label.set_label(_("Elegí un destino para ver el espacio disponible."))
             self._set_usage_bar(None)
+            self._update_selection_label()
             return
         try:
             usage = shutil.disk_usage(self._dest_path)
         except OSError:
+            self._dest_free = None
             self.dest_space_label.set_label(_("No se pudo leer el espacio disponible en el destino."))
             self._set_usage_bar(None)
+            self._update_selection_label()
             return
+        self._dest_free = usage.free
         free_gb = usage.free / (1024 ** 3)
         total_gb = usage.total / (1024 ** 3)
         # `usage.used + usage.free` no da `usage.total`: en ext4 y familia
@@ -750,6 +803,7 @@ class TransferView(Gtk.Box):
             .format(free=free_gb, total=total_gb, percent=percent_text)
         )
         self._set_usage_bar(ratio)
+        self._update_selection_label()
 
     def _update_dest_buttons(self):
         """Refresca los botones que dependen del destino elegido. Los dos
@@ -1011,21 +1065,142 @@ class TransferView(Gtk.Box):
 
         for game in games:
             row = TransferGameRow(game, self.settings.cover_region)
-            # Tildar o destildar cambia qué archivos tocaría la
-            # transferencia, y con eso si choca o no con lo que esté
-            # corriendo: hay que revisar el botón.
-            row.check.connect("toggled", lambda *_a: self._update_operation_ui())
+            row.check.connect("toggled", self._on_game_toggled)
+            # Las marcas de antes del rescan siguen valiendo para el mismo
+            # destino mientras se vuelve a mirar (abajo): sin parpadeo.
+            row.set_on_drive(game.path in self._on_drive_paths)
             self.game_list.append(row)
             self._game_rows.append(row)
             row.load_cover_async()
         self._update_operation_ui()
+        self._update_selection_label()
+        self._refresh_on_drive_marks()
 
     def _selected_games(self) -> list[Game]:
         return [row.game for row in self._game_rows if row.check.get_active()]
 
+    def _on_game_toggled(self, *_args):
+        # Tildar o destildar cambia qué archivos tocaría la transferencia, y
+        # con eso si choca o no con lo que esté corriendo (hay que revisar
+        # el botón) y cuánto hay que copiar.
+        if self._bulk_toggle:
+            return
+        self._update_operation_ui()
+        self._update_selection_label()
+
     def _set_all_selected(self, value: bool):
+        # Una sola cuenta al final y no una por casilla: con 300 juegos
+        # eran 300 sumas y 300 repintados del contador.
+        self._bulk_toggle = True
+        try:
+            for row in self._game_rows:
+                row.check.set_active(value)
+        finally:
+            self._bulk_toggle = False
+        self._update_operation_ui()
+        self._update_selection_label()
+
+    def _update_selection_label(self):
+        """El renglón de lo elegido: "3 seleccionados · 12.4 GB (quedarán
+        2.1 GB libres)", en amarillo si entra justo y en rojo si no entra
+        (ver `transfer_plan.estimate_selection`). Los que ya están en la
+        unidad se cuentan aparte y no suman. Escondido si no hay nada
+        elegido."""
+        elegidos = self._selected_games()
+        etiqueta = self.selection_label
+        for clase in ("warning", "error"):
+            etiqueta.remove_css_class(clase)
+        if not elegidos:
+            etiqueta.set_visible(False)
+            return
+        e = transfer_plan.estimate_selection(elegidos, self._dest_free,
+                                             self._on_drive_paths)
+        texto = ngettext("{n} seleccionado", "{n} seleccionados",
+                         e.count).format(n=e.count)
+        if e.already:
+            texto = ngettext("{selected} ({n} ya en la unidad)",
+                             "{selected} ({n} ya en la unidad)",
+                             e.already).format(selected=texto, n=e.already)
+        if e.already < e.count:
+            size = formatting.format_size(e.needed)
+            if e.level == transfer_plan.SELECTION_FULL:
+                texto = _("{selected} · {size} (no entra: faltan {missing})").format(
+                    selected=texto, size=size,
+                    missing=formatting.format_size(-e.remaining))
+                etiqueta.add_css_class("error")
+            elif e.level == transfer_plan.SELECTION_TIGHT:
+                texto = _("{selected} · {size} (entra justo: quedarán {free} "
+                          "libres)").format(selected=texto, size=size,
+                                            free=formatting.format_size(e.remaining))
+                etiqueta.add_css_class("warning")
+            elif e.level == transfer_plan.SELECTION_OK:
+                texto = _("{selected} · {size} (quedarán {free} libres)").format(
+                    selected=texto, size=size,
+                    free=formatting.format_size(e.remaining))
+            else:
+                texto = _("{selected} · {size}").format(selected=texto, size=size)
+        etiqueta.set_label(texto)
+        etiqueta.set_visible(True)
+
+    # ----------------------------------------------------- Ya en la unidad --
+    def _refresh_on_drive_marks(self):
+        """Vuelve a mirar qué juegos de la lista ya están en el destino
+        elegido, para la etiqueta "Ya en la unidad" de cada fila y para
+        que el contador no los sume (ver `transfer_plan.games_on_drive`).
+
+        Se mira en un hilo aparte: son lecturas de carpetas en una unidad
+        que puede ser lenta o estar desconectándose, y eso no puede
+        congelar la ventana. Nunca hay más de un hilo a la vez: si se pide
+        de nuevo mientras se mira (otra unidad, otra lista, un juego que
+        terminó de copiarse), lo que estaba en curso se descarta al llegar
+        y se vuelve a mirar con lo de ese momento."""
+        self._marks_gen += 1
+        root = self._dest_path
+        if root != self._marks_root:
+            # Las marcas de otra unidad no dicen nada de esta: afuera ya,
+            # sin esperar a que se termine de mirar.
+            self._marks_root = None
+            self._apply_on_drive_marks(set())
+        if root is None or not self._games:
+            self._marks_root = root
+            return
+        if not self._marks_busy:
+            self._start_marks_worker()
+
+    def _start_marks_worker(self):
+        gen, root, games = self._marks_gen, self._dest_path, list(self._games)
+        self._marks_busy = True
+
+        def worker():
+            try:
+                presentes = transfer_plan.games_on_drive(games, root)
+            except Exception:  # noqa: BLE001 - una unidad que falla saca las marcas
+                presentes = None
+            GLib.idle_add(self._on_marks_ready, gen, root, presentes)
+
+        threading.Thread(target=worker, daemon=True, name="on-drive-marks").start()
+
+    def _on_marks_ready(self, gen: int, root: Path, presentes):
+        self._marks_busy = False
+        if not gtk_helpers.widget_is_alive(self):
+            return False
+        if gen != self._marks_gen:
+            # Mientras se miraba cambió algo: esto ya no vale.
+            if self._dest_path is not None and self._games:
+                self._start_marks_worker()
+            return False
+        # None: la unidad no se pudo leer (se desconectó, no hay permiso).
+        # Sin marcas, en vez de dejar las de antes sobre una unidad que no
+        # está.
+        self._marks_root = root
+        self._apply_on_drive_marks(presentes or set())
+        return False
+
+    def _apply_on_drive_marks(self, presentes: set):
+        self._on_drive_paths = presentes
         for row in self._game_rows:
-            row.check.set_active(value)
+            row.set_on_drive(row.game.path in presentes)
+        self._update_selection_label()
 
     # -------------------------------------------------------- Transferir --
     def _on_transfer_clicked(self, *_args):
@@ -1166,9 +1341,12 @@ class TransferView(Gtk.Box):
 
         self._update_queue_header()
         # Una tarea que termina cambia el espacio libre del destino y puede
-        # liberar la unidad para expulsarla.
+        # liberar la unidad para expulsarla; si copió, ese juego ya está en
+        # la unidad.
         if job.is_final:
             self._update_dest_space_label()
+            if job.status is JobStatus.DONE and job.dest_root == self._dest_path:
+                self._refresh_on_drive_marks()
         self._update_dest_buttons()
 
     def _on_job_cancel_requested(self, job: TransferJob):
