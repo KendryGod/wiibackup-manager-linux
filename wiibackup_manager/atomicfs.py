@@ -493,11 +493,17 @@ def _sync_paths(rutas: list, *, tree: bool) -> None:
 
 def _fsync_tree(raiz: Path) -> None:
     """`fsync_path` de cada archivo y carpeta de `raiz` (o de `raiz`, si es
-    un archivo). Los enlaces simbólicos no se siguen."""
+    un archivo). Los enlaces simbólicos no se siguen. Una carpeta que no se
+    puede listar levanta el error: `os.walk` la saltearía en silencio, y
+    quien llama daría por bajado a disco algo que no lo está."""
     if not os.path.isdir(raiz) or os.path.islink(raiz):
         fsync_path(raiz)
         return
-    for carpeta, _subcarpetas, archivos in os.walk(raiz):
+
+    def _relanzar(error: OSError) -> None:
+        raise error
+
+    for carpeta, _subcarpetas, archivos in os.walk(raiz, onerror=_relanzar):
         for nombre in archivos:
             ruta = os.path.join(carpeta, nombre)
             if not os.path.islink(ruta):
