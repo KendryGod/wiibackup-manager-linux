@@ -27,13 +27,21 @@ GXGlobal.cfg (USB Loader GX)
   CSettings + `Save()`/`Load()`):
   `<destino>/apps/usbloader_gx/GXGlobal.cfg` -con guión bajo en el nombre
   de la carpeta, no "usbloadergx".
-- ASUNCIÓN A REVISAR, importante: USB Loader GX NO se distribuye a través
-  de Open Shop Channel (ni aparece en el catálogo real de la API por
-  nombre ni por slug; su propio README dice que se instala bajando el ZIP
-  de sus releases de GitHub). Así que hoy, con datos reales de
-  `oscwii_client`, esta rama de `GOLDEN_CONFIGS` queda registrada pero
-  inalcanzable: ninguna app que devuelva la API tiene ese slug. Se deja
-  lista (sin costo, y lista para el día que cambie) en vez de omitida.
+- USB Loader GX SÍ está en Open Shop Channel, con el slug `usbloader_gx`
+  (verificado contra la API el 2026-10-18: versión 4.0 r1283). Esta nota
+  decía lo contrario, y era cierto cuando se escribió; hoy esta rama de
+  `GOLDEN_CONFIGS` se dispara al instalarlo desde la Homebrew Store.
+- Su ZIP no trae GXGlobal.cfg, y no hace falta copiar ninguno: USB Loader
+  GX arma el suyo. En su código (release v4.0-r1283), `FindConfig` crea el
+  archivo, `SetDefault` pone los valores de fábrica (`GameCubePath =
+  usb1:/games/` y las rutas de carátulas debajo de su carpeta) y
+  `AppCleanUp` lo guarda completo con `Save`. Un archivo sin la línea
+  "USB Loader GX R<revisión>" (revisión 1031 o más) lo ignora entero
+  (`ValidVersion`).
+- El `assets/configs/usbloadergx/GXGlobal.cfg` del repositorio es de
+  relleno -está marcado PLACEHOLDER- y no se copia (ver `is_placeholder`).
+  Si algún día se lo reemplaza por una configuración maestra de verdad, se
+  copia como cualquier otra: solo en una unidad que no tenga la suya.
 
 nincfg.bin (Nintendont)
 ------------------------
@@ -149,11 +157,9 @@ GOLDEN_CONFIGS: dict = {
         min_size_bytes=_MIN_NINCFG_BYTES,
         magic=NIN_CFG_MAGIC,
     ),
-    # Slug especulativo (ver el comentario del módulo: USB Loader GX no
-    # está en el catálogo real de OSC hoy). Se arma con la misma
-    # convención de carpeta que usa la app real ("usbloader_gx"), no con
-    # el nombre de pantalla, por si el día de mañana el catálogo lo suma
-    # con ese slug.
+    # El slug real de USB Loader GX en OSC, que coincide con su carpeta
+    # ("usbloader_gx", con guion bajo). Mientras el archivo maestro sea el
+    # de relleno no se copia nada (ver el comentario del módulo).
     "usbloader_gx": GoldenConfigSpec(
         label="USB Loader GX",
         asset_relative="usbloadergx/GXGlobal.cfg",
@@ -169,6 +175,10 @@ class GoldenConfigStatus(Enum):
     # Ya había una configuración en el destino y se dejó como estaba (ver
     # `maybe_apply`). No es un error.
     KEPT_EXISTING = "kept_existing"
+    # El archivo maestro del repositorio es de relleno (`is_placeholder`):
+    # no se copió nada y la app arranca con su configuración de fábrica.
+    # Tampoco es un error.
+    SKIPPED_PLACEHOLDER = "skipped_placeholder"
     ASSET_MISSING = "asset_missing"
     ASSET_CORRUPT = "asset_corrupt"
     IO_ERROR = "io_error"
@@ -219,6 +229,25 @@ def find_asset(relative: str) -> Optional[Path]:
 
 
 # ------------------------------------------------------------ Validación --
+# La marca de un archivo maestro de relleno: va en su cabecera de
+# comentarios. Una configuración que escribe la propia app nunca la trae
+# (USB Loader GX no escribe comentarios propios, y nincfg.bin es binario).
+PLACEHOLDER_MARKER = b"PLACEHOLDER"
+_PLACEHOLDER_HEAD_BYTES = 4096
+
+
+def is_placeholder(asset_path: Path) -> bool:
+    """True si el archivo maestro es de relleno: lleva `PLACEHOLDER_MARKER`
+    en sus primeros bytes. Un archivo así es de desarrollo y no se copia
+    nunca a la unidad de un cliente. False si no se puede leer: de eso se
+    ocupa `_asset_is_valid`."""
+    try:
+        with open(asset_path, "rb") as f:
+            return PLACEHOLDER_MARKER in f.read(_PLACEHOLDER_HEAD_BYTES)
+    except OSError:
+        return False
+
+
 def _asset_is_valid(spec: GoldenConfigSpec, asset_path: Path) -> tuple:
     """Chequeo básico de que el archivo maestro del propio repo no esté
     vacío ni truncado, antes de copiarlo a la unidad del cliente. Devuelve
@@ -328,6 +357,15 @@ def maybe_apply(app: HomebrewApp, dest_root: Path,
         _log(op_log, result)
         return result
 
+    if is_placeholder(asset_path):
+        # El de relleno del repositorio: a la unidad del cliente no va. La
+        # app arma la suya con los valores de fábrica (ver el comentario
+        # del módulo).
+        result = GoldenConfigResult(
+            GoldenConfigStatus.SKIPPED_PLACEHOLDER, app.slug, spec.label)
+        _log(op_log, result)
+        return result
+
     ok, reason = _asset_is_valid(spec, asset_path)
     if not ok:
         result = GoldenConfigResult(
@@ -369,6 +407,12 @@ def _log(op_log: Optional[oplog.OperationLog], result: GoldenConfigResult) -> No
         op_log.record(KEPT_OPERATION, result.label, oplog.STATUS_OK,
                       _("ya había un {name} en la unidad y se dejó como "
                         "estaba").format(name=result.dest_path.name))
+        return
+    if result.status is GoldenConfigStatus.SKIPPED_PLACEHOLDER:
+        op_log.record(KEPT_OPERATION, result.label, oplog.STATUS_OK,
+                      _("el archivo maestro del repositorio es de relleno: no "
+                        "se copió nada y {name} arranca con su configuración "
+                        "de fábrica").format(name=result.label))
         return
     status = oplog.STATUS_ERROR if result.status.is_error else oplog.STATUS_OK
     detail = result.error if result.status.is_error else str(result.dest_path)

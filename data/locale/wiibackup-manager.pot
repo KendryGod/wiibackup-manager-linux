@@ -9,7 +9,7 @@ msgstr ""
 "Project-Id-Version: WiiBackup Manager\n"
 "Report-Msgid-Bugs-To: https://github.com/KendryGod/wiibackup-manager-linux/"
 "issues\n"
-"POT-Creation-Date: 2026-10-15 10:30-0600\n"
+"POT-Creation-Date: 2026-10-18 08:19-0600\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -262,47 +262,54 @@ msgstr ""
 msgid "Título traducido"
 msgstr ""
 
-#: wiibackup_manager/golden_configs.py:235
-#: wiibackup_manager/golden_configs.py:247
+#: wiibackup_manager/golden_configs.py:264
+#: wiibackup_manager/golden_configs.py:276
 #, python-brace-format
 msgid "no se pudo leer el archivo maestro ({error})"
 msgstr ""
 
-#: wiibackup_manager/golden_configs.py:238
+#: wiibackup_manager/golden_configs.py:267
 #, python-brace-format
 msgid "el archivo maestro mide {size} bytes; se esperaban al menos {minimum}"
 msgstr ""
 
-#: wiibackup_manager/golden_configs.py:250
+#: wiibackup_manager/golden_configs.py:279
 #, python-brace-format
 msgid "el archivo maestro no tiene la firma esperada ({found} != {expected})"
 msgstr ""
 
-#: wiibackup_manager/golden_configs.py:308
+#: wiibackup_manager/golden_configs.py:337
 msgid "la instalación de la app no terminó bien; no se tocó nada"
 msgstr ""
 
-#: wiibackup_manager/golden_configs.py:326
+#: wiibackup_manager/golden_configs.py:355
 #, python-brace-format
 msgid "no se encontró el archivo maestro ({path})"
 msgstr ""
 
-#: wiibackup_manager/golden_configs.py:335
+#: wiibackup_manager/golden_configs.py:373
 #, python-brace-format
 msgid "archivo maestro inválido, no se copió nada: {reason}"
 msgstr ""
 
-#: wiibackup_manager/golden_configs.py:357
+#: wiibackup_manager/golden_configs.py:395
 msgid "Configuración maestra aplicada"
 msgstr ""
 
-#: wiibackup_manager/golden_configs.py:362
+#: wiibackup_manager/golden_configs.py:400
 msgid "Configuración maestra no aplicada"
 msgstr ""
 
-#: wiibackup_manager/golden_configs.py:370
+#: wiibackup_manager/golden_configs.py:408
 #, python-brace-format
 msgid "ya había un {name} en la unidad y se dejó como estaba"
+msgstr ""
+
+#: wiibackup_manager/golden_configs.py:413
+#, python-brace-format
+msgid ""
+"el archivo maestro del repositorio es de relleno: no se copió nada y {name} "
+"arranca con su configuración de fábrica"
 msgstr ""
 
 #: wiibackup_manager/library_ops.py:46
@@ -1360,21 +1367,28 @@ msgid ""
 "no se aplicó la configuración maestra."
 msgstr ""
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:643
+#: wiibackup_manager/widgets/homebrew_store_view.py:637
+#, python-brace-format
+msgid ""
+"'{name}' se instaló con su configuración de fábrica: la configuración "
+"maestra del repositorio es de relleno y no se copió."
+msgstr ""
+
+#: wiibackup_manager/widgets/homebrew_store_view.py:649
 #, python-brace-format
 msgid "'{name}' se instaló. {detail}"
 msgstr ""
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:648
+#: wiibackup_manager/widgets/homebrew_store_view.py:654
 #, python-brace-format
 msgid "Instalación de '{name}' cancelada."
 msgstr ""
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:650
+#: wiibackup_manager/widgets/homebrew_store_view.py:656
 msgid "Error al instalar"
 msgstr ""
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:653
+#: wiibackup_manager/widgets/homebrew_store_view.py:659
 #, python-brace-format
 msgid "No se pudo instalar '{name}': {detail}"
 msgstr ""

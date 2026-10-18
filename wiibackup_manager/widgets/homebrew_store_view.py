@@ -631,6 +631,12 @@ class HomebrewStoreView(Gtk.Box):
                       "se dejó como estaba: no se aplicó la configuración "
                       "maestra.").format(name=app.name,
                                           file=golden_result.dest_path.name))
+            elif (golden_result is not None and golden_result.status
+                  is golden_configs.GoldenConfigStatus.SKIPPED_PLACEHOLDER):
+                self._show_toast(
+                    _("'{name}' se instaló con su configuración de fábrica: la "
+                      "configuración maestra del repositorio es de relleno y no "
+                      "se copió.").format(name=app.name))
             # Mismo criterio que el aviso de la config maestra: la app
             # quedó instalada (la tarjeta sigue en DONE), pero si el
             # respaldo de la versión anterior no se pudo borrar hay una
