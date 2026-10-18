@@ -6,7 +6,7 @@ de Windows. Hecho con GTK4 + libadwaita para verse nativo en Fedora/GNOME.
 [![CI](https://github.com/KendryGod/wiibackup-manager-linux/actions/workflows/ci.yml/badge.svg)](https://github.com/KendryGod/wiibackup-manager-linux/actions/workflows/ci.yml)
 ![Estado](https://img.shields.io/badge/estado-alpha-orange)
 ![Licencia](https://img.shields.io/badge/licencia-MIT-blue)
-![Versión](https://img.shields.io/badge/versión-0.2.2-green)
+![Versión](https://img.shields.io/badge/versión-0.2.3-green)
 
 ![La pestaña Biblioteca con las carátulas descargadas](docs/screenshots/biblioteca.png)
 
@@ -555,6 +555,137 @@ wiibackup_manager/
 ```
 
 ## Changelog
+
+### 0.2.3
+
+59 commits desde la 0.2.2. Tres funciones nuevas para el taller en
+Transferir (cuánto ocupa lo elegido, packs y carátulas para USB Loader
+GX), conversión de juegos de GameCube entre CISO e ISO, una Homebrew
+Store que no pisa lo del cliente al reinstalar, y muchas correcciones
+salidas de una auditoría completa y de varias rondas de revisión.
+
+#### GameCube
+
+- **Convertir entre CISO e ISO.** La fila y "Convertir" en lote ofrecen
+  "Convertir CISO ↔ ISO". El ISO sale recortado (como mucho un disco de
+  GameCube, así que entra en FAT32). Lo convertido se baja a la unidad y
+  se compara con el original antes de darlo por bueno; si algo no da, se
+  descarta y lo que había vuelve a su lugar. Mientras compara, la barra
+  dice "Comprobando…". Ida y vuelta con juegos reales: el mismo
+  contenido.
+- **Nunca a WBFS.** Un juego de GameCube ya no ofrece "Convertir ISO ↔
+  WBFS" (Nintendont no lee WBFS); en lote se saltea y se informa.
+- **El mismo juego se reconoce en la unidad aunque cambie la extensión o
+  el título.** `game.iso` y `game.ciso` (también en mayúsculas) son el
+  mismo disco: se pregunta antes de reemplazar, la confirmación dice qué
+  archivo reemplaza a cuál, la cola lo saltea, y el original se aparta y
+  vuelve si la copia falla. La carpeta del juego se reconoce por su
+  `[ID6]`: queda una sola aunque el título difiera, y el disco 2 va con
+  el 1.
+- **Título correcto.** Un ISO toma el mismo título que su CISO (de la
+  base de `wit`), y un título ilegible no arma la carpeta en la unidad:
+  se usa el ID6.
+- **"Verificar integridad" ya no da un veredicto falso** sobre GameCube
+  (`wit VERIFY` solo sirve para Wii): no se ofrece, y en lote se informa.
+- El historial de "Convertir" en lote nombra todo lo seleccionado.
+
+#### Transferir
+
+- **Cuánto ocupa lo elegido.** Debajo de "Juegos": "N seleccionados · X
+  GB (quedarán Y GB libres)", en amarillo si entra justo y en rojo si no
+  entra. Los juegos que ya están en la unidad no suman (la cola los
+  saltea), y cambia al elegir otra unidad o al sacarla.
+- **"Ya en la unidad" en cada juego** cuyo lugar en el destino ya está
+  ocupado (en GameCube también con la otra extensión o la carpeta del
+  mismo ID6). Se calcula sin trabar la ventana, y si la unidad se va, las
+  marcas se quitan.
+- **Packs de taller.** Botón "Packs": guardar la selección como pack,
+  marcar los juegos de un pack (se suman a lo ya tildado y avisa cuántos
+  no están en la biblioteca), renombrar y borrar. Un nombre vacío o
+  repetido no pisa otro pack. Se guardan en config.json; un pack dañado
+  se descarta sin perder el resto de la configuración.
+
+#### Carátulas para USB Loader GX
+
+- **Botón "Copiar carátulas a la unidad".** Copia las carátulas que la
+  app ya bajó a `apps/usbloader_gx/images/2D/<ID6>.png`, donde USB Loader
+  GX las busca cuando arranca desde esa unidad. Solo si la unidad tiene
+  USB Loader GX y su `GXGlobal.cfg` no las manda a otro lado (si apunta a
+  otra carpeta o está vacío, no copia nada y lo dice). No pisa ninguna
+  que ya esté, y cada una entra completa o no entra.
+- Se apaga mientras la unidad está ocupada (la cola copiando u otra
+  operación), y al cerrar la app espera a que termine la carátula en
+  curso.
+- Borra los temporales que haya dejado una copia cortada (un corte de luz,
+  por ejemplo).
+- El historial distingue una unidad desconectada, una copia cancelada y
+  una con errores, y el aviso dice el motivo del primer fallo (sin
+  espacio, solo lectura, error de E/S).
+
+#### Homebrew Store
+
+- **Reinstalar o actualizar conserva lo del cliente.** En USB Loader GX:
+  su configuración (`GXGlobal.cfg`), los ajustes por juego, las
+  estadísticas, las categorías, las carátulas (`images/`) y los temas
+  (`theme/`), entre otros. Si el ZIP trae algo con el mismo nombre, gana
+  lo del cliente. El chequeo de espacio cuenta lo que se conserva, y la
+  tienda avisa qué se conservó.
+- **La app entera entra junta o no entra.** Todas sus carpetas y
+  archivos sueltos se preparan aparte y se ponen en su lugar juntos; si
+  algo falla o se cancela, vuelve la versión anterior completa. La
+  versión anterior no se borra hasta que la nueva está bajada a disco.
+  Si hay un corte de luz o se desconecta la unidad en medio del
+  intercambio, la versión anterior queda apartada como respaldo oculto
+  en la unidad: el Recovery Manager la encuentra al volver a conectarla y
+  ofrece devolverla a su lugar si la nueva no llegó a quedar instalada.
+- **No copia configuraciones maestras de relleno.** El `GXGlobal.cfg` y
+  el `nincfg.bin` del repositorio no son configuraciones de verdad (con
+  ese `nincfg.bin`, Nintendont no leería los controles de GameCube): no
+  se copian, las apps arrancan con su configuración de fábrica y queda
+  una nota en el historial. Un `nincfg.bin` que ya está en la unidad no
+  se pisa nunca.
+- El chequeo de espacio cuenta lo que ocupa cada archivo en FAT32, y las
+  instalaciones quedan en el historial.
+
+#### Estabilidad y robustez
+
+- **Configuración dañada:** un config.json que no se puede usar se aparta
+  como `config.json.corrupto-<fecha>` y la ventana avisa dónde quedó;
+  Preferencias guarda solo si algo cambió.
+- **Biblioteca en un disco sin montar:** ya no se crea la carpeta en el
+  disco interno; solo se crea sola la carpeta por defecto (`~/WiiGames`).
+- **Escaneo:** no entra en carpetas ocultas (la papelera de la unidad,
+  los `._` de una Mac); un título raro o un `wit` que falla con un archivo
+  no tumba el escaneo entero; si la unidad se desconecta a mitad se
+  conserva la última lista, y el aviso de carpetas no leídas dice por qué.
+- **Títulos:** los de discos japoneses se leen en Shift-JIS, un título
+  ilegible no llega a un nombre de archivo, y no se ofrece renombrar
+  cuando la única diferencia es la forma de escribir los acentos.
+- **Recovery Manager:** un respaldo de Homebrew con la app ya instalada
+  solo se puede eliminar; "Restaurar" mira el disco en el momento; no
+  quedan partes `.wbf1` sueltas al reemplazar o restaurar.
+- **Desconexiones:** se reconocen también con un punto de montaje fijo
+  (`/mnt/usb`) al enviar, al bajar la copia a disco y al convertir; una
+  relectura que falla porque se fue la unidad no marca el juego como
+  corrupto.
+- **Convertir pisando un juego** baja lo nuevo a disco antes de borrar el
+  original, y la barra ya no se clava al pasar a un formato más grande.
+- **Modo Fábrica** rechaza un disco de más de 2 TiB antes de tocarlo,
+  queda en el historial, y al cerrar a mitad avisa que la unidad quedaría
+  sin montar y sin carpetas.
+- El ticket de una unidad que no se puede leer da un error claro en vez
+  de un PDF con ceros; un selector que devuelve una ubicación sin ruta
+  local (teléfono por MTP) avisa en vez de romper; `wit` se corta en el
+  acto ante un error o un tiempo vencido; las carátulas de juegos solo
+  publicados en España se encuentran en GameTDB.
+- Tienen inglés muchos textos que salían solo en español: los errores
+  del instalador y del catálogo de Homebrew, los blindajes de Modo
+  Fábrica y del montaje, "Expulsar unidad", las configuraciones maestras,
+  el ticket en PDF y varios avisos de la ventana, entre ellos el título y
+  el aviso de cancelación al enviar juegos a una unidad WBFS desde la
+  Biblioteca y el filtro del selector "Agregar archivos". Siguen solo en
+  español los mensajes de error del formateo de Verificar Memoria,
+  incluidos sus cuatro blindajes.
 
 ### 0.2.2
 
