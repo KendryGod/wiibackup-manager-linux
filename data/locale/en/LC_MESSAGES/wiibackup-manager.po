@@ -7,7 +7,7 @@ msgstr ""
 "Project-Id-Version: WiiBackup Manager\n"
 "Report-Msgid-Bugs-To: https://github.com/KendryGod/wiibackup-manager-linux/"
 "issues\n"
-"POT-Creation-Date: 2026-10-18 11:46-0600\n"
+"POT-Creation-Date: 2026-10-18 12:35-0600\n"
 "PO-Revision-Date: 2026-08-30 05:58-0600\n"
 "Last-Translator: GameFix SPS\n"
 "Language-Team: English\n"
@@ -3146,6 +3146,14 @@ msgid ""
 msgstr ""
 "'wit' was not found; the ones that are not WBFS already cannot be converted."
 
+#: wiibackup_manager/window.py:1245
+msgid "Cancelando el envío…"
+msgstr "Cancelling the send…"
+
+#: wiibackup_manager/window.py:1245
+msgid "Enviando a unidad WBFS"
+msgstr "Sending to WBFS drive"
+
 #: wiibackup_manager/window.py:1258
 msgid "Calculando espacio necesario…"
 msgstr "Calculating required space…"
@@ -3523,6 +3531,10 @@ msgid "{n} juego exportado a {name}"
 msgid_plural "{n} juegos exportados a {name}"
 msgstr[0] "{n} game exported to {name}"
 msgstr[1] "{n} games exported to {name}"
+
+#: wiibackup_manager/window.py:2299
+msgid "Imágenes de Wii (*.iso, *.wbfs, *.ciso, *.wdf)"
+msgstr "Wii images (*.iso, *.wbfs, *.ciso, *.wdf)"
 
 #: wiibackup_manager/window.py:2349
 msgid "No se encontraron archivos válidos en esa carpeta."

@@ -1242,7 +1242,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
             return
 
         cancel = self._begin_cancellable_progress(
-            "Enviando a unidad WBFS", "Cancelando el envío…")
+            _("Enviando a unidad WBFS"), _("Cancelando el envío…"))
 
         total = len(games)
         wit_binary = self.settings.wit_binary
@@ -2296,7 +2296,7 @@ class WiiBackupWindow(Adw.ApplicationWindow):
     def _on_add_files(self, *_args):
         dialog = Gtk.FileDialog(title=_("Agregar archivos"))
         filt = Gtk.FileFilter()
-        filt.set_name("Imágenes de Wii (*.iso, *.wbfs, *.ciso, *.wdf)")
+        filt.set_name(_("Imágenes de Wii (*.iso, *.wbfs, *.ciso, *.wdf)"))
         for pattern in ("*.iso", "*.wbfs", "*.ciso", "*.wdf"):
             filt.add_pattern(pattern)
         filters = Gio.ListStore.new(Gtk.FileFilter)
