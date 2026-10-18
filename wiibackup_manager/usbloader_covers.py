@@ -126,8 +126,8 @@ def covers_target(drive_root: Path) -> CoversTarget:
 class CopyResult:
     """Qué pasó con cada juego de la unidad: copiada, ya estaba (no se
     pisa), sin carátula en la caché de este equipo, o con error. `stopped`
-    es que se cortó antes de terminar: se pidió, o la unidad dejó de
-    estar."""
+    es que se cortó antes de terminar, y `disconnected`, que fue porque la
+    unidad dejó de estar (si no, se pidió cortar)."""
 
     target: CoversTarget
     copied: list = field(default_factory=list)
@@ -135,6 +135,7 @@ class CopyResult:
     missing: list = field(default_factory=list)
     failed: list = field(default_factory=list)   # (ID6, motivo)
     stopped: bool = False
+    disconnected: bool = False
 
 
 def _juegos_de_la_unidad(drive_root: Path) -> list:
@@ -157,10 +158,24 @@ def _copiar_sin_pisar(origen: Path, destino: Path) -> None:
         if os.path.lexists(destino):
             raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), str(destino))
 
-    with atomicfs.atomic_write_stream(destino, mkparents=True, fsync=True,
+    with atomicfs.atomic_write_stream(destino, fsync=True,
                                       before_replace=_sin_pisar) as (f, _temporal):
         with open(origen, "rb") as fuente:
             shutil.copyfileobj(fuente, f)
+
+
+def _crear_carpeta(app: Path, carpeta: Path) -> None:
+    """Crea `carpeta` (images/2D) debajo de la carpeta de USB Loader GX,
+    pero nunca la carpeta de la app: si ya no está, la unidad se fue, y
+    recrearla escribiría en el punto de montaje vacío -en el disco
+    interno- en vez de notarlo. Levanta FileNotFoundError en ese caso."""
+    actual = app
+    for parte in carpeta.relative_to(app).parts:
+        actual = actual / parte
+        try:
+            os.mkdir(actual)
+        except FileExistsError:
+            pass
 
 
 def _limpiar_parciales(carpeta: Path) -> None:
@@ -195,11 +210,15 @@ def copy_drive_covers(drive_root: Path, region: str,
     if destino.folder is None:
         return resultado
     _limpiar_parciales(destino.folder)
+    app = root / APP_DIR
     for game_id, console in _juegos_de_la_unidad(root):
+        if should_stop is not None and should_stop():
+            resultado.stopped = True
+            break
         # La carpeta de USB Loader GX tiene que seguir ahí: si no, la
         # unidad se desconectó (o se la cambió) a mitad de camino.
-        if (should_stop is not None and should_stop()) or not os.path.isdir(root / APP_DIR):
-            resultado.stopped = True
+        if not os.path.isdir(app):
+            resultado.stopped = resultado.disconnected = True
             break
         archivo = destino.folder / f"{game_id}.png"
         if os.path.lexists(archivo):
@@ -210,6 +229,7 @@ def copy_drive_covers(drive_root: Path, region: str,
             resultado.missing.append(game_id)
             continue
         try:
+            _crear_carpeta(app, destino.folder)
             _copiar_sin_pisar(origen, archivo)
         except FileExistsError:
             resultado.existing.append(game_id)
@@ -217,4 +237,8 @@ def copy_drive_covers(drive_root: Path, region: str,
             resultado.failed.append((game_id, e.strerror or str(e)))
         else:
             resultado.copied.append(game_id)
+    # Si lo último que falló fue porque la unidad se fue, no quedó otra
+    # vuelta para notarlo.
+    if resultado.failed and not resultado.stopped and not os.path.isdir(app):
+        resultado.stopped = resultado.disconnected = True
     return resultado

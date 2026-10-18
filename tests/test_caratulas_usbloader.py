@@ -471,7 +471,8 @@ def test_los_mensajes_y_el_historial(gtk, tmp_path):
     sin_loader = CopyResult(CoversTarget(None, usbloader_covers.NO_LOADER))
     vacia = CopyResult(CoversTarget(raiz))
     mezcla = CopyResult(CoversTarget(raiz), copied=["RMCE01"], existing=["A", "B"],
-                        failed=[("SMNE01", "Input/output error")], stopped=True)
+                        failed=[("SMNE01", "Input/output error")], stopped=True,
+                        disconnected=True)
 
     assert TransferView._covers_message(sin_loader, None) == (
         "Esta unidad no tiene USB Loader GX (falta la carpeta apps/usbloader_gx): "
@@ -479,15 +480,17 @@ def test_los_mensajes_y_el_historial(gtk, tmp_path):
     assert TransferView._covers_message(vacia, None) == (
         "No hay juegos en la unidad para copiarles la carátula.")
     assert TransferView._covers_message(mezcla, None) == (
-        "Carátulas para USB Loader GX: 1 copiada, 2 ya estaban, 1 no se pudo copiar. "
-        "Se cortó antes de terminar: revisá que la unidad siga conectada.")
+        "Carátulas para USB Loader GX: 1 copiada, 2 ya estaban, 1 no se pudo copiar "
+        "(SMNE01: Input/output error). Se cortó antes de terminar: revisá que la "
+        "unidad siga conectada.")
     assert TransferView._covers_message(None, "Permiso denegado") == (
         "No se pudieron copiar las carátulas: Permiso denegado")
 
     assert TransferView._covers_outcome(raiz, sin_loader, None) is None
     assert TransferView._covers_outcome(raiz, vacia, None) is None
     con_error = TransferView._covers_outcome(raiz, mezcla, None)
-    assert (con_error.status, con_error.target) == (oplog.STATUS_ERROR, "SD cliente")
+    assert (con_error.status, con_error.target) == (oplog.STATUS_DISCONNECTED,
+                                                    "SD cliente")
     bien = TransferView._covers_outcome(raiz, CopyResult(CoversTarget(raiz),
                                                          copied=["RMCE01"]), None)
     assert (bien.status, bien.detail) == (oplog.STATUS_OK,

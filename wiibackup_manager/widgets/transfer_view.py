@@ -1045,10 +1045,19 @@ class TransferView(Gtk.Box):
         """La entrada del historial: solo si se intentó escribir algo."""
         if error is not None:
             return OperationOutcome(oplog.STATUS_ERROR, dest.name or str(dest), error)
-        if resultado is None or not (resultado.copied or resultado.failed):
+        if resultado is None or not (resultado.copied or resultado.failed
+                                     or resultado.stopped):
             return None
         detalle = TransferView._covers_message(resultado, None)
-        estado = oplog.STATUS_ERROR if resultado.failed else oplog.STATUS_OK
+        # Con los estados de siempre: cortada no es "Completada".
+        if resultado.disconnected:
+            estado = oplog.STATUS_DISCONNECTED
+        elif resultado.stopped:
+            estado = oplog.STATUS_CANCELLED
+        elif resultado.failed:
+            estado = oplog.STATUS_PARTIAL if resultado.copied else oplog.STATUS_ERROR
+        else:
+            estado = oplog.STATUS_OK
         return OperationOutcome(estado, dest.name or str(dest), detalle)
 
     def _on_covers_done(self, resultado, error):
@@ -1085,16 +1094,22 @@ class TransferView(Gtk.Box):
                                    "{n} juegos sin carátula guardada en este equipo",
                                    n).format(n=n))
         if resultado.failed:
+            # Con el motivo del primero: "sin espacio", "solo lectura" o
+            # "error de E/S" piden cosas distintas.
             n = len(resultado.failed)
-            partes.append(ngettext("{n} no se pudo copiar", "{n} no se pudieron copiar",
-                                   n).format(n=n))
+            primero, motivo = resultado.failed[0]
+            partes.append(ngettext("{n} no se pudo copiar ({id}: {reason})",
+                                   "{n} no se pudieron copiar (la primera, {id}: "
+                                   "{reason})", n).format(n=n, id=primero,
+                                                          reason=motivo))
         if not partes and not resultado.stopped:
             return _("No hay juegos en la unidad para copiarles la carátula.")
         mensaje = _("Carátulas para USB Loader GX: {detail}.").format(
             detail=", ".join(partes)) if partes else ""
         if resultado.stopped:
-            mensaje = (mensaje + " " if mensaje else "") + _(
-                "Se cortó antes de terminar: revisá que la unidad siga conectada.")
+            mensaje = (mensaje + " " if mensaje else "") + (
+                _("Se cortó antes de terminar: revisá que la unidad siga conectada.")
+                if resultado.disconnected else _("Se canceló antes de terminar."))
         return mensaje
 
     def _update_eject_button(self):
