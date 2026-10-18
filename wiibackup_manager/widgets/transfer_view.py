@@ -1039,25 +1039,36 @@ class TransferView(Gtk.Box):
             return
         region = self.settings.cover_region
         cancelar = self._covers_cancel = threading.Event()
+        # Foto ANTES de escribir, como en la cola: solo si era un punto de
+        # montaje, "dejó de serlo" quiere decir que se fue.
+        era_montaje = drives.is_mount_point(dest)
         self._update_dest_buttons()
 
         def worker():
-            resultado, error = None, None
+            resultado, error, desconectada = None, None, False
             try:
                 resultado = usbloader_covers.copy_drive_covers(
                     dest, region, should_stop=cancelar.is_set)
             except Exception as e:  # noqa: BLE001 - se le muestra al usuario
                 error = (e.strerror if isinstance(e, OSError) else None) or str(e)
+                # Un listado que falla porque la unidad ya no está no es un
+                # error de la copia (mismo criterio que el resto de la app).
+                desconectada = isinstance(e, OSError) and drives.device_is_gone(
+                    mount_point=dest if era_montaje else None, known_dir=dest, exc=e)
             finally:
-                self.ops.finish(op, self._covers_outcome(dest, resultado, error))
-            GLib.idle_add(self._on_covers_done, resultado, error)
+                self.ops.finish(op, self._covers_outcome(dest, resultado, error,
+                                                         desconectada))
+            GLib.idle_add(self._on_covers_done, resultado, error, desconectada)
 
         threading.Thread(target=worker, daemon=True, name="usbloader-covers").start()
 
     @staticmethod
-    def _covers_outcome(dest: Path, resultado, error):
+    def _covers_outcome(dest: Path, resultado, error, disconnected: bool = False):
         """La entrada del historial: solo si se intentó escribir algo."""
         if error is not None:
+            if disconnected:
+                return OperationOutcome(oplog.STATUS_DISCONNECTED, dest.name or str(dest),
+                                        drives.disconnected_message())
             return OperationOutcome(oplog.STATUS_ERROR, dest.name or str(dest), error)
         if resultado is None or not (resultado.copied or resultado.failed
                                      or resultado.stopped):
@@ -1074,18 +1085,20 @@ class TransferView(Gtk.Box):
             estado = oplog.STATUS_OK
         return OperationOutcome(estado, dest.name or str(dest), detalle)
 
-    def _on_covers_done(self, resultado, error):
+    def _on_covers_done(self, resultado, error, disconnected: bool = False):
         self._covers_cancel = None
         if not gtk_helpers.widget_is_alive(self):
             return False
         self._update_dest_buttons()
         if resultado is not None and resultado.copied:
             self._update_dest_space_label()
-        self._show_toast(self._covers_message(resultado, error))
+        self._show_toast(self._covers_message(resultado, error, disconnected))
         return False
 
     @staticmethod
-    def _covers_message(resultado, error) -> str:
+    def _covers_message(resultado, error, disconnected: bool = False) -> str:
+        if error is not None and disconnected:
+            return drives.disconnected_message()
         if error is not None:
             return _("No se pudieron copiar las carátulas: {error}").format(error=error)
         destino = resultado.target

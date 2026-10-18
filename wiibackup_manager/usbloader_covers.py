@@ -240,8 +240,11 @@ def copy_drive_covers(drive_root: Path, region: str,
             resultado.failed.append((game_id, e.strerror or str(e)))
         else:
             resultado.copied.append(game_id)
-    # Si lo último que falló fue porque la unidad se fue, no quedó otra
-    # vuelta para notarlo.
-    if resultado.failed and not resultado.stopped and not os.path.isdir(app):
+    # Si la unidad se fue en la última vuelta -o mientras se listaban los
+    # juegos: un listado de una carpeta que ya no está da cero juegos-, no
+    # quedó otra vuelta para notarlo. La carpeta de USB Loader GX estaba al
+    # empezar (`covers_target`), así que si ahora no está, se fue: una
+    # unidad sana sin juegos la sigue teniendo.
+    if not resultado.stopped and not os.path.isdir(app):
         resultado.stopped = resultado.disconnected = True
     return resultado
