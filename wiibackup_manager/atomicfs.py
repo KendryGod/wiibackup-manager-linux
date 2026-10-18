@@ -36,6 +36,7 @@ convertirlo en otra cosa sin que este módulo se entere.
 """
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 import tempfile
@@ -422,6 +423,88 @@ def staged_directory(target_dir: Path, *, staging_marca: str = "staging",
     handle.orphaned_backups = tx.commit()
 
 
+def fsync_path(ruta: Path) -> None:
+    """Baja a disco un archivo o una carpeta (su lista de entradas: es lo
+    que hace durable un rename hecho adentro). Algunos sistemas de archivos
+    no admiten `fsync` de una carpeta (EINVAL): ahí se sigue sin él."""
+    fd = os.open(ruta, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    except OSError as e:
+        if not (os.path.isdir(ruta) and e.errno in (errno.EINVAL, errno.ENOTSUP)):
+            raise
+    finally:
+        os.close(fd)
+
+
+def _cargar_syncfs():
+    """`syncfs(2)` de la libc, o None si no está (otra libc, otro sistema)."""
+    try:
+        import ctypes
+        funcion = ctypes.CDLL(None, use_errno=True).syncfs
+    except (OSError, AttributeError):
+        return None
+    funcion.argtypes = [ctypes.c_int]
+    funcion.restype = ctypes.c_int
+    return funcion
+
+
+# Baja a disco TODO lo pendiente del sistema de archivos de un descriptor
+# -datos y carpetas- en una sola llamada. Para cientos de archivos chicos
+# en un pendrive es mucho más barato que un `fsync` por archivo (cada uno
+# escribe también la FAT y la entrada de carpeta), con la misma garantía.
+_SYNCFS = _cargar_syncfs()
+
+
+def _syncfs(ruta: Path) -> bool:
+    """`syncfs` del sistema de archivos de `ruta`. False si no hay
+    `syncfs`; levanta OSError si la bajada a disco falló."""
+    if _SYNCFS is None:
+        return False
+    fd = os.open(ruta, os.O_RDONLY)
+    try:
+        if _SYNCFS(fd) == 0:
+            return True
+        import ctypes
+        error = ctypes.get_errno()
+    finally:
+        os.close(fd)
+    if error == errno.ENOSYS:
+        return False
+    raise OSError(error, os.strerror(error), str(ruta))
+
+
+def _sync_paths(rutas: list, *, tree: bool) -> None:
+    """Baja a disco `rutas`: con un `syncfs` por sistema de archivos, o, si
+    no hay, con `fsync` de cada una (y de todo lo que tenga adentro si
+    `tree`)."""
+    hechos = set()
+    for ruta in rutas:
+        dispositivo = os.stat(ruta).st_dev
+        if dispositivo in hechos:
+            continue
+        if _syncfs(ruta):
+            hechos.add(dispositivo)
+        elif tree:
+            _fsync_tree(ruta)
+        else:
+            fsync_path(ruta)
+
+
+def _fsync_tree(raiz: Path) -> None:
+    """`fsync_path` de cada archivo y carpeta de `raiz` (o de `raiz`, si es
+    un archivo). Los enlaces simbólicos no se siguen."""
+    if not os.path.isdir(raiz) or os.path.islink(raiz):
+        fsync_path(raiz)
+        return
+    for carpeta, _subcarpetas, archivos in os.walk(raiz):
+        for nombre in archivos:
+            ruta = os.path.join(carpeta, nombre)
+            if not os.path.islink(ruta):
+                fsync_path(Path(ruta))
+        fsync_path(Path(carpeta))
+
+
 def _borrar(ruta: Path) -> None:
     """Borra un archivo o una carpeta entera, sin quejarse si ya no está o
     no se puede: es la limpieza de algo que NUNCA llegó a reemplazar nada."""
@@ -474,8 +557,14 @@ class StagedSwap:
     vacías: un intento fallido no deja rastros."""
 
     def __init__(self, *, staging_marca: str = "staging",
-                 backup_marca: str = "respaldo") -> None:
+                 backup_marca: str = "respaldo", durable: bool = False) -> None:
         self._staging_marca = staging_marca
+        # Con `durable`, `commit` baja a disco lo preparado antes de
+        # intercambiar, y las carpetas de los renames antes de borrar los
+        # respaldos: un corte después de borrarlos ya no deja la versión
+        # nueva a medio escribir (lo usa la instalación de homebrew en la
+        # unidad del cliente).
+        self._durable = durable
         self._aside = SetAside(backup_marca)
         # (destino, preparado), en el orden en que se prepararon.
         self._preparados: list = []
@@ -543,12 +632,19 @@ class StagedSwap:
         oportunidad de echarse atrás (si levanta, se deshace todo y la
         excepción sigue)."""
         try:
+            if self._durable:
+                _sync_paths([preparado for _d, preparado in self._preparados], tree=True)
+            carpetas = []
             while self._preparados:
                 destino, preparado = self._preparados[0]
                 if os.path.lexists(destino):
                     self._aside.move_aside(destino)
                 os.replace(preparado, destino)
                 self._intercambiados.append(self._preparados.pop(0))
+                if destino.parent not in carpetas:
+                    carpetas.append(destino.parent)
+            if self._durable:
+                _sync_paths(carpetas, tree=False)
             if confirm is not None:
                 confirm()
         except BaseException as e:

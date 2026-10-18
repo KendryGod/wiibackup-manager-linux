@@ -667,7 +667,8 @@ def _instalar_todo(zf: zipfile.ZipFile, unidades: dict, sueltos: list,
     la misma excepción que `DestinationGuard` para el caso equivalente con
     archivos WBFS: la estructura es distinta, pero el problema es el
     mismo."""
-    tx = atomicfs.StagedSwap(staging_marca=MARCA_STAGING, backup_marca=MARCA_RESPALDO)
+    tx = atomicfs.StagedSwap(staging_marca=MARCA_STAGING, backup_marca=MARCA_RESPALDO,
+                             durable=True)
     escritos: list = []
     conservados: list = []
     try:
