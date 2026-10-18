@@ -3060,6 +3060,14 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         riesgosas = self.ops.unsafe_to_interrupt()
         if not riesgosas:
             self._shutdown_views()
+            if self.ops.settle_before_close():
+                # Algo que se corta solo en un instante (la copia de
+                # carátulas): sin preguntar, se espera a que termine lo
+                # que está escribiendo. Desde el temporizador y no acá
+                # adentro, para no cerrar dentro de este mismo aviso.
+                self._closing = True
+                self._close_timer(0, lambda: bool(self._close_after_cancel()))
+                return True
             return False  # False = seguir con el cierre normal
 
         self._confirm_close(riesgosas)

@@ -174,13 +174,22 @@ READ_ONLY_KINDS = frozenset(
 # `IMPORTING`, que escribe en un temporal oculto y recién al final lo
 # mueve al destino -si se corta, el original del usuario sigue intacto y
 # el resto lo encuentra el Recovery Manager-. `COPYING_COVERS` es igual:
-# cada carátula va a un temporal oculto y entra con un rename, y lo peor
-# que deja es ese temporal, que USB Loader GX no mira.
+# cada carátula va a un temporal oculto y entra con un rename. Igual se la
+# espera al cerrar (`SETTLE_BEFORE_CLOSE_KINDS`), y un temporal que quede
+# de un corte lo borra la próxima copia (`usbloader_covers`).
 INTERRUPT_UNSAFE_KINDS = frozenset(
     {OperationKind.CHECKING_MEMORY, OperationKind.FORMATTING,
      OperationKind.TRANSFERRING, OperationKind.CONVERTING,
      OperationKind.VERIFYING, OperationKind.INSTALLING_HOMEBREW}
 )
+
+# Las que no hace falta preguntar al cerrar -se cortan solas en un
+# instante- pero sí esperar: `COPYING_COVERS` termina la carátula que está
+# escribiendo (pocos KB) y para. Cerrar sin esperarla podía matar el hilo
+# con un temporal a medias en images/2D, adonde el Recovery Manager no
+# llega (ver `usbloader_covers`). Se espera con el mismo tope que lo
+# demás (`close_when_settled`).
+SETTLE_BEFORE_CLOSE_KINDS = frozenset({OperationKind.COPYING_COVERS})
 
 # De las de arriba, las que además no se pueden cancelar: no hay a quién
 # pedirle que pare. `format_as_wii_usb` corre `mkfs` a través de `pkexec`,
@@ -221,7 +230,7 @@ def close_when_settled(ops: "OperationManager", close: Callable[[], None],
     limite = clock() + timeout
 
     def revisar() -> bool:
-        pendientes = [op for op in ops.unsafe_to_interrupt()
+        pendientes = [op for op in ops.unsafe_to_interrupt() + ops.settle_before_close()
                       if op.kind not in UNCANCELLABLE_KINDS]
         if pendientes and clock() < limite:
             return True     # seguir mirando
@@ -380,6 +389,13 @@ class OperationManager:
             if op.label not in labels:
                 labels.append(op.label)
         return " · ".join(labels)
+
+    def settle_before_close(self) -> list:
+        """Las operaciones en curso que, al cerrar, se cortan y se esperan
+        sin preguntar (ver `SETTLE_BEFORE_CLOSE_KINDS`)."""
+        with self._lock:
+            return [op for op in self._active.values()
+                    if op.kind in SETTLE_BEFORE_CLOSE_KINDS]
 
     def unsafe_to_interrupt(self) -> list:
         """Las operaciones en curso que no se pueden cortar de golpe, de la

@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import errno
 import os
+import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -59,6 +60,15 @@ _DEFAULT_COVERS2D = frozenset({
 # Un GXGlobal.cfg real mide unos KB; esto es solo para no leer entero un
 # archivo enorme que no es lo que dice ser.
 _MAX_CONFIG_BYTES = 1024 * 1024
+
+# El temporal con el que `_copiar_sin_pisar` escribe cada carátula
+# (`atomicfs`: `.<ID6>.png.parcial-<azar>`). Si el proceso muere a mitad
+# -kill -9, corte de luz- queda ahí, y el Recovery Manager no baja hasta
+# images/2D (`recovery_service.MAX_DEPTH`): por eso se limpia al empezar la
+# próxima copia. Solo los de esta forma exacta, con un ID6 en mayúsculas
+# como los que escribe esta app: nada más de esa carpeta es nuestro.
+_PARCIAL_PROPIO = re.compile(
+    r"^\.[A-Z0-9]{6}\.png\." + re.escape(atomicfs.MARCA_PARCIAL) + r"-[^/]+$")
 
 # Por qué no se puede copiar (ver `covers_target`).
 NO_LOADER = "no-loader"      # la unidad no tiene apps/usbloader_gx
@@ -153,6 +163,24 @@ def _copiar_sin_pisar(origen: Path, destino: Path) -> None:
             shutil.copyfileobj(fuente, f)
 
 
+def _limpiar_parciales(carpeta: Path) -> None:
+    """Borra de `carpeta` los temporales propios que dejó una copia que no
+    terminó (ver `_PARCIAL_PROPIO`). Solo archivos comunes; lo que no se
+    pueda borrar se deja."""
+    try:
+        with os.scandir(carpeta) as entradas:
+            huerfanos = [e.path for e in entradas
+                         if _PARCIAL_PROPIO.match(e.name)
+                         and e.is_file(follow_symlinks=False)]
+    except OSError:
+        return
+    for ruta in huerfanos:
+        try:
+            os.unlink(ruta)
+        except OSError:
+            pass
+
+
 def copy_drive_covers(drive_root: Path, region: str,
                       should_stop: Optional[Callable[[], bool]] = None) -> CopyResult:
     """Copia a la carpeta de USB Loader GX de `drive_root` la carátula de
@@ -166,6 +194,7 @@ def copy_drive_covers(drive_root: Path, region: str,
     resultado = CopyResult(target=destino)
     if destino.folder is None:
         return resultado
+    _limpiar_parciales(destino.folder)
     for game_id, console in _juegos_de_la_unidad(root):
         # La carpeta de USB Loader GX tiene que seguir ahí: si no, la
         # unidad se desconectó (o se la cambió) a mitad de camino.
