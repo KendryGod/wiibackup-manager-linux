@@ -611,6 +611,13 @@ class HomebrewStoreView(Gtk.Box):
             self._show_toast(
                 _("'{name}' instalada ({n} archivo(s)).")
                 .format(name=app.name, n=len(result.installed_paths)))
+            # Al reinstalar, que se sepa que lo del cliente sigue ahí (ver
+            # `oscwii_installer.PRESERVED_PATHS`).
+            if result.preserved_paths:
+                self._show_toast(
+                    _("Se conservaron los datos del cliente de '{name}': {paths}.")
+                    .format(name=app.name, paths=", ".join(
+                        Path(p).name for p in result.preserved_paths)))
             # Aviso aparte: la app en sí se instaló bien de todos modos,
             # así que un problema acá no cambia el estado de la tarjeta
             # (`state` sigue siendo DONE) -solo se le suma un segundo

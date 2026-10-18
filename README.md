@@ -463,9 +463,10 @@ probarlo en la consola. Lo que hay que saber:
 - Copia solo las que ya están en la caché de este equipo (las que se ven
   en Juegos, en la región elegida en Preferencias); no baja nada ni pisa
   ninguna que ya esté en la unidad.
-- Reinstalar o actualizar USB Loader GX desde la Homebrew Store reemplaza
-  su carpeta entera, con las carátulas adentro: después hay que volver a
-  copiarlas.
+- Reinstalar o actualizar USB Loader GX desde la Homebrew Store conserva
+  sus carátulas (`images/`), su `GXGlobal.cfg` y el resto de lo que es del
+  cliente en su carpeta; lo que no está en esa lista (las cachés, las
+  capturas `Screenshot_*.png`) se pierde, como antes.
 
 ## Reportar un error o pedir una función
 

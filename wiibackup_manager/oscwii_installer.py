@@ -61,6 +61,11 @@ Flujo de `install_app`, en orden, y por qué:
       esto, cancelar con la primera unidad ya intercambiada dejaba esa
       unidad nueva -con su respaldo ya borrado- y el resto viejo. Ver
       `_instalar_todo`.
+   c. Lo que es del cliente adentro de la carpeta de una app
+      (`PRESERVED_PATHS`: la configuración y las carátulas de USB Loader
+      GX, por ejemplo) se COPIA de la versión instalada a la staging en
+      el paso (a), antes de intercambiar nada: entra junto con lo nuevo, y
+      la versión anterior queda entera hasta el final.
 
    Nunca se ejecuta ni el binario (.dol/.elf) ni ningún script: se copian
    bytes nomás.
@@ -120,6 +125,44 @@ DEFAULT_CLUSTER_BYTES = 32 * 1024
 # suma un segundo destino válido conocido.
 _ALLOWED_TOP_LEVEL_DIRS = ("apps", "controllers")
 
+# Lo que es del cliente adentro de la carpeta de una app, por unidad del
+# ZIP ("apps/<App>", en minúsculas). Reinstalar o actualizar reemplaza la
+# carpeta entera (`_instalar_todo`), así que sin esta lista se perdía, por
+# ejemplo, la configuración de USB Loader GX con sus carátulas. Lo de acá
+# se copia de la versión instalada a la nueva ANTES del intercambio (ver
+# `_copiar_del_cliente`). Solo entra algo con evidencia en el código de la
+# app.
+#
+# USB Loader GX (wiidev/usbloadergx, release v4.0-r1283) guarda todo en su
+# carpeta (`ConfigPath`, source/settings/CSettings.cpp):
+# - GXGlobal.cfg: la configuración (CSettings::Load / Save).
+# - GXGameSettings.cfg, GXGameStatistics.cfg y GXGameCategories.xml: los
+#   ajustes por juego, las veces jugado y favoritos, y las categorías
+#   (CGameSettings.cpp, CGameStatistics.cpp, CGameCategories.cpp).
+# - Wiinnertag.xml (`WiinnertagPath`, network/Wiinnertag.cpp) y font.ttf,
+#   la fuente propia (`Theme::LoadFont(ConfigPath)`, themes/CTheme.cpp).
+# - GameList.csv y GameList.txt: la lista de juegos que exporta
+#   (`save_gamelist`, prompts/gameinfo.cpp).
+# - images/: las carátulas 3D, 2D, completas y de disco (`covers_path`,
+#   `covers2d_path`, `coversFull_path`, `disc_path`).
+# - theme/: los temas instalados (`theme_path`, themes/ThemeMenu.cpp).
+# Afuera a propósito: cache/, cache_bnr/ y TitlesCache.bin (cachés que
+# vuelve a armar solo), language/ y wiitdb.xml (los trae el ZIP y tienen
+# que ser los de la versión nueva) y las capturas Screenshot_*.png (llevan
+# la fecha en el nombre: no son una ruta fija).
+#
+# Nintendont no tiene nada así: guarda su configuración (nincfg.bin), las
+# partidas (saves/) y los perfiles de mandos (controllers/) fuera de su
+# carpeta, y adentro solo quedan titles.txt y gcn_md5.txt, que baja su
+# propio actualizador (loader/source/update.c).
+PRESERVED_PATHS = {
+    "apps/usbloader_gx": (
+        "GXGlobal.cfg", "GXGameSettings.cfg", "GXGameStatistics.cfg",
+        "GXGameCategories.xml", "Wiinnertag.xml", "font.ttf",
+        "GameList.csv", "GameList.txt", "images", "theme",
+    ),
+}
+
 
 class InstallStatus(Enum):
     OK = "ok"
@@ -165,6 +208,10 @@ class InstallResult:
     # quedaron carpetas ocultas ocupando espacio en la unidad, y eso hay
     # que decirlo.
     orphaned_backups: tuple = ()
+    # Lo del cliente que estaba en la versión anterior y pasó entero a la
+    # nueva (ver `PRESERVED_PATHS`): rutas finales, una por cada cosa de
+    # la lista que existía.
+    preserved_paths: tuple = ()
 
     @property
     def ok(self) -> bool:
@@ -509,9 +556,89 @@ def _copiar_miembro(zf: zipfile.ZipFile, info: zipfile.ZipInfo, destino: Path) -
         shutil.copyfileobj(src, dst)
 
 
+@dataclass(frozen=True)
+class _DelCliente:
+    """Una cosa de `PRESERVED_PATHS` que el cliente tiene en la versión
+    instalada: de qué unidad es, su nombre en la lista, dónde está, cuántos
+    archivos copia (para la barra) y cuánto ocupa la copia en el destino."""
+
+    unit_key: str
+    nombre: str
+    origen: Path
+    archivos: int
+    ocupa: int
+
+
+def _medir(ruta: Path, cluster: int) -> Optional[tuple]:
+    """(archivos, bytes que ocupa la copia) de `ruta`: cada archivo
+    redondeado al clúster, como `_space_needed`, y cada carpeta un clúster.
+    None si no está o no es un archivo ni una carpeta (un enlace simbólico
+    no se sigue ni se copia). Tampoco está si la carpeta de la app es en
+    realidad un archivo: ahí no hay nada adentro que conservar."""
+    try:
+        info = os.lstat(ruta)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    if stat.S_ISREG(info.st_mode):
+        return 1, -(-info.st_size // cluster) * cluster
+    if not stat.S_ISDIR(info.st_mode):
+        return None
+    archivos, ocupa = 0, cluster
+    with os.scandir(ruta) as entradas:
+        nombres = [e.name for e in entradas]
+    for nombre in nombres:
+        medido = _medir(ruta / nombre, cluster)
+        if medido is not None:
+            archivos += medido[0]
+            ocupa += medido[1]
+    return archivos, ocupa
+
+
+def _plan_del_cliente(unidades: dict, dest_root: Path, cluster: int) -> list:
+    """Lo de `PRESERVED_PATHS` que el cliente tiene en la versión instalada
+    de cada unidad del ZIP. Solo lee. Levanta OSError si la unidad no se
+    puede leer: mejor no instalar que perder lo del cliente."""
+    plan = []
+    for unit_key in unidades:
+        for nombre in PRESERVED_PATHS.get(unit_key.lower(), ()):
+            origen = dest_root / unit_key / nombre
+            medido = _medir(origen, cluster)
+            if medido is not None:
+                plan.append(_DelCliente(unit_key, nombre, origen, *medido))
+    return plan
+
+
+def _copiar_del_cliente(origen: Path, destino: Path,
+                        cancel_event: Optional[threading.Event],
+                        on_step: Callable[[], None]) -> None:
+    """Copia `origen` -algo del cliente en la versión instalada- a
+    `destino`, adentro de la carpeta de staging. Gana lo del cliente: lo
+    que haya puesto el ZIP con ese nombre se reemplaza, y en una carpeta lo
+    del cliente se suma a lo del ZIP. `origen` solo se lee: si algo falla o
+    se cancela, la versión anterior queda entera. Un enlace simbólico (o
+    algo que no es archivo ni carpeta) no se sigue ni se copia."""
+    info = os.lstat(origen)
+    if stat.S_ISDIR(info.st_mode):
+        if os.path.lexists(destino) and not os.path.isdir(destino):
+            os.unlink(destino)
+        destino.mkdir(exist_ok=True)
+        with os.scandir(origen) as entradas:
+            nombres = sorted(e.name for e in entradas)
+        for nombre in nombres:
+            _copiar_del_cliente(origen / nombre, destino / nombre, cancel_event, on_step)
+    elif stat.S_ISREG(info.st_mode):
+        _check_cancel(cancel_event)
+        if os.path.isdir(destino) and not os.path.islink(destino):
+            shutil.rmtree(destino)
+        with open(origen, "rb") as src, open(destino, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+        on_step()
+
+
 def _instalar_todo(zf: zipfile.ZipFile, unidades: dict, sueltos: list,
                    dest_root: Path, cancel_event: Optional[threading.Event],
-                   on_step: Callable[[], None]) -> tuple[list, list]:
+                   on_step: Callable[[], None],
+                   del_cliente: tuple = ()) -> tuple[list, list, list]:
     """Instala la app entera como una transacción: todo o nada, nunca una
     mezcla de archivos viejos y nuevos, ni una unidad nueva con otra vieja.
 
@@ -523,12 +650,18 @@ def _instalar_todo(zf: zipfile.ZipFile, unidades: dict, sueltos: list,
     se tocó; si falla el intercambio, o se cancela justo al final, vuelve
     la versión anterior entera.
 
-    Devuelve (rutas finales escritas, respaldos que no se pudieron
-    borrar). Lo segundo casi siempre viene vacío: si ESE borrado falla, la
-    app quedó bien instalada pero su versión anterior sigue ocupando lugar
-    en una carpeta oculta que el usuario no va a encontrar solo, así que
-    se reporta en vez de ignorarse (mismo criterio que
-    `library_ops.DestinationGuard._discard`).
+    `del_cliente` (ver `_plan_del_cliente`) es lo que el cliente tiene en
+    la versión instalada y tiene que pasar a la nueva: se copia a la
+    staging de su unidad después de extraer el ZIP y antes de intercambiar
+    nada, así que entra en la misma transacción y la versión anterior no se
+    toca hasta el final.
+
+    Devuelve (rutas finales escritas, respaldos que no se pudieron borrar,
+    rutas finales de lo que se conservó del cliente). Lo segundo casi
+    siempre viene vacío: si ESE borrado falla, la app quedó bien instalada
+    pero su versión anterior sigue ocupando lugar en una carpeta oculta
+    que el usuario no va a encontrar solo, así que se reporta en vez de
+    ignorarse (mismo criterio que `library_ops.DestinationGuard._discard`).
 
     Si deshacer también falla levanta `library_ops.RollbackFailedError`,
     la misma excepción que `DestinationGuard` para el caso equivalente con
@@ -536,6 +669,7 @@ def _instalar_todo(zf: zipfile.ZipFile, unidades: dict, sueltos: list,
     mismo."""
     tx = atomicfs.StagedSwap(staging_marca=MARCA_STAGING, backup_marca=MARCA_RESPALDO)
     escritos: list = []
+    conservados: list = []
     try:
         for unit_key, unit_members in unidades.items():
             _check_cancel(cancel_event)
@@ -549,6 +683,13 @@ def _instalar_todo(zf: zipfile.ZipFile, unidades: dict, sueltos: list,
                 _copiar_miembro(zf, info, destino)
                 escritos.append(final_dir / relativo)
                 on_step()
+            # Después del ZIP, para que con el mismo nombre gane lo del
+            # cliente.
+            for item in del_cliente:
+                if item.unit_key == unit_key:
+                    _copiar_del_cliente(item.origen, staging / item.nombre,
+                                        cancel_event, on_step)
+                    conservados.append(final_dir / item.nombre)
         for info in sueltos:
             _check_cancel(cancel_event)
             final = dest_root / info.filename
@@ -565,7 +706,7 @@ def _instalar_todo(zf: zipfile.ZipFile, unidades: dict, sueltos: list,
     except atomicfs.SwapRollbackFailed as e:
         raise library_ops.RollbackFailedError(
             e.pending, original_error=e.original_error) from e.original_error
-    return escritos, huerfanos
+    return escritos, huerfanos, conservados
 
 
 # -------------------------------------------------------------------- API --
@@ -688,8 +829,15 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
 
             try:
                 members = [i for i in zf.infolist() if not i.is_dir()]
+                unidades, sueltos = _group_members(members)
+                cluster = _cluster_size(dest_root)
+                # Lo del cliente se copia mientras la versión anterior sigue
+                # en su lugar: ocupa lugar dos veces hasta el final, y hay
+                # que contarlo.
+                del_cliente = _plan_del_cliente(unidades, dest_root, cluster)
 
-                needed = _space_needed(members, _cluster_size(dest_root))
+                needed = (_space_needed(members, cluster)
+                          + sum(item.ocupa for item in del_cliente))
                 free = transfer_plan.free_space(dest_root)
                 if free is not None and needed > free:
                     return InstallResult(
@@ -698,23 +846,24 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
                             need=formatting.format_size(needed),
                             free=formatting.format_size(free)))
 
-                unidades, sueltos = _group_members(members)
-                total = len(members)
+                total = len(members) + sum(item.archivos for item in del_cliente)
                 hechos = [0]
 
                 def _paso() -> None:
                     hechos[0] += 1
                     _report(on_progress, "extract",
-                           (hechos[0] / total) if total else 1.0)
+                           min(hechos[0] / total, 1.0) if total else 1.0)
 
-                written, huerfanos = _instalar_todo(
-                    zf, unidades, sueltos, dest_root, cancel_event, _paso)
+                written, huerfanos, conservados = _instalar_todo(
+                    zf, unidades, sueltos, dest_root, cancel_event, _paso,
+                    tuple(del_cliente))
             finally:
                 zf.close()
 
         return InstallResult(InstallStatus.OK, app.slug,
                              installed_paths=tuple(written),
-                             orphaned_backups=tuple(huerfanos))
+                             orphaned_backups=tuple(huerfanos),
+                             preserved_paths=tuple(conservados))
 
     except CancelRequested:
         return InstallResult(InstallStatus.CANCELLED, app.slug,
