@@ -468,6 +468,23 @@ probarlo en la consola. Lo que hay que saber:
   cliente en su carpeta; lo que no está en esa lista (las cachés, las
   capturas `Screenshot_*.png`) se pierde, como antes.
 
+**Configuraciones maestras de la Homebrew Store.** Las que trae el
+repositorio (`assets/configs/`) son de relleno, y la tienda no las copia
+a la unidad: el `GXGlobal.cfg` de USB Loader GX lleva la marca
+`PLACEHOLDER`, y el `nincfg.bin` de Nintendont es un archivo sintético
+(solo la firma y la versión; con él, Nintendont no leería los puertos de
+control de GameCube). Las dos apps arrancan con su configuración de
+fábrica, y en el historial queda una nota. Para usar una configuración
+maestra de verdad, reemplazá el archivo por uno que haya guardado la
+propia app: se copia solo a una unidad que no tenga el suyo, y uno que ya
+esté en la unidad no se pisa nunca.
+
+**Perfiles de mandos de Nintendont.** Reinstalar o actualizar Nintendont
+desde la Homebrew Store vuelve a escribir los `controllers/*.ini` que
+trae su ZIP: si el cliente había ajustado el perfil de alguno de esos
+mandos, ese ajuste se pierde. Los perfiles de los demás mandos no se
+tocan.
+
 ## Reportar un error o pedir una función
 
 Los reportes van a

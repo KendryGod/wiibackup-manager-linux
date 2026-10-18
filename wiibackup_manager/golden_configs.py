@@ -87,6 +87,20 @@ nincfg.bin (Nintendont)
   `apps/Nintendont/`. Confirmado en el código fuente real del propio
   loader (FIX94/Nintendont, loader/source/global.c):
   `f_open_char(&cfg, "/nincfg.bin", FA_READ|FA_OPEN_EXISTING)`.
+- El `assets/configs/nintendont/nincfg.bin` del repositorio es sintético:
+  548 bytes con solo `Magicbytes` (01 07 0C F6) y `Version` (10), y todo
+  lo demás en cero. Nintendont lo carga como válido (`LoadNinCFG`,
+  loader/source/global.c: tamaño, firma, versión y `MaxPads <= 4`) y queda
+  con `MaxPads = 0`, que en el juego quiere decir que no lee ningún puerto
+  de control de GameCube (`PADRead`, loader/source/ppc/PADReadGC/source/
+  PADReadGC.c: `for (chan = 0; chan < MaxPads; ++chan)` sobre los
+  registros del SI); además fuerza el idioma inglés (0) y una memoria de
+  59 bloques. Sin archivo, Nintendont usa los suyos (`main`,
+  loader/source/main.c): idioma automático, `MaxPads = 4` y 251 bloques.
+  Por eso es de relleno y no se copia (ver `is_placeholder`): un binario
+  no puede llevar la marca de texto, así que se lo reconoce por su sha256
+  exacto. Un nincfg.bin de verdad -uno guardado por Nintendont- se copia
+  como cualquier otra configuración maestra.
 
 Bonus (no es parte de este archivo, pero salió de la misma
 investigación): el ZIP real de Nintendont en el catálogo de OSC trae
@@ -98,6 +112,7 @@ llegaba a dispararse con una instalación real.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 from dataclasses import dataclass
@@ -150,6 +165,8 @@ class GoldenConfigSpec:
 # campo que ya usa `oscwii_client.HomebrewApp.slug`). Ver el comentario
 # del módulo para la investigación de cada ruta/formato.
 GOLDEN_CONFIGS: dict = {
+    # El nincfg.bin del repositorio es sintético y no se copia (ver el
+    # comentario del módulo y `_PLACEHOLDER_SHA256`); uno de verdad, sí.
     "Nintendont": GoldenConfigSpec(
         label="Nintendont",
         asset_relative="nintendont/nincfg.bin",
@@ -235,17 +252,35 @@ def find_asset(relative: str) -> Optional[Path]:
 PLACEHOLDER_MARKER = b"PLACEHOLDER"
 _PLACEHOLDER_HEAD_BYTES = 4096
 
+# Los de relleno que no pueden llevar la marca porque son binarios,
+# reconocidos por su sha256 exacto. Exacto a propósito, y no "un nincfg.bin
+# casi todo en cero": cualquier otro archivo -uno de verdad que guarde el
+# taller- se copia, y no hay una regla que adivinar.
+_PLACEHOLDER_SHA256 = frozenset({
+    # assets/configs/nintendont/nincfg.bin: 548 bytes, solo Magicbytes y
+    # Version; con él, Nintendont no lee los puertos de GameCube (ver el
+    # comentario del módulo).
+    "dd783c995a48a4b71a4b38aeb8b4768764d6e8a5431d43426ea12873949f2940",
+})
+
 
 def is_placeholder(asset_path: Path) -> bool:
     """True si el archivo maestro es de relleno: lleva `PLACEHOLDER_MARKER`
-    en sus primeros bytes. Un archivo así es de desarrollo y no se copia
-    nunca a la unidad de un cliente. False si no se puede leer: de eso se
-    ocupa `_asset_is_valid`."""
+    en sus primeros bytes (los de texto) o es exactamente uno de
+    `_PLACEHOLDER_SHA256` (los binarios). Un archivo así es de desarrollo
+    y no se copia nunca a la unidad de un cliente. False si no se puede
+    leer: de eso se ocupa `_asset_is_valid`."""
     try:
         with open(asset_path, "rb") as f:
-            return PLACEHOLDER_MARKER in f.read(_PLACEHOLDER_HEAD_BYTES)
+            cabeza = f.read(_PLACEHOLDER_HEAD_BYTES)
+            if PLACEHOLDER_MARKER in cabeza:
+                return True
+            suma = hashlib.sha256(cabeza)
+            for bloque in iter(lambda: f.read(64 * 1024), b""):
+                suma.update(bloque)
     except OSError:
         return False
+    return suma.hexdigest() in _PLACEHOLDER_SHA256
 
 
 def _asset_is_valid(spec: GoldenConfigSpec, asset_path: Path) -> tuple:
