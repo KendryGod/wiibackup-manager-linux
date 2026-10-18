@@ -989,9 +989,23 @@ class TransferView(Gtk.Box):
         dest = self._dest_path
         tiene_loader = dest is not None and os.path.isdir(dest / usbloader_covers.APP_DIR)
         copiando = self._covers_cancel is not None
-        self.covers_button.set_sensitive(tiene_loader and not copiando)
+        # La misma condición de "ocupada" que Expulsar: la cola escribiendo
+        # (aunque sea entre una tarea y la siguiente) u otra operación sobre
+        # la unidad. Se vuelve a mirar con cada aviso de la cola y del
+        # gestor de operaciones, así que se prende sola al terminar.
+        cola = dest is not None and not copiando and self.queue.is_writing_to(dest)
+        otra = (self.ops.is_resource_busy(dest)
+                if dest is not None and not copiando else None)
+        self.covers_button.set_sensitive(tiene_loader and not copiando
+                                         and not cola and otra is None)
         if copiando:
             texto = _("Copiando carátulas…")
+        elif tiene_loader and cola:
+            texto = _("Esperá a que la cola termine con esta unidad para copiar las "
+                      "carátulas.")
+        elif tiene_loader and otra is not None:
+            texto = _("Hay una operación en curso sobre esta unidad ({op}): esperá a "
+                      "que termine para copiar las carátulas.").format(op=otra.label)
         elif dest is None:
             texto = _("Elegí primero un destino.")
         elif not tiene_loader:
