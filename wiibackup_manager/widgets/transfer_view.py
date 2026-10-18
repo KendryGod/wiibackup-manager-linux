@@ -1078,6 +1078,11 @@ class TransferView(Gtk.Box):
         if destino.problem == usbloader_covers.NO_LOADER:
             return _("Esta unidad no tiene USB Loader GX (falta la carpeta "
                      "apps/usbloader_gx): no se copió nada.")
+        if destino.problem == usbloader_covers.OTHER_PATH and not destino.configured:
+            # Vacío no es "la de fábrica": USB Loader GX lo toma tal cual
+            # (ver usbloader_covers), así que tampoco se copia.
+            return _("El GXGlobal.cfg de USB Loader GX en esta unidad tiene vacía la "
+                     "carpeta de las carátulas 2D (covers2d_path): no se copió nada.")
         if destino.problem == usbloader_covers.OTHER_PATH:
             return _("USB Loader GX en esta unidad lee las carátulas 2D de {path}: "
                      "no se copió nada.").format(path=destino.configured)

@@ -117,6 +117,9 @@ def covers_target(drive_root: Path) -> CoversTarget:
     if not os.path.isdir(app):
         return CoversTarget(None, NO_LOADER)
     configurado = configured_covers2d_path(app / CONFIG_NAME)
+    # Vacío tampoco es la de fábrica: `SetSetting` copia el valor tal cual
+    # (`strlcpy(covers2d_path, value, ...)`), y USB Loader GX las buscaría
+    # con una ruta vacía. Sin evidencia de otra cosa, no se copia.
     if configurado is not None and not _es_el_de_fabrica(configurado):
         return CoversTarget(None, OTHER_PATH, configurado)
     return CoversTarget(root / COVERS_2D_DIR)
