@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_window_close import _VentanaDeMentira
+from tests.test_window_close import _con_dialogos_de_mentira, _VentanaDeMentira
 from wiibackup_manager import config, usbloader_covers
 from wiibackup_manager.fsutil import PNG_MAGIC
 from wiibackup_manager.operations import OperationKind, OperationManager
@@ -33,12 +33,8 @@ _IEND = b"\x00\x00\x00\x00IEND\xaeB`\x82"
 # ------------------------------------------------------ Al cerrar --
 @pytest.fixture
 def ventana(monkeypatch):
-    from wiibackup_manager.window import Adw
-    dialogos = []
-    monkeypatch.setattr(Adw.AlertDialog, "present",
-                        lambda self, parent=None: dialogos.append(self))
     v = _VentanaDeMentira(OperationManager())
-    v.dialogos = dialogos
+    v.dialogos = _con_dialogos_de_mentira(monkeypatch)
     return v
 
 

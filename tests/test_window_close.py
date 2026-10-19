@@ -18,17 +18,29 @@ como en `test_queue_manager.py` y `test_recovery_service.py`: importar el
 módulo no abre ninguna ventana, así que esto corre en cualquier terminal y
 no solo bajo Xvfb.
 
-Lo único simulado es el `present()` del diálogo, que necesitaría un
-display y un padre de verdad. El `Adw.AlertDialog` en cambio es el de
-verdad: se construye, se le leen los botones y se le emite la señal
-`response` real, así que lo que se está probando es el diálogo que va a
-ver el usuario y no una maqueta paralela que podría quedar desincronizada.
+El diálogo, en cambio, es una maqueta (`_DialogoDeMentira`): un
+`Adw.AlertDialog` es un widget, y crearlo sin display es un segfault con
+GTK 4.14 y libadwaita 1.5 (Ubuntu 24.04, el job sin display de CI), que
+no falla un test sino que mata la suite entera. Con un GTK más nuevo, o
+con pantalla, se crea sin problemas: por eso en local no se veía.
+
+Para que la maqueta no quede desincronizada del diálogo que va a ver el
+usuario:
+- `test_la_maqueta_no_usa_nada_que_el_dialogo_de_verdad_no_tenga` mira la
+  CLASE `Adw.AlertDialog`, sin crear ninguno: corre en todos lados;
+- `test_el_dialogo_de_verdad_sale_igual_que_la_maqueta` (gui; en CI corre
+  bajo Xvfb) arma el diálogo de verdad con `_confirm_close`, lo compara
+  campo por campo con lo que anotó la maqueta y le emite su señal
+  `response` real.
 """
 from __future__ import annotations
 
+import inspect
+import os
 import types
 
 import pytest
+from gi.repository import GObject
 
 from wiibackup_manager import operations
 from wiibackup_manager.operations import OperationKind, OperationManager
@@ -105,25 +117,90 @@ class _VentanaDeMentira:
                 return
 
 
-@pytest.fixture
-def sin_present(monkeypatch):
-    """`AlertDialog.present()` necesita un display y un padre de verdad.
-    Se lo intercepta y se guarda el diálogo, que es el real."""
+class _DialogoDeMentira(GObject.Object):
+    """Lo que `_confirm_close` usa de `Adw.AlertDialog`, sin ser un widget.
+
+    Se le lee lo mismo que al de verdad (`get_body`, `get_response_label`…)
+    y `response` es una señal GObject de verdad, con la misma firma: lo
+    único que falta es el widget."""
+
+    __gsignals__ = {"response": (GObject.SignalFlags.RUN_LAST, None, (str,))}
+
+    def __init__(self, heading="", body=""):
+        super().__init__()
+        self._heading = heading
+        self._body = body
+        self._etiquetas: dict = {}
+        self._apariencias: dict = {}
+        # Los valores por defecto de Adw.AlertDialog.
+        self._default = None
+        self._close = "close"
+
+    def add_response(self, respuesta, etiqueta):
+        self._etiquetas[respuesta] = etiqueta
+
+    def set_response_appearance(self, respuesta, apariencia):
+        self._apariencias[respuesta] = apariencia
+
+    def set_default_response(self, respuesta):
+        self._default = respuesta
+
+    def set_close_response(self, respuesta):
+        self._close = respuesta
+
+    def present(self, parent=None):
+        """Lo reemplaza `_con_dialogos_de_mentira`, que anota el diálogo."""
+
+    def get_heading(self):
+        return self._heading
+
+    def get_body(self):
+        return self._body
+
+    def get_response_label(self, respuesta):
+        return self._etiquetas[respuesta]
+
+    def get_response_appearance(self, respuesta):
+        from wiibackup_manager.window import Adw
+        return self._apariencias.get(respuesta, Adw.ResponseAppearance.DEFAULT)
+
+    def get_default_response(self):
+        return self._default
+
+    def get_close_response(self):
+        return self._close
+
+
+def _con_dialogos_de_mentira(monkeypatch) -> list:
+    """Hace que `_confirm_close` arme una `_DialogoDeMentira` en vez del
+    `Adw.AlertDialog`, y devuelve la lista con cada diálogo presentado."""
     # Vía `window` y no `gi.repository` directo: ese módulo ya corrió el
     # `gi.require_version("Adw", "1")`, y además así se parchea el MISMO
     # Adw que usa el código bajo prueba.
     from wiibackup_manager.window import Adw
     presentados: list = []
-    monkeypatch.setattr(Adw.AlertDialog, "present",
+    monkeypatch.setattr(Adw, "AlertDialog", _DialogoDeMentira)
+    monkeypatch.setattr(_DialogoDeMentira, "present",
                         lambda self, parent=None: presentados.append(self))
     return presentados
 
 
 @pytest.fixture
-def ventana(sin_present):
+def ventana(monkeypatch):
     v = _VentanaDeMentira(OperationManager())
-    v.dialogos = sin_present
+    v.dialogos = _con_dialogos_de_mentira(monkeypatch)
     return v
+
+
+@pytest.fixture
+def gtk():
+    if not (os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")):
+        if os.environ.get("WBM_REQUIRE_GUI") == "1":
+            pytest.fail("WBM_REQUIRE_GUI=1 pero no hay display")
+        pytest.skip("sin display")
+    from wiibackup_manager.window import Gtk
+    if not Gtk.init_check():
+        pytest.skip("GTK no pudo inicializarse")
 
 
 # ------------------------------------------ La política de qué es peligroso --
@@ -366,3 +443,75 @@ def test_lo_que_no_se_puede_cancelar_no_se_espera(ventana):
     assert ventana.eventos[-1] == "close"
     assert ventana.vueltas == 0
     assert ventana.toasts == []
+
+
+# ------------------------------------ La maqueta contra el diálogo de verdad --
+def test_la_maqueta_no_usa_nada_que_el_dialogo_de_verdad_no_tenga():
+    """Mira la CLASE `Adw.AlertDialog`, sin crear ninguno, así que corre sin
+    display: cada método de la maqueta existe en el de verdad, cada
+    argumento con que se la construye es una propiedad de verdad, y la
+    señal `response` lleva lo mismo. Que además se comporten igual lo
+    compara el test de abajo, que sí necesita display."""
+    from wiibackup_manager.window import Adw
+
+    metodos = [nombre for nombre, valor in vars(_DialogoDeMentira).items()
+               if callable(valor) and not nombre.startswith("_")]
+    assert "get_response_label" in metodos  # que el filtro no deje la lista vacía
+    assert [m for m in metodos if not hasattr(Adw.AlertDialog, m)] == []
+
+    argumentos = list(inspect.signature(_DialogoDeMentira.__init__).parameters)[1:]
+    assert "body" in argumentos  # ídem
+    assert [a for a in argumentos
+            if Adw.AlertDialog.find_property(a.replace("_", "-")) is None] == []
+
+    def firma(clase):
+        senal = GObject.signal_query(GObject.signal_lookup("response", clase))
+        return list(senal.param_types), senal.return_type
+    assert firma(Adw.AlertDialog) == firma(_DialogoDeMentira)
+
+
+@pytest.mark.gui
+def test_el_dialogo_de_verdad_sale_igual_que_la_maqueta(gtk, monkeypatch):
+    """La misma ventana, con lo mismo en curso, cerrada una vez con la
+    maqueta y otra con el `Adw.AlertDialog` de verdad: los dos diálogos
+    tienen que decir lo mismo, y la señal `response` del de verdad tiene que
+    hacer en `_on_close_response` exactamente lo que hace la de la maqueta.
+    En curso, todo lo que agrega texto al cuerpo (una transferencia y un
+    formateo de Modo Fábrica), para compararlo entero."""
+    from wiibackup_manager.window import Adw
+
+    def cerrar_con_todo_en_curso(dialogos):
+        v = _VentanaDeMentira(OperationManager())
+        v.dialogos = dialogos
+        v._factory_busy = True
+        v.ops.start(OperationKind.TRANSFERRING, resources=["/run/media/usb"])
+        v.ops.start(OperationKind.FORMATTING, resources=["/dev/sdb"])
+        assert v._on_close_request() is True
+        assert len(v.dialogos) == 1
+        return v
+
+    with monkeypatch.context() as m:
+        maqueta = cerrar_con_todo_en_curso(_con_dialogos_de_mentira(m))
+    presentados: list = []
+    monkeypatch.setattr(Adw.AlertDialog, "present",
+                        lambda self, parent=None: presentados.append(self))
+    real = cerrar_con_todo_en_curso(presentados)
+
+    de_verdad, de_mentira = real.dialogos[0], maqueta.dialogos[0]
+    assert isinstance(de_verdad, Adw.AlertDialog)
+    assert de_verdad.get_heading() == de_mentira.get_heading()
+    assert de_verdad.get_body() == de_mentira.get_body()
+    for respuesta in ("wait", "close"):
+        assert (de_verdad.get_response_label(respuesta)
+                == de_mentira.get_response_label(respuesta))
+        assert (de_verdad.get_response_appearance(respuesta)
+                == de_mentira.get_response_appearance(respuesta))
+    assert de_verdad.get_default_response() == de_mentira.get_default_response()
+    assert de_verdad.get_close_response() == de_mentira.get_close_response()
+
+    for respuesta in ("wait", "close"):
+        de_verdad.emit("response", respuesta)
+        de_mentira.emit("response", respuesta)
+        assert real.eventos == maqueta.eventos
+        assert real.toasts == maqueta.toasts
+    assert real.eventos[-1] == "close"

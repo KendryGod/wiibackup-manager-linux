@@ -105,3 +105,49 @@ def sin_traducciones_pegadas():
         "estos módulos quedaron con una traducción pegada después del test: "
         + ", ".join(pegados)
         + " -- ver `_poner_el_catalogo_en_ingles` en tests/test_smoke_gui.py")
+
+
+@pytest.fixture(autouse=True)
+def sin_widgets_fuera_de_gui(request):
+    """Que un test sin el marcador `gui` no cree widgets de GTK.
+
+    En CI esos tests corren sin display (`pytest -m "not gui"`, en Ubuntu
+    24.04), y ahí, con GTK 4.14 y libadwaita 1.5, crear un widget puede ser
+    un segfault: no falla ese test, se muere el proceso y con él el resto
+    de la suite. Y no se ve donde se escriben los tests: con un GTK más
+    nuevo, o con pantalla, el mismo test pasa. Así estuvo el CI caído
+    semanas por el `Adw.AlertDialog` de `test_window_close.py` sin que
+    ninguna corrida local lo mostrara.
+
+    Este chequeo lo hace fallar en todos lados, ANTES de crear el widget y
+    diciendo qué hacer. Los objetos de GTK que no son widgets
+    (`Gtk.FileFilter`, `Adw.Toast`) no necesitan display y siguen
+    permitidos. Ve los widgets que se crean desde Python; los que la app
+    arma con un constructor de C (`Gtk.Image.new_from_icon_name`) van
+    siempre dentro de otro que sí pasa por acá."""
+    if request.node.get_closest_marker("gui") is not None:
+        yield
+        return
+    import gi
+    gi.require_version("Gtk", "4.0")
+    from gi.repository import GObject, Gtk
+
+    crear = GObject.Object.__init__
+
+    def vigilado(self, *args, **kwargs):
+        if isinstance(self, Gtk.Widget):
+            pytest.fail(
+                f"este test crea un widget de GTK ({type(self).__name__}) sin el "
+                "marcador gui: en el job sin display de CI eso puede ser un "
+                "segfault que se lleva la suite entera. Hay que marcarlo con "
+                "@pytest.mark.gui o usar una maqueta (como _DialogoDeMentira en "
+                "tests/test_window_close.py).")
+        crear(self, *args, **kwargs)
+
+    # Un MonkeyPatch propio y no el fixture `monkeypatch`: pedir ese fixture
+    # desde uno autouse lo arma antes que `tmp_path`, y entonces lo que un
+    # test parchea con él (un espía de `os.scandir`, por ejemplo) seguiría
+    # puesto cuando `tmp_path` borra su carpeta al terminar.
+    with pytest.MonkeyPatch.context() as parche:
+        parche.setattr(GObject.Object, "__init__", vigilado)
+        yield

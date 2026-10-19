@@ -204,8 +204,13 @@ def test_la_ventana_avisa_que_la_config_estaba_danada(gtk, tmp_path, monkeypatch
                 self.quit()
             return False
 
-    GLib.timeout_add_seconds(60, lambda: (resultado.setdefault("colgada", True), False)[1])
-    App().run([])
+    # Guardia de 60 s que además corta la app: si solo anotara "colgada",
+    # una ventana que no llega a armarse dejaría `run()` esperando para
+    # siempre (ver test_smoke_gui.py).
+    app = App()
+    GLib.timeout_add_seconds(60, lambda: (resultado.setdefault("colgada", True),
+                                          app.quit(), False)[-1])
+    app.run([])
 
     assert not resultado.get("colgada")
     assert resultado.get("visible") is True

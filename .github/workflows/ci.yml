@@ -14,6 +14,10 @@ jobs:
   tests:
     name: Pruebas y smoke test
     runs-on: ubuntu-24.04
+    # Una corrida sana tarda unos pocos minutos. Sin tope, un test colgado
+    # (una app que no llega a abrir su ventana) deja el job corriendo hasta
+    # el límite de GitHub, que es de 6 horas.
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v4

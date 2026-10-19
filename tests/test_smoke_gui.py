@@ -116,11 +116,14 @@ def test_la_ventana_se_arma_y_se_muestra(gtk, tmp_path, monkeypatch):
             return False
 
     # Un timeout de guardia: si la app se cuelga, el test tiene que fallar
-    # con un mensaje claro y no dejar la suite colgada para siempre.
+    # con un mensaje claro y no dejar la suite colgada para siempre. Por eso
+    # además de anotarlo CORTA la app: si solo lo anotaba, `run()` no volvía
+    # nunca -pasa si la ventana ni llega a armarse, y `_revisar` no corre-.
+    app = App()
     GLib.timeout_add_seconds(60, lambda: (resultado.setdefault("colgada", True),
-                                          False)[1])
+                                          app.quit(), False)[-1])
 
-    App().run([])
+    app.run([])
 
     assert not resultado.get("colgada"), "la app no terminó de arrancar"
     assert resultado.get("visible") is True
@@ -252,9 +255,11 @@ def test_la_ventana_tambien_arranca_en_ingles(gtk, tmp_path, monkeypatch):
     # Misma guardia que en el test anterior: sin esto, una excepción
     # dentro de `_revisar` deja el bucle de GLib corriendo para siempre
     # (no hay timeout de guardia acá arriba que lo corte).
-    GLib.timeout_add_seconds(60, lambda: (resultado.setdefault("colgada", True), False)[1])
+    app = App()
+    GLib.timeout_add_seconds(60, lambda: (resultado.setdefault("colgada", True),
+                                          app.quit(), False)[-1])
 
-    App().run([])
+    app.run([])
 
     assert not resultado.get("colgada"), "la app no terminó de arrancar"
     assert resultado.get("paginas") == {"juegos", "cola", "memoria", "fabrica",
@@ -334,9 +339,11 @@ def test_el_aviso_de_restos_aparece_con_lo_que_encuentra_el_escaneo(
                 self.quit()
             return False
 
+    # La guardia de 60 s corta la app (ver el primer test).
+    app = App()
     GLib.timeout_add_seconds(60, lambda: (resultado.setdefault("colgada", True),
-                                          False)[1])
-    App().run([])
+                                          app.quit(), False)[-1])
+    app.run([])
 
     assert not resultado.get("colgada"), "la app no terminó de arrancar"
     assert resultado.get("restos") == 1, (
