@@ -254,7 +254,9 @@ class HomebrewStoreView(Gtk.Box):
         loading_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
                               valign=Gtk.Align.CENTER, halign=Gtk.Align.CENTER,
                               vexpand=True)
-        spinner = Adw.Spinner()
+        # Gtk.Spinner y no Adw.Spinner: ese es de libadwaita 1.6, y con la
+        # 1.5 (Ubuntu 24.04) la ventana entera no llega a armarse.
+        spinner = Gtk.Spinner(spinning=True)
         spinner.set_size_request(32, 32)
         loading_box.append(spinner)
         loading_label = Gtk.Label(label=_("Cargando catálogo de Open Shop Channel…"))
