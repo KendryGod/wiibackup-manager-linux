@@ -56,10 +56,16 @@ jobs:
       - name: Pruebas de lógica (sin display)
         run: python3 -m pytest -v -m "not gui"
 
+      # De acá en adelante cada paso corre aunque haya fallado uno anterior
+      # (`!cancelled()`): son chequeos independientes, y que uno caído tape a
+      # los demás escondió durante semanas que la app no abría en Ubuntu
+      # 24.04. El job sale en rojo igual si falla cualquiera.
+      #
       # WBM_REQUIRE_GUI=1 hace que el smoke test FALLE en vez de saltearse
       # si el display no está: un skip acá dejaría el check en verde sin
       # haber arrancado la app nunca.
       - name: Smoke test (la app arranca de verdad)
+        if: ${{ !cancelled() }}
         env:
           WBM_REQUIRE_GUI: "1"
           GDK_BACKEND: x11
@@ -74,6 +80,7 @@ jobs:
       # error en pyproject.toml recién aparecería cuando alguien intenta
       # instalar la app.
       - name: Construir e instalar el paquete
+        if: ${{ !cancelled() }}
         run: |
           python3 -m pip install --break-system-packages --user build
           python3 -m build --wheel
@@ -88,6 +95,7 @@ jobs:
       # Fedora o Arch no existe -- le preguntamos a sysconfig la misma ruta
       # de datos que usó pip, con el mismo prefijo.
       - name: Verificar los archivos de datos instalados
+        if: ${{ !cancelled() }}
         run: |
           DATOS=$(python3 -c "import os, sysconfig; p = os.environ['RUNNER_TEMP'] + '/prefijo'; print(sysconfig.get_path('data', vars={'base': p, 'platbase': p}))")
           echo "--- archivos de datos instalados en $DATOS ---"
@@ -99,6 +107,7 @@ jobs:
       # El .desktop tiene que ser válido para que el escritorio lo tome, y
       # su Exec no puede volver a depender del PATH del usuario.
       - name: Validar el .desktop
+        if: ${{ !cancelled() }}
         run: |
           sudo apt-get install -y --no-install-recommends desktop-file-utils
           desktop-file-validate data/com.gamefixsps.WiiBackupManager.desktop
