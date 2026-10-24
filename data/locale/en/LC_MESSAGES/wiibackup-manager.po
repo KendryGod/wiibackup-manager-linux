@@ -7,7 +7,7 @@ msgstr ""
 "Project-Id-Version: WiiBackup Manager\n"
 "Report-Msgid-Bugs-To: https://github.com/KendryGod/wiibackup-manager-linux/"
 "issues\n"
-"POT-Creation-Date: 2026-10-24 17:41-0600\n"
+"POT-Creation-Date: 2026-10-24 17:57-0600\n"
 "PO-Revision-Date: 2026-08-30 05:58-0600\n"
 "Last-Translator: GameFix SPS\n"
 "Language-Team: English\n"
@@ -614,7 +614,7 @@ msgid "ningún elemento de la respuesta tiene el formato esperado"
 msgstr "no item in the response has the expected format"
 
 #: wiibackup_manager/oscwii_client.py:372
-#: wiibackup_manager/oscwii_installer.py:424
+#: wiibackup_manager/oscwii_installer.py:427
 #, python-brace-format
 msgid "status HTTP {status}"
 msgstr "HTTP status {status}"
@@ -624,7 +624,7 @@ msgid "no hay ninguna lista guardada de una sesión anterior"
 msgstr "there is no list saved from a previous session"
 
 #: wiibackup_manager/oscwii_client.py:443
-#: wiibackup_manager/widgets/homebrew_store_view.py:416
+#: wiibackup_manager/widgets/homebrew_store_view.py:532
 msgid "motivo desconocido"
 msgstr "unknown reason"
 
@@ -632,46 +632,46 @@ msgstr "unknown reason"
 msgid "la URL del ícono"
 msgstr "the icon URL"
 
-#: wiibackup_manager/oscwii_installer.py:364
+#: wiibackup_manager/oscwii_installer.py:367
 #, python-brace-format
 msgid "Descarga incompleta: la conexión se cortó después de {got}. Reintentá."
 msgstr "Incomplete download: the connection dropped after {got}. Try again."
 
-#: wiibackup_manager/oscwii_installer.py:367
+#: wiibackup_manager/oscwii_installer.py:370
 #, python-brace-format
 msgid "Descarga incompleta: llegaron {got} de {total}. Reintentá."
 msgstr "Incomplete download: {got} of {total} arrived. Try again."
 
-#: wiibackup_manager/oscwii_installer.py:422
+#: wiibackup_manager/oscwii_installer.py:425
 msgid "la URL de descarga del catálogo"
 msgstr "the catalog download URL"
 
-#: wiibackup_manager/oscwii_installer.py:433
+#: wiibackup_manager/oscwii_installer.py:436
 msgid "el archivo declarado supera el límite esperado"
 msgstr "the declared file exceeds the expected limit"
 
-#: wiibackup_manager/oscwii_installer.py:443
+#: wiibackup_manager/oscwii_installer.py:446
 msgid "la descarga supera el límite esperado"
 msgstr "the download exceeds the expected limit"
 
-#: wiibackup_manager/oscwii_installer.py:478
+#: wiibackup_manager/oscwii_installer.py:481
 #, python-brace-format
 msgid "el SHA-256 no coincide (esperado {expected}, descargado {found})"
 msgstr "the SHA-256 does not match (expected {expected}, downloaded {found})"
 
-#: wiibackup_manager/oscwii_installer.py:483
+#: wiibackup_manager/oscwii_installer.py:486
 #, python-brace-format
 msgid "el MD5 no coincide (esperado {expected}, descargado {found})"
 msgstr "the MD5 does not match (expected {expected}, downloaded {found})"
 
-#: wiibackup_manager/oscwii_installer.py:573
+#: wiibackup_manager/oscwii_installer.py:576
 #, python-brace-format
 msgid ""
 "\"{file}\" es un archivo y \"{folder}\" necesita ese mismo nombre como "
 "carpeta"
 msgstr "\"{file}\" is a file and \"{folder}\" needs that same name as a folder"
 
-#: wiibackup_manager/oscwii_installer.py:576
+#: wiibackup_manager/oscwii_installer.py:579
 #, python-brace-format
 msgid ""
 "\"{first}\" y \"{second}\" son el mismo nombre en el destino (FAT32/exFAT no "
@@ -680,36 +680,36 @@ msgstr ""
 "\"{first}\" and \"{second}\" are the same name on the destination (FAT32/"
 "exFAT is not case-sensitive)"
 
-#: wiibackup_manager/oscwii_installer.py:580
+#: wiibackup_manager/oscwii_installer.py:583
 #, python-brace-format
 msgid "\"{path}\" aparece dos veces en el ZIP"
 msgstr "\"{path}\" appears twice in the ZIP"
 
-#: wiibackup_manager/oscwii_installer.py:615
+#: wiibackup_manager/oscwii_installer.py:618
 #, python-brace-format
 msgid "{name} está dañado: {reason}"
 msgstr "{name} is damaged: {reason}"
 
-#: wiibackup_manager/oscwii_installer.py:632
+#: wiibackup_manager/oscwii_installer.py:635
 #, python-brace-format
 msgid "el archivo descargado no es un ZIP válido ({error})"
 msgstr "the downloaded file is not a valid ZIP ({error})"
 
-#: wiibackup_manager/oscwii_installer.py:643
+#: wiibackup_manager/oscwii_installer.py:646
 #, python-brace-format
 msgid "el ZIP está corrupto o truncado (falló {member})"
 msgstr "the ZIP is corrupted or truncated ({member} failed)"
 
-#: wiibackup_manager/oscwii_installer.py:651
+#: wiibackup_manager/oscwii_installer.py:654
 msgid "el contenido descomprimido supera el límite esperado"
 msgstr "the uncompressed content exceeds the expected limit"
 
-#: wiibackup_manager/oscwii_installer.py:667
+#: wiibackup_manager/oscwii_installer.py:670
 #, python-brace-format
 msgid "el ZIP contiene un symlink ({name}), rechazado"
 msgstr "the ZIP contains a symlink ({name}), rejected"
 
-#: wiibackup_manager/oscwii_installer.py:673
+#: wiibackup_manager/oscwii_installer.py:676
 #, python-brace-format
 msgid ""
 "el ZIP escribe en {name}, que no está entre las carpetas que la Store puede "
@@ -718,28 +718,28 @@ msgstr ""
 "the ZIP writes to {name}, which is not one of the folders the Store may use; "
 "rejected"
 
-#: wiibackup_manager/oscwii_installer.py:687
+#: wiibackup_manager/oscwii_installer.py:690
 #, python-brace-format
 msgid "el ZIP tiene entradas que colisionan en el destino: {reason}; rechazado"
 msgstr ""
 "the ZIP has entries that collide on the destination: {reason}; rejected"
 
-#: wiibackup_manager/oscwii_installer.py:699
+#: wiibackup_manager/oscwii_installer.py:702
 #, python-brace-format
 msgid "el ZIP está corrupto o truncado ({error})"
 msgstr "the ZIP is corrupted or truncated ({error})"
 
-#: wiibackup_manager/oscwii_installer.py:1125
+#: wiibackup_manager/oscwii_installer.py:1189
 #, python-brace-format
 msgid "{path} no existe o no es una carpeta"
 msgstr "{path} does not exist or is not a folder"
 
-#: wiibackup_manager/oscwii_installer.py:1128
+#: wiibackup_manager/oscwii_installer.py:1192
 #, python-brace-format
 msgid "no hay permiso para escribir en {path}"
 msgstr "no permission to write to {path}"
 
-#: wiibackup_manager/oscwii_installer.py:1171
+#: wiibackup_manager/oscwii_installer.py:1237
 #, python-brace-format
 msgid ""
 "{path} es una ruta crítica del sistema operativo, se rechaza como destino de "
@@ -748,17 +748,17 @@ msgstr ""
 "{path} is a critical operating system path, it is rejected as an "
 "installation destination"
 
-#: wiibackup_manager/oscwii_installer.py:1184
+#: wiibackup_manager/oscwii_installer.py:1250
 #, python-brace-format
 msgid "la URL de descarga de la app fue rechazada: {reason} ({url})"
 msgstr "the app download URL was rejected: {reason} ({url})"
 
-#: wiibackup_manager/oscwii_installer.py:1245
+#: wiibackup_manager/oscwii_installer.py:1322
 #, python-brace-format
 msgid "necesita {need} y quedan {free} en el destino"
 msgstr "it needs {need} and only {free} is left on the destination"
 
-#: wiibackup_manager/oscwii_installer.py:1276
+#: wiibackup_manager/oscwii_installer.py:1354
 msgid "instalación cancelada"
 msgstr "installation cancelled"
 
@@ -937,7 +937,7 @@ msgid "En espera: {op}"
 msgstr "Waiting: {op}"
 
 #: wiibackup_manager/queue_manager.py:764
-#: wiibackup_manager/widgets/homebrew_store_view.py:560
+#: wiibackup_manager/widgets/homebrew_store_view.py:676
 #: wiibackup_manager/widgets/memory_check_view.py:370
 msgid "Preparando…"
 msgstr "Preparing…"
@@ -1281,7 +1281,8 @@ msgstr "Overwrite the existing file?"
 
 #: wiibackup_manager/widgets/gtk_helpers.py:86
 #: wiibackup_manager/widgets/gtk_helpers.py:152
-#: wiibackup_manager/widgets/homebrew_store_view.py:521
+#: wiibackup_manager/widgets/homebrew_store_view.py:202
+#: wiibackup_manager/widgets/homebrew_store_view.py:637
 #: wiibackup_manager/widgets/log_view.py:152
 #: wiibackup_manager/widgets/memory_check_view.py:137
 #: wiibackup_manager/widgets/memory_check_view.py:333
@@ -1300,51 +1301,51 @@ msgstr "Cancel"
 msgid "Sobrescribir"
 msgstr "Overwrite"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:92
+#: wiibackup_manager/widgets/homebrew_store_view.py:94
 msgid "Error de descarga"
 msgstr "Download error"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:93
+#: wiibackup_manager/widgets/homebrew_store_view.py:95
 msgid "Descarga incompleta, reintentá"
 msgstr "Incomplete download, try again"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:94
+#: wiibackup_manager/widgets/homebrew_store_view.py:96
 msgid "El archivo no coincide con lo esperado"
 msgstr "The file does not match what was expected"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:95
+#: wiibackup_manager/widgets/homebrew_store_view.py:97
 msgid "El archivo descargado está dañado"
 msgstr "The downloaded file is corrupted"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:96
+#: wiibackup_manager/widgets/homebrew_store_view.py:98
 msgid "El paquete trae un archivo dañado"
 msgstr "The package contains a damaged file"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:97
+#: wiibackup_manager/widgets/homebrew_store_view.py:99
 msgid "El paquete no es seguro para instalar"
 msgstr "The package is not safe to install"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:98
+#: wiibackup_manager/widgets/homebrew_store_view.py:100
 msgid "La descarga apuntaba a un sitio no autorizado"
 msgstr "The download pointed to an unauthorized site"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:99
+#: wiibackup_manager/widgets/homebrew_store_view.py:101
 msgid "El destino elegido no es válido"
 msgstr "The chosen destination is not valid"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:100
+#: wiibackup_manager/widgets/homebrew_store_view.py:102
 msgid "No hay espacio suficiente en el destino"
 msgstr "Not enough space on the destination"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:101
+#: wiibackup_manager/widgets/homebrew_store_view.py:103
 msgid "Error al escribir en el destino"
 msgstr "Error writing to the destination"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:102
+#: wiibackup_manager/widgets/homebrew_store_view.py:104
 msgid "Se desconectó la unidad"
 msgstr "The drive was disconnected"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:103
+#: wiibackup_manager/widgets/homebrew_store_view.py:105
 msgid "Error grave: no se pudo restaurar la versión anterior"
 msgstr "Serious error: the previous version could not be restored"
 
@@ -1353,58 +1354,142 @@ msgstr "Serious error: the previous version could not be restored"
 msgid "{n} archivo(s)"
 msgstr "{n} file(s)"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:173
-#: wiibackup_manager/widgets/homebrew_store_view.py:524
+#: wiibackup_manager/widgets/homebrew_store_view.py:117
+#, python-brace-format
+msgid "fuera de apps/: {folders}"
+msgstr "outside apps/: {folders}"
+
+#: wiibackup_manager/widgets/homebrew_store_view.py:122
+#, python-brace-format
+msgid "se conservó {n} archivo tuyo"
+msgid_plural "se conservaron {n} archivos tuyos"
+msgstr[0] "kept {n} of your files"
+msgstr[1] "kept {n} of your files"
+
+#: wiibackup_manager/widgets/homebrew_store_view.py:143
+#, python-brace-format
+msgid "• …y {n} más"
+msgstr "• …and {n} more"
+
+#: wiibackup_manager/widgets/homebrew_store_view.py:157
+#, python-brace-format
+msgid "{folder} ({n} archivo)"
+msgid_plural "{folder} ({n} archivos)"
+msgstr[0] "{folder} ({n} file)"
+msgstr[1] "{folder} ({n} files)"
+
+#: wiibackup_manager/widgets/homebrew_store_view.py:164
+#, python-brace-format
+msgid "{path} (se reemplaza)"
+msgstr "{path} (replaced)"
+
+#: wiibackup_manager/widgets/homebrew_store_view.py:165
+#, python-brace-format
+msgid "{folder}: {n} archivo nuevo"
+msgid_plural "{folder}: {n} archivos nuevos"
+msgstr[0] "{folder}: {n} new file"
+msgstr[1] "{folder}: {n} new files"
+
+#: wiibackup_manager/widgets/homebrew_store_view.py:168
+msgid "Va a escribir en:"
+msgstr "It will write to:"
+
+#: wiibackup_manager/widgets/homebrew_store_view.py:170
+msgid ""
+"Fuera de apps/ no se borra nada de lo que ya tengas: solo se agregan "
+"archivos."
+msgstr ""
+"Outside apps/ nothing you already have is deleted: files are only added."
+
+#: wiibackup_manager/widgets/homebrew_store_view.py:175
+#, python-brace-format
+msgid "Ya tenés {n} archivo distinto al del paquete:"
+msgid_plural "Ya tenés {n} archivos distintos a los del paquete:"
+msgstr[0] "You already have {n} file that differs from the package's:"
+msgstr[1] "You already have {n} files that differ from the package's:"
+
+#: wiibackup_manager/widgets/homebrew_store_view.py:178
+msgid "Si no elegís reemplazarlos, se conservan los tuyos."
+msgstr "Unless you choose to replace them, yours are kept."
+
+#: wiibackup_manager/widgets/homebrew_store_view.py:180
+msgid ""
+"Se conservan siempre (el paquete los trae vacíos, o no se pueden poner sin "
+"borrar algo tuyo):"
+msgstr ""
+"Always kept (the package ships them empty, or they can't be written without "
+"deleting something of yours):"
+
+#: wiibackup_manager/widgets/homebrew_store_view.py:184
+msgid "No se copian:"
+msgstr "Not copied:"
+
+#: wiibackup_manager/widgets/homebrew_store_view.py:200
+#, python-brace-format
+msgid "¿Instalar '{name}'?"
+msgstr "Install '{name}'?"
+
+#: wiibackup_manager/widgets/homebrew_store_view.py:204
+msgid "Reemplazar los míos"
+msgstr "Replace mine"
+
+#: wiibackup_manager/widgets/homebrew_store_view.py:205
+msgid "Conservar los míos"
+msgstr "Keep mine"
+
+#: wiibackup_manager/widgets/homebrew_store_view.py:210
+#: wiibackup_manager/widgets/homebrew_store_view.py:289
+#: wiibackup_manager/widgets/homebrew_store_view.py:640
 msgid "Instalar"
 msgstr "Install"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:222
+#: wiibackup_manager/widgets/homebrew_store_view.py:338
 msgid "Destino de instalación"
 msgstr "Installation destination"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:223
+#: wiibackup_manager/widgets/homebrew_store_view.py:339
 msgid ""
 "Las apps se instalan en /apps/ dentro de la unidad o carpeta que elijas acá."
 msgstr "Apps are installed into /apps/ on the drive or folder you choose here."
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:231
+#: wiibackup_manager/widgets/homebrew_store_view.py:347
 #: wiibackup_manager/widgets/transfer_view.py:321
 msgid "Destino"
 msgstr "Destination"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:241
+#: wiibackup_manager/widgets/homebrew_store_view.py:357
 #: wiibackup_manager/widgets/transfer_view.py:337
 msgid "Volver a detectar unidades"
 msgstr "Detect drives again"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:244
+#: wiibackup_manager/widgets/homebrew_store_view.py:360
 msgid "Elegir carpeta…"
 msgstr "Choose folder…"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:264
+#: wiibackup_manager/widgets/homebrew_store_view.py:380
 msgid "Cargando catálogo de Open Shop Channel…"
 msgstr "Loading the Open Shop Channel catalog…"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:271
+#: wiibackup_manager/widgets/homebrew_store_view.py:387
 msgid "No se pudo cargar la tienda"
 msgstr "Could not load the store"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:273
-#: wiibackup_manager/widgets/homebrew_store_view.py:517
+#: wiibackup_manager/widgets/homebrew_store_view.py:389
+#: wiibackup_manager/widgets/homebrew_store_view.py:633
 #: wiibackup_manager/window.py:410
 msgid "Reintentar"
 msgstr "Retry"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:282
+#: wiibackup_manager/widgets/homebrew_store_view.py:398
 msgid "Buscar apps por nombre…"
 msgstr "Search apps by name…"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:385
+#: wiibackup_manager/widgets/homebrew_store_view.py:501
 #: wiibackup_manager/widgets/transfer_view.py:1224
 msgid "Elegí la carpeta destino"
 msgstr "Choose the destination folder"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:427
+#: wiibackup_manager/widgets/homebrew_store_view.py:543
 #, python-brace-format
 msgid ""
 "Sin conexión con Open Shop Channel: mostrando la última lista guardada "
@@ -1412,15 +1497,15 @@ msgid ""
 msgstr ""
 "No connection to Open Shop Channel: showing the last saved list ({error})."
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:514
+#: wiibackup_manager/widgets/homebrew_store_view.py:630
 msgid "Reinstalar"
 msgstr "Reinstall"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:544
+#: wiibackup_manager/widgets/homebrew_store_view.py:660
 msgid "Elegí primero un destino antes de instalar."
 msgstr "Choose a destination first before installing."
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:555
+#: wiibackup_manager/widgets/homebrew_store_view.py:671
 #: wiibackup_manager/widgets/transfer_view.py:1038
 #: wiibackup_manager/window.py:997 wiibackup_manager/window.py:1080
 #: wiibackup_manager/window.py:1241 wiibackup_manager/window.py:1471
@@ -1430,39 +1515,43 @@ msgstr "Choose a destination first before installing."
 msgid "No se puede ahora: {detail}."
 msgstr "Not possible right now: {detail}."
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:597
+#: wiibackup_manager/widgets/homebrew_store_view.py:710
+msgid "Esperando tu confirmación…"
+msgstr "Waiting for your confirmation…"
+
+#: wiibackup_manager/widgets/homebrew_store_view.py:732
 #, python-brace-format
 msgid "Descargando… {pct}%"
 msgstr "Downloading… {pct}%"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:599
+#: wiibackup_manager/widgets/homebrew_store_view.py:734
 #, python-brace-format
 msgid "Extrayendo… {pct}%"
 msgstr "Extracting… {pct}%"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:601
+#: wiibackup_manager/widgets/homebrew_store_view.py:736
 msgid "Descargando…"
 msgstr "Downloading…"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:602
+#: wiibackup_manager/widgets/homebrew_store_view.py:737
 msgid "Extrayendo…"
 msgstr "Extracting…"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:614
+#: wiibackup_manager/widgets/homebrew_store_view.py:755
 msgid "Instalada ✓"
 msgstr "Installed ✓"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:616
+#: wiibackup_manager/widgets/homebrew_store_view.py:757
 #, python-brace-format
 msgid "'{name}' instalada ({n} archivo(s))."
 msgstr "'{name}' installed ({n} file(s))."
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:622
+#: wiibackup_manager/widgets/homebrew_store_view.py:763
 #, python-brace-format
 msgid "Se conservaron los datos del cliente de '{name}': {paths}."
 msgstr "The customer's data for '{name}' was kept: {paths}."
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:631
+#: wiibackup_manager/widgets/homebrew_store_view.py:772
 #, python-brace-format
 msgid ""
 "'{name}' se instaló, pero no se pudo aplicar su configuración maestra: "
@@ -1471,12 +1560,12 @@ msgstr ""
 "'{name}' was installed, but its master configuration could not be applied: "
 "{detail}"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:636
+#: wiibackup_manager/widgets/homebrew_store_view.py:777
 #, python-brace-format
 msgid "Se aplicó la configuración maestra de '{name}'."
 msgstr "The master configuration for '{name}' was applied."
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:641
+#: wiibackup_manager/widgets/homebrew_store_view.py:782
 #, python-brace-format
 msgid ""
 "'{name}' se instaló. Ya había un {file} en la unidad y se dejó como estaba: "
@@ -1485,7 +1574,7 @@ msgstr ""
 "'{name}' was installed. There was already a {file} on the drive and it was "
 "left as it was: the master configuration was not applied."
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:648
+#: wiibackup_manager/widgets/homebrew_store_view.py:789
 #, python-brace-format
 msgid ""
 "'{name}' se instaló con su configuración de fábrica: la configuración "
@@ -1494,21 +1583,21 @@ msgstr ""
 "'{name}' was installed with its factory settings: the master configuration "
 "in the repository is a placeholder and was not copied."
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:660
+#: wiibackup_manager/widgets/homebrew_store_view.py:801
 #, python-brace-format
 msgid "'{name}' se instaló. {detail}"
 msgstr "'{name}' was installed. {detail}"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:665
+#: wiibackup_manager/widgets/homebrew_store_view.py:806
 #, python-brace-format
 msgid "Instalación de '{name}' cancelada."
 msgstr "Installation of '{name}' cancelled."
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:667
+#: wiibackup_manager/widgets/homebrew_store_view.py:808
 msgid "Error al instalar"
 msgstr "Installation error"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:670
+#: wiibackup_manager/widgets/homebrew_store_view.py:811
 #, python-brace-format
 msgid "No se pudo instalar '{name}': {detail}"
 msgstr "Could not install '{name}': {detail}"
@@ -3993,6 +4082,7 @@ msgstr ""
 msgid "Operación cancelada por el usuario."
 msgstr "Operation cancelled by the user."
 
+#, python-brace-format
 #, python-brace-format
 #~ msgid ""
 #~ "entrada fuera de las carpetas permitidas ({allowed}) en el ZIP ({name}), "

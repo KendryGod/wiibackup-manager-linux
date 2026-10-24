@@ -24,7 +24,7 @@ from gi.repository import Adw, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
 
 from .. import (drives, formatting, golden_configs, oplog, oscwii_client,
                 oscwii_installer)
-from ..i18n import _
+from ..i18n import _, ngettext
 from ..oscwii_client import HomebrewApp
 from ..oscwii_installer import InstallStatus
 from ..operations import OperationBusy, OperationKind, OperationOutcome
@@ -84,6 +84,8 @@ class _InstallState:
     fraction: float = 0.0
     message: str = ""
     cancel_event: Optional[threading.Event] = None
+    # El aviso antes de instalar, mientras está abierto (ver `_mostrar_aviso`).
+    dialogo: Optional[Adw.AlertDialog] = None
 
 
 # Motivo legible por `InstallStatus`, para el mensaje corto que se ve en la
@@ -108,9 +110,18 @@ def _install_outcome(app: HomebrewApp, result) -> OperationOutcome:
     """Lo que queda en el historial de una instalación. Sin esto
     `ops.finish` no anotaba nada y la instalación no dejaba rastro."""
     if result.ok:
-        return OperationOutcome(
-            oplog.STATUS_OK, app.name,
-            _("{n} archivo(s)").format(n=len(result.installed_paths)))
+        detalle = _("{n} archivo(s)").format(n=len(result.installed_paths))
+        # Lo de fuera de `apps/` queda anotado: son carpetas que comparten
+        # las ROMs, partidas y configuración del usuario.
+        if result.carpetas_de_datos:
+            detalle += "; " + _("fuera de apps/: {folders}").format(
+                folders=", ".join(f"{carpeta} ({n})"
+                                  for carpeta, n in result.carpetas_de_datos))
+        if result.datos_conservados:
+            n = len(result.datos_conservados)
+            detalle += "; " + ngettext("se conservó {n} archivo tuyo",
+                                       "se conservaron {n} archivos tuyos", n).format(n=n)
+        return OperationOutcome(oplog.STATUS_OK, app.name, detalle)
     if result.status is InstallStatus.CANCELLED:
         return OperationOutcome(oplog.STATUS_CANCELLED, app.name)
     if result.status is InstallStatus.DEVICE_DISCONNECTED:
@@ -118,6 +129,111 @@ def _install_outcome(app: HomebrewApp, result) -> OperationOutcome:
     return OperationOutcome(
         oplog.STATUS_ERROR, app.name,
         result.error or _INSTALL_STATUS_LABELS.get(result.status, ""))
+
+
+# Cuántos nombres de cada lista entran en el aviso antes de "…y N más".
+_AVISO_MAX_ITEMS = 8
+
+
+def _lista(nombres) -> str:
+    nombres = list(nombres)
+    lineas = [f"• {n}" for n in nombres[:_AVISO_MAX_ITEMS]]
+    resto = len(nombres) - _AVISO_MAX_ITEMS
+    if resto > 0:
+        lineas.append(_("• …y {n} más").format(n=resto))
+    return "\n".join(lineas)
+
+
+def _omitidos_para_mostrar(nombres) -> list:
+    """Los archivos sueltos por su nombre y las carpetas en una línea con
+    su cantidad: la guía del Homebrew Browser son 48 archivos."""
+    sueltos, carpetas = [], {}
+    for nombre in nombres:
+        if "/" in nombre:
+            carpeta = nombre.split("/")[0] + "/"
+            carpetas[carpeta] = carpetas.get(carpeta, 0) + 1
+        else:
+            sueltos.append(nombre)
+    return sueltos + [ngettext("{folder} ({n} archivo)", "{folder} ({n} archivos)", n)
+                      .format(folder=carpeta, n=n) for carpeta, n in carpetas.items()]
+
+
+def _texto_del_aviso(aviso: oscwii_installer.AvisoDeInstalacion) -> str:
+    """El cuerpo del aviso antes de instalar (ver `_dialogo_del_aviso`)."""
+    partes = []
+    escribe = ([_("{path} (se reemplaza)").format(path=r) for r in aviso.reemplaza]
+               + [ngettext("{folder}: {n} archivo nuevo", "{folder}: {n} archivos nuevos", n)
+                  .format(folder=carpeta, n=n) for carpeta, n in aviso.carpetas])
+    if escribe:
+        partes.append(_("Va a escribir en:") + "\n" + _lista(escribe))
+    if aviso.carpetas:
+        partes.append(_("Fuera de apps/ no se borra nada de lo que ya tengas: "
+                        "solo se agregan archivos."))
+    if aviso.distintos:
+        n = len(aviso.distintos)
+        partes.append(
+            ngettext("Ya tenés {n} archivo distinto al del paquete:",
+                     "Ya tenés {n} archivos distintos a los del paquete:", n).format(n=n)
+            + "\n" + _lista(aviso.distintos) + "\n"
+            + _("Si no elegís reemplazarlos, se conservan los tuyos."))
+    if aviso.intocables:
+        partes.append(_("Se conservan siempre (el paquete los trae vacíos, o no se "
+                        "pueden poner sin borrar algo tuyo):")
+                      + "\n" + _lista(aviso.intocables))
+    if aviso.omitidos:
+        partes.append(_("No se copian:") + "\n"
+                      + _lista(_omitidos_para_mostrar(aviso.omitidos)))
+    return "\n\n".join(partes)
+
+
+# Lo que cada botón del aviso le contesta a `install_app` (ver su
+# parámetro `confirmar`): None no instala, True reemplaza los archivos
+# distintos del usuario, False los conserva.
+_RESPUESTAS_DEL_AVISO = {"cancel": None, "keep": False, "install": False, "replace": True}
+
+
+def _dialogo_del_aviso(nombre_app: str, aviso, al_responder) -> Adw.AlertDialog:
+    """Dónde va a escribir el paquete, antes de tocar la unidad. Si choca
+    con archivos del usuario, lo que se ofrece por defecto es conservarlos.
+    `al_responder` recibe None, False o True (`_RESPUESTAS_DEL_AVISO`)."""
+    dialogo = Adw.AlertDialog(
+        heading=_("¿Instalar '{name}'?").format(name=nombre_app),
+        body=_texto_del_aviso(aviso))
+    dialogo.add_response("cancel", _("Cancelar"))
+    if aviso.distintos:
+        dialogo.add_response("replace", _("Reemplazar los míos"))
+        dialogo.add_response("keep", _("Conservar los míos"))
+        dialogo.set_response_appearance("replace", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialogo.set_response_appearance("keep", Adw.ResponseAppearance.SUGGESTED)
+        dialogo.set_default_response("keep")
+    else:
+        dialogo.add_response("install", _("Instalar"))
+        dialogo.set_response_appearance("install", Adw.ResponseAppearance.SUGGESTED)
+        dialogo.set_default_response("install")
+    dialogo.set_close_response("cancel")
+    dialogo.connect("response",
+                    lambda _d, respuesta: al_responder(_RESPUESTAS_DEL_AVISO.get(respuesta)))
+    return dialogo
+
+
+def _preguntar_y_esperar(mostrar, cancel_event: threading.Event,
+                         intervalo: float = 0.2):
+    """Corre en el hilo de la instalación: `mostrar(responder)` pone el
+    aviso en el hilo de GTK, y esto espera a que se llame a `responder`.
+    Cancelar desde la tarjeta (o cerrar la ventana) también contesta: None,
+    no instalar."""
+    listo = threading.Event()
+    respuesta = []
+
+    def _responder(r):
+        respuesta.append(r)
+        listo.set()
+
+    mostrar(_responder)
+    while not listo.wait(intervalo):
+        if cancel_event.is_set():
+            return None
+    return respuesta[0]
 
 
 class HomebrewAppCard(Gtk.Box):
@@ -566,9 +682,15 @@ class HomebrewStoreView(Gtk.Box):
         def on_progress(progress):
             GLib.idle_add(self._on_install_progress, app, progress)
 
+        def confirmar(aviso):
+            return _preguntar_y_esperar(
+                lambda responder: GLib.idle_add(self._mostrar_aviso, app, aviso, responder),
+                cancel_event)
+
         def worker():
             result = oscwii_installer.install_app(
-                app, dest_root, cancel_event=cancel_event, on_progress=on_progress)
+                app, dest_root, cancel_event=cancel_event, on_progress=on_progress,
+                confirmar=confirmar)
             # Todavía en el hilo de fondo, a propósito: si `app.slug` no
             # tiene ninguna config maestra registrada (la inmensa mayoría
             # del catálogo), `maybe_apply` vuelve en el acto sin tocar
@@ -581,6 +703,19 @@ class HomebrewStoreView(Gtk.Box):
 
         threading.Thread(target=worker, daemon=True,
                          name=f"oscwii-install-{app.slug}").start()
+
+    def _mostrar_aviso(self, app: HomebrewApp, aviso, responder) -> bool:
+        state = self._install_states.get(app.slug)
+        if state is not None:
+            state.message = _("Esperando tu confirmación…")
+            card = self._card_by_slug.get(app.slug)
+            if card is not None and gtk_helpers.widget_is_alive(card) and card.app is app:
+                self._apply_install_state(card, state)
+        dialogo = _dialogo_del_aviso(app.name, aviso, responder)
+        if state is not None:
+            state.dialogo = dialogo
+        dialogo.present(self)
+        return False
 
     def _on_install_progress(self, app: HomebrewApp, progress) -> bool:
         state = self._install_states.get(app.slug)
@@ -608,6 +743,12 @@ class HomebrewStoreView(Gtk.Box):
 
     def _on_install_done(self, app: HomebrewApp, result, op, golden_result=None) -> bool:
         self.ops.finish(op, _install_outcome(app, result))
+        # Si se canceló desde la tarjeta con el aviso abierto, el aviso ya
+        # no contesta nada: se cierra.
+        anterior = self._install_states.get(app.slug)
+        if anterior is not None and anterior.dialogo is not None:
+            anterior.dialogo.force_close()
+            anterior.dialogo = None
 
         if result.ok:
             state = _InstallState(kind=_CardState.DONE, fraction=1.0,

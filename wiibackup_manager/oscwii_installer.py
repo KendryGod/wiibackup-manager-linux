@@ -337,6 +337,9 @@ class InstallResult:
     datos_escritos: tuple = ()
     datos_conservados: tuple = ()
     omitidos: tuple = ()
+    # `datos_escritos` resumido: (carpeta de datos, cantidad), para el
+    # historial.
+    carpetas_de_datos: tuple = ()
 
     @property
     def ok(self) -> bool:
@@ -853,6 +856,67 @@ def _comparar_datos(zf: zipfile.ZipFile, datos: tuple, dest_root: Path) -> Datos
                            tuple(intocables))
 
 
+def _carpeta_para_mostrar(ruta: Path, dest_root: Path) -> str:
+    """La carpeta de datos de `ruta` como se muestra: con el nombre que
+    tiene en la unidad y "/" al final (`smw/`, `usr/local/lib/timidity/`),
+    o el nombre del archivo si está suelto en la raíz (`database.txt`)."""
+    partes = ruta.relative_to(dest_root).parts
+    if len(partes) == 1:
+        return partes[0]
+    bajas = tuple(p.lower() for p in partes)
+    largo = next((len(prefijo) for prefijo in CARPETAS_DE_DATOS
+                  if bajas[:len(prefijo)] == prefijo), 1)
+    return "/".join(partes[:largo]) + "/"
+
+
+def _por_carpeta(rutas, dest_root: Path) -> tuple:
+    """(carpeta, cantidad de archivos) de `rutas`, en el orden en que
+    aparece cada carpeta."""
+    cuenta: dict = {}
+    for ruta in rutas:
+        carpeta = _carpeta_para_mostrar(ruta, dest_root)
+        cuenta[carpeta] = cuenta.get(carpeta, 0) + 1
+    return tuple(cuenta.items())
+
+
+@dataclass(frozen=True)
+class AvisoDeInstalacion:
+    """Lo que la Store muestra antes de escribir cuando el paquete escribe
+    fuera de `apps/` y `controllers/`, omite algo o choca con algo del
+    usuario (ver `install_app`). Rutas relativas a la raíz de la unidad."""
+
+    # Lo de `apps/` y `controllers/`: carpetas que se reemplazan enteras
+    # ("apps/smw-wiigii/") y archivos sueltos.
+    reemplaza: tuple
+    # (carpeta de datos, cuántos archivos nuevos entran): ("smw/", 1298).
+    carpetas: tuple
+    # Archivos del usuario con otro contenido: se elige si se reemplazan.
+    distintos: tuple
+    # Archivos del usuario que se conservan siempre (`DatosDelPaquete.intocables`).
+    intocables: tuple
+    # Lo que no se copia.
+    omitidos: tuple
+
+
+def _aviso(plan: PlanDeInstalacion, datos: DatosDelPaquete,
+           dest_root: Path) -> Optional[AvisoDeInstalacion]:
+    """El aviso para el usuario, o None si no hace falta: todo va a `apps/`
+    o `controllers/`, o lo de afuera ya está igual y no se omite nada."""
+    if not (datos.nuevos or datos.distintos or datos.intocables or plan.omitidos):
+        return None
+
+    def _rel(ruta: Path) -> str:
+        return ruta.relative_to(dest_root).as_posix()
+
+    return AvisoDeInstalacion(
+        reemplaza=(tuple(f"{clave}/" for clave in plan.unidades)
+                   + tuple(_normalized_member_path(i.filename) for i in plan.sueltos)),
+        carpetas=_por_carpeta((r for _i, r in datos.nuevos), dest_root),
+        distintos=tuple(_rel(r) for _i, r in datos.distintos),
+        intocables=tuple(_rel(r) for r in datos.intocables),
+        omitidos=plan.omitidos)
+
+
 def _agrupar_nuevos(nuevos: tuple, dest_root: Path) -> tuple[dict, list]:
     """Reparte los archivos nuevos en carpetas nuevas -la más alta del
     camino que no existe, que entra entera con un solo cambio de nombre: la
@@ -1132,7 +1196,9 @@ def _destino_no_escribible(dest_root: Path) -> Optional[OSError]:
 def install_app(app: HomebrewApp, dest_root: Path, *,
                 cancel_event: Optional[threading.Event] = None,
                 on_progress: Optional[ProgressCallback] = None,
-                reemplazar: bool = False) -> InstallResult:
+                reemplazar: bool = False,
+                confirmar: Optional[Callable[[AvisoDeInstalacion], Optional[bool]]] = None,
+                ) -> InstallResult:
     """Descarga, verifica y extrae `app` a `dest_root/`, respetando solo
     las carpetas de primer nivel de `_ALLOWED_TOP_LEVEL_DIRS` (hoy "apps"
     y "controllers"; ver el comentario de esa constante).
@@ -1218,6 +1284,17 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
                 plan = _planificar(members)
                 unidades, sueltos = plan.unidades, list(plan.sueltos)
                 datos = _comparar_datos(zf, plan.datos, dest_root)
+                # Con el paquete ya validado y antes de tocar la unidad: qué
+                # va a escribir fuera de `apps/`, qué choca con lo del
+                # usuario y qué no se copia. None es "no instalar"; si no,
+                # si se reemplazan los archivos distintos del usuario.
+                aviso = _aviso(plan, datos, dest_root)
+                if confirmar is not None and aviso is not None:
+                    respuesta = confirmar(aviso)
+                    _check_cancel(cancel_event)
+                    if respuesta is None:
+                        raise CancelRequested()
+                    reemplazar = bool(respuesta)
                 # Fuera de `apps/` lo del usuario se conserva: un archivo
                 # distinto solo se reemplaza si se pidió, y uno vacío del
                 # paquete nunca (ver `DatosDelPaquete.intocables`).
@@ -1269,6 +1346,7 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
                              preserved_paths=tuple(conservados),
                              datos_escritos=datos_escritos,
                              datos_conservados=conservados_del_usuario,
+                             carpetas_de_datos=_por_carpeta(datos_escritos, dest_root),
                              omitidos=plan.omitidos)
 
     except CancelRequested:
