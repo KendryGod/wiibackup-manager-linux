@@ -27,7 +27,8 @@ Flujo de `install_app`, en orden, y por qué:
    (`_ALLOWED_TOP_LEVEL_DIRS`: "apps/" siempre, y "controllers/" para el
    caso real de Nintendont -ver el comentario de esa constante-), no
    puede traer ".." ni ser absoluta, y el destino resuelto tiene que
-   quedar adentro de esa carpeta permitida dentro de `dest_root`. Ningún
+   quedar adentro de la raíz real de `dest_root` (ver `_is_safe_member` y
+   `_clasificar`). Ningún
    archivo del ZIP puede ser un symlink (podría apuntar afuera y hacer
    que una entrada posterior, ya "adentro" según el nombre, en realidad
    escriba a través de él hacia otro lado). Si UNA sola entrada no pasa,
@@ -125,6 +126,96 @@ DEFAULT_CLUSTER_BYTES = 32 * 1024
 # anti zip-slip de abajo (`_is_safe_member`) no se relaja, solo se le
 # suma un segundo destino válido conocido.
 _ALLOWED_TOP_LEVEL_DIRS = ("apps", "controllers")
+
+
+class Destino(Enum):
+    """Qué se hace con una entrada del ZIP (ver `_clasificar`)."""
+
+    # En `apps/` o `controllers/`: la carpeta de la app se reemplaza entera.
+    APP = "app"
+    # En una carpeta de datos conocida, fuera de `apps/`.
+    DATOS = "datos"
+    # Documentación o basura conocida: no se copia.
+    OMITIDO = "omitido"
+
+
+# Carpetas fuera de `apps/` y `controllers/` donde una app de OSC deja sus
+# datos, en minúsculas (FAT32 no distingue mayúsculas, y los ZIP de hatari y
+# vbcgx escriben `WiiFlow/` y `wiiflow/`). Salen de leer los 299 ZIP del
+# catálogo el 2026-10-24: 39 apps se rechazaban enteras por esto. Cada una
+# es una carpeta con el nombre de la app, o una ruta fija que la app lee.
+# Lo que no está acá sigue rechazando el paquete entero.
+_CARPETAS_DE_DATOS = (
+    ("cavestory",),                 # cavestory
+    ("fbzx-wii",),                  # fbzx-wii
+    ("frodo",),                     # frodo
+    ("gxgeo",),                     # gxgeo
+    ("hatari",),                    # hatari
+    ("mame",),                      # mame4wii
+    ("mcbackup",),                  # not64: una partida para gcmm
+    ("neocd",),                     # neocd
+    ("not64",),                     # not64
+    ("ploader",),                   # postloader, Settings-Editor-GUI
+    ("smw",),                       # smw-wiigii
+    ("tworld",),                    # tworld-wii
+    ("uae",),                       # uae
+    ("usb-loader",),                # usb-loader
+    ("vbcgx",),                     # vbcgx
+    ("wad",),                       # postloader: su forwarder (solo .wad)
+    ("wii64",),                     # wii64
+    ("wii7800",),                   # wii7800
+    ("wiicolem",),                  # wiicolem
+    ("wiiflow",),                   # wiiflow; plugins de hatari y vbcgx
+    ("wiihandysdl",),               # wiihandysdl
+    ("wiisxrx",),                   # WiiSXRX
+    ("yabause",),                   # yabause
+    ("data", "supersonicwii"),      # supersonicwii
+    ("etc", "timidity"),            # openttd: la música (timidity.cfg)
+    ("usr", "local", "lib", "timidity"),  # openttd: los instrumentos
+)
+# Archivos sueltos en la raíz que una app lee por ese nombre: el `boot.dol`
+# de AnyTitleDeleterMOD abre "/database.txt" para mostrar los nombres de
+# los títulos.
+_ARCHIVOS_DE_DATOS_EN_LA_RAIZ = ("database.txt",)
+# Lo que se omite sin rechazar el paquete: carpetas de primer nivel que no
+# son de la app (la basura de macOS, la guía en HTML del Homebrew Browser,
+# el código fuente de gcmm), los dos ejecutables de postloader para neek,
+# que postloader no usa, y la documentación suelta en la raíz.
+_CARPETAS_OMITIDAS = ("__macosx", "homebrew browser guide and help", "gcmm_1.5.2")
+_ARCHIVOS_OMITIDOS_EN_LA_RAIZ = ("neek2obooter.dol", "neek2obooter.app",
+                                 "readme", "license", "read.mii")
+_DOCUMENTACION = (".txt", ".pdf", ".html", ".htm", ".md")
+
+
+def _clasificar(nombre: str) -> Optional[Destino]:
+    """Qué hacer con la entrada `nombre` de un ZIP, o None si no está en
+    ninguna lista y el paquete se rechaza. Solo mira el nombre: que no
+    tenga ".." ni sea absoluta, y que no se salga de la unidad, lo ve
+    `_is_safe_member`."""
+    partes = [p for p in nombre.replace("\\", "/").split("/") if p and p != "."]
+    if not partes:
+        return None
+    if len(partes) >= 2 and partes[0] in _ALLOWED_TOP_LEVEL_DIRS:
+        return Destino.APP
+    bajas = tuple(p.lower() for p in partes)
+    if len(bajas) == 1:
+        if bajas[0] in _ARCHIVOS_DE_DATOS_EN_LA_RAIZ:
+            return Destino.DATOS
+        if bajas[0] in _ARCHIVOS_OMITIDOS_EN_LA_RAIZ or bajas[0].endswith(_DOCUMENTACION):
+            return Destino.OMITIDO
+        return None
+    if bajas[0] in _CARPETAS_OMITIDAS:
+        return Destino.OMITIDO
+    for prefijo in _CARPETAS_DE_DATOS:
+        if bajas[:len(prefijo)] == prefijo and len(bajas) > len(prefijo):
+            if prefijo == ("wad",) and not bajas[-1].endswith(".wad"):
+                return None
+            return Destino.DATOS
+    return None
+
+
+# Lo que `_validate_zip` deja pasar.
+_SE_ACEPTAN = frozenset({Destino.APP})
 
 # Lo que es del cliente adentro de la carpeta de una app, por unidad del
 # ZIP ("apps/<App>", en minúsculas). Reinstalar o actualizar reemplaza la
@@ -372,16 +463,19 @@ def _verify_hash(app: HomebrewApp, computed_md5: str, computed_sha256: str) -> O
 
 # ------------------------------------------------- Validación del ZIP --
 def _is_safe_member(name: str, dest_root: Path) -> bool:
-    """True si la entrada `name` del ZIP puede extraerse sin escaparse de
-    alguna de las carpetas de `_ALLOWED_TOP_LEVEL_DIRS` dentro de
-    `dest_root`.
+    """True si la entrada `name` del ZIP está en una de las listas de
+    `_clasificar` que se aceptan y, extraída, queda dentro de `dest_root`.
 
-    Se combinan dos chequeos independientes a propósito: el del primer
-    componente de la ruta (rápido, y documenta la regla: "solo estas
-    carpetas de primer nivel") y el de la ruta resuelta (`resolve()` +
-    contención), que es el que de verdad importa para la seguridad y
-    cubre casos que el primero solo no ve (p. ej. componentes "."
-    mezclados, o separadores repetidos)."""
+    Se combinan dos chequeos independientes a propósito: el del nombre
+    (rápido, y documenta la regla: "solo estas carpetas") y el de la ruta
+    resuelta (`resolve()` + contención), que es el que de verdad importa
+    para la seguridad y cubre casos que el primero solo no ve (p. ej.
+    componentes "." mezclados, separadores repetidos o un enlace simbólico
+    que ya esté en el destino).
+
+    La contención es contra la raíz REAL del destino, no contra la carpeta
+    de primer nivel resuelta: si `apps` es un enlace hacia afuera, esa
+    carpeta resuelta también queda afuera y la ruta "estaba adentro"."""
     normalized = name.replace("\\", "/")
     if not normalized or normalized.startswith("/"):
         return False
@@ -390,15 +484,15 @@ def _is_safe_member(name: str, dest_root: Path) -> bool:
         return False
     if ".." in pure.parts:
         return False
-    if not pure.parts or pure.parts[0] not in _ALLOWED_TOP_LEVEL_DIRS:
+    if _clasificar(normalized) not in _SE_ACEPTAN:
         return False
 
     try:
         target = (dest_root / normalized).resolve()
-        allowed_root = (dest_root / pure.parts[0]).resolve()
+        raiz = Path(dest_root).resolve()
     except OSError:
         return False
-    return target == allowed_root or allowed_root in target.parents
+    return raiz in target.parents
 
 
 def _normalized_member_path(name: str) -> str:
@@ -587,27 +681,45 @@ def _validate_zip(zip_path: Path, dest_root: Path) -> tuple:
 
 
 # -------------------------------------------------------------- Extracción --
-def _group_members(members: list) -> tuple[dict, list]:
-    """Separa los miembros del ZIP (ya validados, sin carpetas) en:
+@dataclass(frozen=True)
+class PlanDeInstalacion:
+    """Qué se hace con cada archivo de un ZIP ya validado (ver
+    `_planificar`). Todo lo que se escribe entra en la MISMA transacción
+    (`_instalar_todo`)."""
 
-    - unidades: subcarpetas de primer nivel dentro de una carpeta
-      permitida (ej. "apps/WiiDonut", o "controllers/Nintendont" si el
-      ZIP trae esa estructura), que se reemplazan como carpeta entera.
-    - sueltos: archivos que caen directo dentro de una carpeta permitida
-      SIN ninguna subcarpeta (ej. "controllers/perfil.ini"), que se
-      reemplazan archivo por archivo.
+    # Subcarpetas de primer nivel dentro de `apps/` o `controllers/` (ej.
+    # "apps/WiiDonut"): cada una se reemplaza entera. Clave -> miembros.
+    unidades: dict
+    # Archivos directo en `apps/` o `controllers/`, sin subcarpeta (ej.
+    # "controllers/perfil.ini"): se reemplazan de a uno.
+    sueltos: tuple
+    # Archivos en una carpeta de datos fuera de `apps/` (`Destino.DATOS`).
+    datos: tuple
+    # Nombres de lo que no se copia (`Destino.OMITIDO`).
+    omitidos: tuple
 
-    Las dos clases entran en la MISMA transacción (`_instalar_todo`)."""
+
+def _planificar(members: list) -> PlanDeInstalacion:
+    """Reparte los miembros del ZIP (ya validados, sin carpetas) según
+    `_clasificar`."""
     unidades: dict = {}
     sueltos: list = []
+    datos: list = []
+    omitidos: list = []
     for info in members:
-        parts = PurePosixPath(info.filename).parts
-        if len(parts) >= 3:
-            clave = f"{parts[0]}/{parts[1]}"
-            unidades.setdefault(clave, []).append(info)
+        destino = _clasificar(info.filename)
+        if destino is Destino.OMITIDO:
+            omitidos.append(info.filename)
+        elif destino is Destino.DATOS:
+            datos.append(info)
         else:
-            sueltos.append(info)
-    return unidades, sueltos
+            parts = PurePosixPath(info.filename).parts
+            if len(parts) >= 3:
+                clave = f"{parts[0]}/{parts[1]}"
+                unidades.setdefault(clave, []).append(info)
+            else:
+                sueltos.append(info)
+    return PlanDeInstalacion(unidades, tuple(sueltos), tuple(datos), tuple(omitidos))
 
 
 # Marcas de los nombres ocultos que arma `atomicfs.hidden_sibling`: la
@@ -922,7 +1034,8 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
 
             try:
                 members = [i for i in zf.infolist() if not i.is_dir()]
-                unidades, sueltos = _group_members(members)
+                plan = _planificar(members)
+                unidades, sueltos = plan.unidades, list(plan.sueltos)
                 cluster = _cluster_size(dest_root)
                 # Lo del cliente se copia mientras la versión anterior sigue
                 # en su lugar: ocupa lugar dos veces hasta el final, y hay
