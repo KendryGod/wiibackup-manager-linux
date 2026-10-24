@@ -193,21 +193,3 @@ def test_el_plan_separa_unidades_sueltos_datos_y_omitidos():
                                                 "WiiFlow/plugins/hatari.ini"]
     assert plan.omitidos == ("README.txt", "__MACOSX/hatari/._meta.xml")
 
-
-def test_por_ahora_un_zip_con_carpetas_de_datos_se_sigue_rechazando(tmp_path):
-    """Hasta que exista la escritura que fusiona sin borrar lo del usuario,
-    aceptar estas rutas instalaría la app sin sus datos. Este test cambia
-    cuando llegue esa escritura."""
-    from homebrew_falso import dol
-    zip_path = tmp_path / "smw.zip"
-    with zipfile.ZipFile(zip_path, "w") as zf:
-        zf.writestr("apps/smw-wiigii/boot.dol", dol(b"A"))
-        zf.writestr("smw/sfx/x.wav", b"RIFF")
-        zf.writestr("readme.txt", b"hola")
-    raiz = tmp_path / "usb"
-    raiz.mkdir()
-
-    zf, status, err = oscwii_installer._validate_zip(zip_path, raiz)
-
-    assert zf is None
-    assert status is oscwii_installer.InstallStatus.UNSAFE_ZIP

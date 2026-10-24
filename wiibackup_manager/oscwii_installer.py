@@ -67,6 +67,17 @@ Flujo de `install_app`, en orden, y por qué:
       GX, por ejemplo) se COPIA de la versión instalada a la staging en
       el paso (a), antes de intercambiar nada: entra junto con lo nuevo, y
       la versión anterior queda entera hasta el final.
+   d. Fuera de `apps/` y `controllers/` (las carpetas de datos de
+      `CARPETAS_DE_DATOS`: `smw/`, `mame/`, `WiiFlow/plugins/`...) viven
+      también las ROMs, las partidas y la configuración del usuario, así
+      que ahí no se reemplaza ninguna carpeta: se FUSIONA
+      (`_comparar_datos`). Lo que no existe entra (una carpeta nueva,
+      entera); lo que ya está igual no se toca; un archivo que existe con
+      otro contenido se conserva salvo que se pida reemplazarlo, y uno de
+      0 bytes del paquete nunca lo reemplaza; nada que el paquete no
+      traiga se borra. Va en la misma transacción que lo demás. La
+      documentación suelta y la basura conocida (`Destino.OMITIDO`) no se
+      copian.
 
    Nunca se ejecuta ni el binario (.dol/.elf) ni ningún script: se copian
    bytes nomás.
@@ -223,7 +234,7 @@ def _clasificar(nombre: str) -> Optional[Destino]:
 
 
 # Lo que `_validate_zip` deja pasar.
-_SE_ACEPTAN = frozenset({Destino.APP})
+_SE_ACEPTAN = frozenset(Destino)
 
 # Lo que es del cliente adentro de la carpeta de una app, por unidad del
 # ZIP ("apps/<App>", en minúsculas). Reinstalar o actualizar reemplaza la
@@ -308,7 +319,7 @@ class InstallResult:
     status: InstallStatus
     app_slug: str
     error: str = ""
-    # Rutas finales escritas bajo dest_root/apps, para loguear o listar.
+    # Rutas finales escritas, para loguear o listar.
     installed_paths: tuple = ()
     # Respaldos de la versión anterior que se instalaron bien pero no se
     # pudieron borrar después (ver `_instalar_todo`). La
@@ -320,6 +331,12 @@ class InstallResult:
     # nueva (ver `PRESERVED_PATHS`): rutas finales, una por cada cosa de
     # la lista que existía.
     preserved_paths: tuple = ()
+    # Fuera de `apps/` y `controllers/` (ver `_comparar_datos`): lo que se
+    # escribió, lo del usuario que ya estaba y se dejó como estaba, y los
+    # nombres del ZIP que no se copian (`Destino.OMITIDO`).
+    datos_escritos: tuple = ()
+    datos_conservados: tuple = ()
+    omitidos: tuple = ()
 
     @property
     def ok(self) -> bool:
@@ -653,10 +670,9 @@ def _validate_zip(zip_path: Path, dest_root: Path) -> tuple:
 
                 if not _is_safe_member(info.filename, dest_root):
                     status = InstallStatus.UNSAFE_ZIP
-                    error = _("entrada fuera de las carpetas permitidas "
-                              "({allowed}) en el ZIP ({name}), rechazado").format(
-                                  allowed=", ".join(_ALLOWED_TOP_LEVEL_DIRS),
-                                  name=info.filename)
+                    error = _("el ZIP escribe en {name}, que no está entre "
+                              "las carpetas que la Store puede usar; "
+                              "rechazado").format(name=info.filename)
                     break
 
             # Recién con todas las entradas validadas de a una tiene
@@ -728,6 +744,137 @@ def _planificar(members: list) -> PlanDeInstalacion:
             else:
                 sueltos.append(info)
     return PlanDeInstalacion(unidades, tuple(sueltos), tuple(datos), tuple(omitidos))
+
+
+class _NombresEnLaUnidad:
+    """La ruta final de cada archivo de datos, con el nombre que cada
+    carpeta YA tiene en la unidad: el ZIP de vbcgx dice `wiiflow/` y la
+    unidad puede tener `WiiFlow/`. En FAT32 es la misma carpeta; en una
+    carpeta de ext4 elegida a mano se crearían dos. (Dos grafías dentro
+    del mismo ZIP no llegan hasta acá: `_check_name_collisions` rechaza el
+    paquete.)"""
+
+    def __init__(self, raiz: Path) -> None:
+        self._raiz = raiz
+        self._listados: dict = {}
+
+    def _listado(self, carpeta: Path) -> dict:
+        if carpeta not in self._listados:
+            try:
+                nombres = sorted(os.listdir(carpeta))
+            except OSError:
+                nombres = []
+            por_clave: dict = {}
+            for nombre in nombres:
+                por_clave.setdefault(nombre.lower(), []).append(nombre)
+            self._listados[carpeta] = por_clave
+        return self._listados[carpeta]
+
+    def ruta(self, nombre_en_el_zip: str) -> Path:
+        actual = self._raiz
+        for parte in _normalized_member_path(nombre_en_el_zip).split("/"):
+            existentes = self._listado(actual).get(parte.lower(), [])
+            elegido = parte if parte in existentes or not existentes else existentes[0]
+            actual = actual / elegido
+        return actual
+
+
+@dataclass(frozen=True)
+class DatosDelPaquete:
+    """Lo que el paquete trae fuera de `apps/`, comparado con lo que ya
+    hay en la unidad (ver `_comparar_datos`). Rutas finales."""
+
+    # (miembro, ruta) que no existen: entran.
+    nuevos: tuple
+    # (miembro, ruta) de archivos que existen con otro contenido: se
+    # conservan, salvo que se pida reemplazarlos.
+    distintos: tuple
+    # Rutas que ya están con el mismo contenido: no se tocan.
+    iguales: tuple
+    # Rutas del usuario que NUNCA se reemplazan: el paquete las trae vacías
+    # (un `wiicolem.conf` de 0 bytes vaciaría la configuración), en la
+    # unidad son una carpeta o un enlace, o el paquete necesita una carpeta
+    # donde el usuario tiene un archivo.
+    intocables: tuple
+
+
+def _mismo_contenido(zf: zipfile.ZipFile, info: zipfile.ZipInfo, ruta: Path) -> bool:
+    with zf.open(info) as a, open(ruta, "rb") as b:
+        while True:
+            bloque = a.read(DOWNLOAD_CHUNK_SIZE)
+            if bloque != b.read(len(bloque)):
+                return False
+            if not bloque:
+                return True
+
+
+def _comparar_datos(zf: zipfile.ZipFile, datos: tuple, dest_root: Path) -> DatosDelPaquete:
+    """Compara cada archivo de datos del paquete con la unidad. Solo lee."""
+    nombres = _NombresEnLaUnidad(dest_root)
+    es_carpeta: dict = {}
+
+    def _estorba(ruta: Path) -> bool:
+        # Alguna carpeta del camino existe y no es una carpeta de verdad
+        # (un archivo, o un enlace simbólico, que no se sigue).
+        for carpeta in reversed(ruta.relative_to(dest_root).parents[:-1]):
+            carpeta = dest_root / carpeta
+            if carpeta not in es_carpeta:
+                try:
+                    es_carpeta[carpeta] = stat.S_ISDIR(os.lstat(carpeta).st_mode)
+                except FileNotFoundError:
+                    es_carpeta[carpeta] = None
+            if es_carpeta[carpeta] is None:
+                return False
+            if not es_carpeta[carpeta]:
+                return True
+        return False
+
+    nuevos, distintos, iguales, intocables = [], [], [], []
+    for info in datos:
+        ruta = nombres.ruta(info.filename)
+        if _estorba(ruta):
+            intocables.append(ruta)
+            continue
+        try:
+            info_disco = os.lstat(ruta)
+        except FileNotFoundError:
+            nuevos.append((info, ruta))
+            continue
+        if not stat.S_ISREG(info_disco.st_mode):
+            intocables.append(ruta)
+        elif (info_disco.st_size == info.file_size
+              and _mismo_contenido(zf, info, ruta)):
+            iguales.append(ruta)
+        elif info.file_size == 0:
+            intocables.append(ruta)
+        else:
+            distintos.append((info, ruta))
+    return DatosDelPaquete(tuple(nuevos), tuple(distintos), tuple(iguales),
+                           tuple(intocables))
+
+
+def _agrupar_nuevos(nuevos: tuple, dest_root: Path) -> tuple[dict, list]:
+    """Reparte los archivos nuevos en carpetas nuevas -la más alta del
+    camino que no existe, que entra entera con un solo cambio de nombre: la
+    primera instalación de cavestory son 4728 archivos- y archivos nuevos
+    en una carpeta que ya existe."""
+    existe: dict = {}
+    carpetas: dict = {}
+    archivos: list = []
+    for info, ruta in nuevos:
+        tope = None
+        for carpeta in reversed(ruta.relative_to(dest_root).parents[:-1]):
+            carpeta = dest_root / carpeta
+            if carpeta not in existe:
+                existe[carpeta] = os.path.lexists(carpeta)
+            if not existe[carpeta]:
+                tope = carpeta
+                break
+        if tope is None:
+            archivos.append((info, ruta))
+        else:
+            carpetas.setdefault(tope, []).append((info, ruta.relative_to(tope)))
+    return carpetas, archivos
 
 
 # Marcas de los nombres ocultos que arma `atomicfs.hidden_sibling`: la
@@ -834,7 +981,9 @@ def _copiar_del_cliente(origen: Path, destino: Path,
 def _instalar_todo(zf: zipfile.ZipFile, unidades: dict, sueltos: list,
                    dest_root: Path, cancel_event: Optional[threading.Event],
                    on_step: Callable[[], None],
-                   del_cliente: tuple = ()) -> tuple[list, list, list]:
+                   del_cliente: tuple = (),
+                   carpetas_de_datos: Optional[dict] = None,
+                   archivos_de_datos: tuple = ()) -> tuple[list, list, list]:
     """Instala la app entera como una transacción: todo o nada, nunca una
     mezcla de archivos viejos y nuevos, ni una unidad nueva con otra vieja.
 
@@ -851,6 +1000,14 @@ def _instalar_todo(zf: zipfile.ZipFile, unidades: dict, sueltos: list,
     staging de su unidad después de extraer el ZIP y antes de intercambiar
     nada, así que entra en la misma transacción y la versión anterior no se
     toca hasta el final.
+
+    `carpetas_de_datos` y `archivos_de_datos` (ver `_agrupar_nuevos`) son
+    lo de fuera de `apps/`, que se FUSIONA con lo que hay: una carpeta que
+    no existía entra entera; un archivo entra solo, al lado de lo que el
+    usuario ya tenga. Lo nuevo se prepara `exclusivo`: si mientras tanto
+    apareció algo con ese nombre, no se aparta (después se borraría con los
+    respaldos), se deshace todo. `archivos_de_datos` lleva (miembro, ruta,
+    reemplaza): solo un archivo que el usuario eligió reemplazar se aparta.
 
     Devuelve (rutas finales escritas, respaldos que no se pudieron borrar,
     rutas finales de lo que se conservó del cliente). Lo segundo casi
@@ -891,6 +1048,21 @@ def _instalar_todo(zf: zipfile.ZipFile, unidades: dict, sueltos: list,
             _check_cancel(cancel_event)
             final = dest_root / info.filename
             _copiar_miembro(zf, info, tx.stage_file(final))
+            escritos.append(final)
+            on_step()
+        for carpeta, contenido in (carpetas_de_datos or {}).items():
+            _check_cancel(cancel_event)
+            staging = tx.stage_dir(carpeta, exclusivo=True)
+            for info, relativo in contenido:
+                _check_cancel(cancel_event)
+                destino = staging / relativo
+                destino.parent.mkdir(parents=True, exist_ok=True)
+                _copiar_miembro(zf, info, destino)
+                escritos.append(carpeta / relativo)
+                on_step()
+        for info, final, reemplaza in archivos_de_datos:
+            _check_cancel(cancel_event)
+            _copiar_miembro(zf, info, tx.stage_file(final, exclusivo=not reemplaza))
             escritos.append(final)
             on_step()
     except BaseException:
@@ -959,7 +1131,8 @@ def _destino_no_escribible(dest_root: Path) -> Optional[OSError]:
 
 def install_app(app: HomebrewApp, dest_root: Path, *,
                 cancel_event: Optional[threading.Event] = None,
-                on_progress: Optional[ProgressCallback] = None) -> InstallResult:
+                on_progress: Optional[ProgressCallback] = None,
+                reemplazar: bool = False) -> InstallResult:
     """Descarga, verifica y extrae `app` a `dest_root/`, respetando solo
     las carpetas de primer nivel de `_ALLOWED_TOP_LEVEL_DIRS` (hoy "apps"
     y "controllers"; ver el comentario de esa constante).
@@ -1044,13 +1217,26 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
                 members = [i for i in zf.infolist() if not i.is_dir()]
                 plan = _planificar(members)
                 unidades, sueltos = plan.unidades, list(plan.sueltos)
+                datos = _comparar_datos(zf, plan.datos, dest_root)
+                # Fuera de `apps/` lo del usuario se conserva: un archivo
+                # distinto solo se reemplaza si se pidió, y uno vacío del
+                # paquete nunca (ver `DatosDelPaquete.intocables`).
+                reemplazados = datos.distintos if reemplazar else ()
+                conservados_del_usuario = datos.intocables + (
+                    () if reemplazar else tuple(r for _i, r in datos.distintos))
+                carpetas_de_datos, nuevos_sueltos = _agrupar_nuevos(datos.nuevos, dest_root)
+                archivos_de_datos = (tuple((i, r, False) for i, r in nuevos_sueltos)
+                                     + tuple((i, r, True) for i, r in reemplazados))
+                a_escribir = ([i for m in unidades.values() for i in m] + sueltos
+                              + [i for i, _r in datos.nuevos] + [i for i, _r in reemplazados])
+
                 cluster = _cluster_size(dest_root)
                 # Lo del cliente se copia mientras la versión anterior sigue
                 # en su lugar: ocupa lugar dos veces hasta el final, y hay
                 # que contarlo.
                 del_cliente = _plan_del_cliente(unidades, dest_root, cluster)
 
-                needed = (_space_needed(members, cluster)
+                needed = (_space_needed(a_escribir, cluster)
                           + sum(item.ocupa for item in del_cliente))
                 free = transfer_plan.free_space(dest_root)
                 if free is not None and needed > free:
@@ -1060,7 +1246,7 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
                             need=formatting.format_size(needed),
                             free=formatting.format_size(free)))
 
-                total = len(members) + sum(item.archivos for item in del_cliente)
+                total = len(a_escribir) + sum(item.archivos for item in del_cliente)
                 hechos = [0]
 
                 def _paso() -> None:
@@ -1070,14 +1256,20 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
 
                 written, huerfanos, conservados = _instalar_todo(
                     zf, unidades, sueltos, dest_root, cancel_event, _paso,
-                    tuple(del_cliente))
+                    tuple(del_cliente), carpetas_de_datos, archivos_de_datos)
             finally:
                 zf.close()
 
+        datos_escritos = tuple(
+            [c / rel for c, contenido in carpetas_de_datos.items() for _i, rel in contenido]
+            + [r for _i, r, _x in archivos_de_datos])
         return InstallResult(InstallStatus.OK, app.slug,
                              installed_paths=tuple(written),
                              orphaned_backups=tuple(huerfanos),
-                             preserved_paths=tuple(conservados))
+                             preserved_paths=tuple(conservados),
+                             datos_escritos=datos_escritos,
+                             datos_conservados=conservados_del_usuario,
+                             omitidos=plan.omitidos)
 
     except CancelRequested:
         return InstallResult(InstallStatus.CANCELLED, app.slug,

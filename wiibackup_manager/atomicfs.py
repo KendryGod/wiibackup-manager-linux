@@ -576,6 +576,9 @@ class StagedSwap:
         self._preparados: list = []
         self._intercambiados: list = []
         self._carpetas_creadas: list = []
+        # Preparados (staging) cuyo destino no existía y no puede existir al
+        # intercambiar (`exclusivo`).
+        self._exclusivos: set = set()
 
     def _crear_carpeta(self, carpeta: Path) -> None:
         faltan = []
@@ -597,9 +600,14 @@ class StagedSwap:
                 pass
         self._carpetas_creadas.clear()
 
-    def stage_dir(self, target: Path) -> Path:
+    def stage_dir(self, target: Path, *, exclusivo: bool = False) -> Path:
         """Carpeta oculta, vacía y hermana de `target`, para llenarla con
-        lo que va a ocupar su lugar."""
+        lo que va a ocupar su lugar.
+
+        Con `exclusivo`, `target` es algo NUEVO: si al intercambiar ya
+        existe (lo creó otro mientras tanto), no se aparta -después se
+        borraría con los respaldos-, sino que `commit` deshace todo y
+        levanta `FileExistsError`."""
         target = Path(target)
         self._crear_carpeta(target.parent)
         staging = hidden_sibling(target, self._staging_marca)
@@ -608,12 +616,14 @@ class StagedSwap:
         shutil.rmtree(staging, ignore_errors=True)
         staging.mkdir()
         self._preparados.append((target, staging))
+        if exclusivo:
+            self._exclusivos.add(staging)
         return staging
 
-    def stage_file(self, target: Path) -> Path:
+    def stage_file(self, target: Path, *, exclusivo: bool = False) -> Path:
         """Archivo oculto, vacío y hermano de `target` (`.{nombre}.parcial-…`,
         como `atomic_write_target`), para escribir lo que va a ocupar su
-        lugar."""
+        lugar. `exclusivo`, como en `stage_dir`."""
         target = Path(target)
         self._crear_carpeta(target.parent)
         fd, nombre = tempfile.mkstemp(dir=target.parent,
@@ -621,6 +631,8 @@ class StagedSwap:
         os.close(fd)
         tmp = Path(nombre)
         self._preparados.append((target, tmp))
+        if exclusivo:
+            self._exclusivos.add(tmp)
         _ajustar_permisos(tmp)
         return tmp
 
@@ -644,6 +656,9 @@ class StagedSwap:
             while self._preparados:
                 destino, preparado = self._preparados[0]
                 if os.path.lexists(destino):
+                    if preparado in self._exclusivos:
+                        raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST),
+                                              str(destino))
                     self._aside.move_aside(destino)
                 os.replace(preparado, destino)
                 self._intercambiados.append(self._preparados.pop(0))
