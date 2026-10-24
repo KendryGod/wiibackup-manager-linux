@@ -31,12 +31,13 @@ import zipfile
 
 import pytest
 
+from homebrew_falso import dol
 from wiibackup_manager import config, oscwii_client, oscwii_installer
 from wiibackup_manager.oscwii_client import HomebrewApp, UnsafeDownloadURL
 from wiibackup_manager.oscwii_installer import InstallStatus
 
 ZIP_ENTRIES = {
-    "apps/TestApp/boot.dol": b"A" * 100,
+    "apps/TestApp/boot.dol": dol(b"A" * 100),
     "apps/TestApp/meta.xml": b"<app/>",
 }
 
@@ -220,7 +221,7 @@ def test_descarga_desde_un_host_permitido_funciona(servidor, tmp_path):
         _fake_app(f"{servidor}/TestApp.zip"), dest_root)
 
     assert result.ok, result.error
-    assert (dest_root / "apps" / "TestApp" / "boot.dol").read_bytes() == b"A" * 100
+    assert (dest_root / "apps" / "TestApp" / "boot.dol").read_bytes() == dol(b"A" * 100)
     assert (dest_root / "apps" / "TestApp" / "meta.xml").read_bytes() == b"<app/>"
 
 
@@ -236,7 +237,7 @@ def test_una_redireccion_dentro_de_la_lista_se_sigue(servidor, tmp_path):
         _fake_app(f"{servidor}/redir-interno"), dest_root)
 
     assert result.ok, result.error
-    assert (dest_root / "apps" / "TestApp" / "boot.dol").read_bytes() == b"A" * 100
+    assert (dest_root / "apps" / "TestApp" / "boot.dol").read_bytes() == dol(b"A" * 100)
 
 
 def test_una_redireccion_fuera_de_la_lista_se_rechaza(servidor, tmp_path):

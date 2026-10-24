@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 
+from homebrew_falso import dol
 from wiibackup_manager import atomicfs, golden_configs, oscwii_installer, transfer_plan
 from wiibackup_manager.oscwii_client import HomebrewApp
 from wiibackup_manager.oscwii_installer import InstallStatus
@@ -30,7 +31,7 @@ APP = "apps/usbloader_gx"
 
 # Lo que tenía instalado el cliente: la versión vieja y sus datos.
 VIEJO = {
-    f"{APP}/boot.dol": b"dol viejo",
+    f"{APP}/boot.dol": dol(b"dol viejo"),
     f"{APP}/meta.xml": b"<app version='r1280'/>",
     f"{APP}/language/spanish.lang": b"viejo",
     f"{APP}/cache/titulos.bin": b"cache",            # se regenera: no se conserva
@@ -52,7 +53,7 @@ DEL_CLIENTE = {k: v for k, v in VIEJO.items()
 
 # Lo que trae el ZIP de la versión nueva (como el de OSC).
 NUEVO = {
-    f"{APP}/boot.dol": b"dol nuevo" * 10,
+    f"{APP}/boot.dol": dol(b"dol nuevo" * 10),
     f"{APP}/meta.xml": b"<app version='r1283'/>",
     f"{APP}/icon.png": b"icono",
     f"{APP}/wiitdb.xml": b"<datafile/>",
@@ -144,7 +145,7 @@ def test_despues_la_configuracion_maestra_no_la_pisa(unidad, zip_nuevo):
 
 def test_reinstalar_sin_datos_del_cliente_no_inventa_nada(tmp_path, zip_nuevo):
     raiz = tmp_path / "usb"
-    _escribir(raiz, {f"{APP}/boot.dol": b"dol viejo", f"{APP}/meta.xml": b"<app/>"})
+    _escribir(raiz, {f"{APP}/boot.dol": dol(b"dol viejo"), f"{APP}/meta.xml": b"<app/>"})
 
     r = _instalar(raiz)
 
@@ -331,12 +332,12 @@ def test_la_barra_cuenta_tambien_lo_que_se_copia_del_cliente(unidad, zip_nuevo):
 
 def test_la_carpeta_de_la_app_con_otras_mayusculas_tambien(tmp_path, monkeypatch):
     raiz = tmp_path / "usb"
-    _escribir(raiz, {"apps/USBLoader_GX/boot.dol": b"viejo",
+    _escribir(raiz, {"apps/USBLoader_GX/boot.dol": dol(b"viejo"),
                      "apps/USBLoader_GX/GXGlobal.cfg": b"del cliente"})
 
     def _fake(app, dest_path, cancel_event, on_progress):
         with zipfile.ZipFile(dest_path, "w") as zf:
-            zf.writestr("apps/USBLoader_GX/boot.dol", b"nuevo")
+            zf.writestr("apps/USBLoader_GX/boot.dol", dol(b"nuevo"))
         return True, "", "", ""
 
     monkeypatch.setattr(oscwii_installer, "_download_zip", _fake)
@@ -344,7 +345,7 @@ def test_la_carpeta_de_la_app_con_otras_mayusculas_tambien(tmp_path, monkeypatch
     r = _instalar(raiz)
 
     assert r.ok, r.error
-    assert _archivos(raiz) == {"apps/USBLoader_GX/boot.dol": b"nuevo",
+    assert _archivos(raiz) == {"apps/USBLoader_GX/boot.dol": dol(b"nuevo"),
                                "apps/USBLoader_GX/GXGlobal.cfg": b"del cliente"}
 
 
@@ -374,11 +375,11 @@ def test_las_demas_apps_se_reemplazan_como_siempre(tmp_path, monkeypatch):
     """Sin lista, la carpeta queda igual al ZIP: una app que se llama
     distinto no conserva un GXGlobal.cfg aunque lo tenga."""
     raiz = tmp_path / "usb"
-    _escribir(raiz, {"apps/Nintendont/boot.dol": b"viejo",
+    _escribir(raiz, {"apps/Nintendont/boot.dol": dol(b"viejo"),
                      "apps/Nintendont/titles.txt": b"bajado por su actualizador",
                      "apps/Nintendont/GXGlobal.cfg": b"no es de esta app",
                      "controllers/054C_05C4.ini": b"[perfil del cliente]"})
-    nuevo = {"apps/Nintendont/boot.dol": b"nuevo", "apps/Nintendont/meta.xml": b"<app/>",
+    nuevo = {"apps/Nintendont/boot.dol": dol(b"nuevo"), "apps/Nintendont/meta.xml": b"<app/>",
              "controllers/054C_05C4.ini": b"[perfil del ZIP]"}
 
     def _fake(app, dest_path, cancel_event, on_progress):

@@ -22,6 +22,7 @@ import os
 import zipfile
 from pathlib import Path
 
+from homebrew_falso import dol
 from wiibackup_manager import atomicfs, formatting, oscwii_installer
 from wiibackup_manager.oscwii_client import HomebrewApp
 from wiibackup_manager.oscwii_installer import InstallStatus
@@ -61,7 +62,7 @@ def test_instalacion_nueva_sin_app_previa(tmp_path, monkeypatch):
     dest_root.mkdir()
 
     _con_descarga_de(monkeypatch, {
-        "apps/TestApp/boot.dol": b"contenido nuevo" * 10,
+        "apps/TestApp/boot.dol": dol(b"contenido nuevo" * 10),
         "apps/TestApp/meta.xml": b"<app version='1'/>",
     })
 
@@ -71,7 +72,7 @@ def test_instalacion_nueva_sin_app_previa(tmp_path, monkeypatch):
     assert result.status is InstallStatus.OK
     app_dir = dest_root / "apps" / "TestApp"
     assert app_dir.is_dir()
-    assert (app_dir / "boot.dol").read_bytes() == b"contenido nuevo" * 10
+    assert (app_dir / "boot.dol").read_bytes() == dol(b"contenido nuevo" * 10)
     assert (app_dir / "meta.xml").read_bytes() == b"<app version='1'/>"
     assert len(result.installed_paths) == 2
     assert _sin_rastros_de_staging_o_respaldo(dest_root)
@@ -90,7 +91,7 @@ def test_actualizacion_exitosa_sobre_app_existente(tmp_path, monkeypatch):
     (app_dir / "solo-en-la-vieja.txt").write_bytes(b"obsoleto")
 
     _con_descarga_de(monkeypatch, {
-        "apps/TestApp/boot.dol": b"version nueva" * 20,
+        "apps/TestApp/boot.dol": dol(b"version nueva" * 20),
         "apps/TestApp/meta.xml": b"<app version='2'/>",
     })
 
@@ -98,7 +99,7 @@ def test_actualizacion_exitosa_sobre_app_existente(tmp_path, monkeypatch):
 
     assert result.ok, result.error
     assert result.status is InstallStatus.OK
-    assert (app_dir / "boot.dol").read_bytes() == b"version nueva" * 20
+    assert (app_dir / "boot.dol").read_bytes() == dol(b"version nueva" * 20)
     assert (app_dir / "meta.xml").read_bytes() == b"<app version='2'/>"
     assert not (app_dir / "solo-en-la-vieja.txt").exists()
     assert _sin_rastros_de_staging_o_respaldo(dest_root)
@@ -121,7 +122,7 @@ def test_actualizacion_que_falla_a_mitad_de_extraccion_deja_la_vieja_intacta(
     }
 
     _con_descarga_de(monkeypatch, {
-        "apps/TestApp/boot.dol": b"version nueva" * 20,
+        "apps/TestApp/boot.dol": dol(b"version nueva" * 20),
         "apps/TestApp/meta.xml": b"<app version='2'/>",
         "apps/TestApp/extra.bin": b"algo mas",
     })
@@ -170,7 +171,7 @@ def test_falla_en_el_intercambio_final_recupera_la_version_anterior(
     }
 
     _con_descarga_de(monkeypatch, {
-        "apps/TestApp/boot.dol": b"version nueva" * 20,
+        "apps/TestApp/boot.dol": dol(b"version nueva" * 20),
         "apps/TestApp/meta.xml": b"<app version='2'/>",
     })
 
@@ -211,7 +212,7 @@ def test_falla_en_el_intercambio_y_tambien_falla_la_recuperacion(
     contenido_original = (app_dir / "boot.dol").read_bytes()
 
     _con_descarga_de(monkeypatch, {
-        "apps/TestApp/boot.dol": b"version nueva" * 20,
+        "apps/TestApp/boot.dol": dol(b"version nueva" * 20),
     })
 
     real_replace = os.replace
@@ -251,7 +252,7 @@ def test_zip_con_apps_y_controllers_instala_los_dos(tmp_path, monkeypatch):
     dest_root.mkdir()
 
     _con_descarga_de(monkeypatch, {
-        "apps/Nintendont/boot.dol": b"nintendont" * 50,
+        "apps/Nintendont/boot.dol": dol(b"nintendont" * 50),
         "apps/Nintendont/meta.xml": b"<app/>",
         "controllers/gcadapter.ini": b"[controller]\n",
     })
@@ -259,7 +260,7 @@ def test_zip_con_apps_y_controllers_instala_los_dos(tmp_path, monkeypatch):
     result = oscwii_installer.install_app(_fake_app(slug="nintendont"), dest_root)
 
     assert result.ok, result.error
-    assert (dest_root / "apps" / "Nintendont" / "boot.dol").read_bytes() == b"nintendont" * 50
+    assert (dest_root / "apps" / "Nintendont" / "boot.dol").read_bytes() == dol(b"nintendont" * 50)
     assert (dest_root / "controllers" / "gcadapter.ini").read_bytes() == b"[controller]\n"
     assert len(result.installed_paths) == 3
     assert _sin_rastros_de_staging_o_respaldo(dest_root)
@@ -300,7 +301,7 @@ def test_un_respaldo_que_no_se_puede_borrar_se_reporta(tmp_path, monkeypatch):
     (app_dir / "boot.dol").write_bytes(b"version vieja" * 100)
 
     _con_descarga_de(monkeypatch, {
-        "apps/TestApp/boot.dol": b"version nueva" * 100,
+        "apps/TestApp/boot.dol": dol(b"version nueva" * 100),
     })
 
     _fingir_rmtree_del_respaldo_que_falla(monkeypatch)
@@ -309,7 +310,7 @@ def test_un_respaldo_que_no_se_puede_borrar_se_reporta(tmp_path, monkeypatch):
 
     # La instalación es un éxito: la app nueva YA está en su lugar.
     assert result.ok, result.error
-    assert (app_dir / "boot.dol").read_bytes() == b"version nueva" * 100
+    assert (app_dir / "boot.dol").read_bytes() == dol(b"version nueva" * 100)
 
     # Pero el respaldo quedó, y eso se dice.
     assert len(result.orphaned_backups) == 1
@@ -328,7 +329,7 @@ def test_el_aviso_del_respaldo_huerfano_dice_cuanto_ocupa(tmp_path, monkeypatch)
     app_dir.mkdir(parents=True)
     (app_dir / "boot.dol").write_bytes(b"x" * (2 * 1024 * 1024))
 
-    _con_descarga_de(monkeypatch, {"apps/TestApp/boot.dol": b"nuevo"})
+    _con_descarga_de(monkeypatch, {"apps/TestApp/boot.dol": dol(b"nuevo")})
 
     _fingir_rmtree_del_respaldo_que_falla(monkeypatch)
 
@@ -344,7 +345,7 @@ def test_una_instalacion_nueva_no_reporta_respaldos(tmp_path, monkeypatch):
     nada que avisar."""
     dest_root = tmp_path / "usb"
     dest_root.mkdir()
-    _con_descarga_de(monkeypatch, {"apps/TestApp/boot.dol": b"contenido"})
+    _con_descarga_de(monkeypatch, {"apps/TestApp/boot.dol": dol(b"contenido")})
 
     result = oscwii_installer.install_app(_fake_app(), dest_root)
 
@@ -360,7 +361,7 @@ def test_una_actualizacion_normal_no_reporta_respaldos(tmp_path, monkeypatch):
     app_dir.mkdir(parents=True)
     (app_dir / "boot.dol").write_bytes(b"vieja")
 
-    _con_descarga_de(monkeypatch, {"apps/TestApp/boot.dol": b"nueva"})
+    _con_descarga_de(monkeypatch, {"apps/TestApp/boot.dol": dol(b"nueva")})
 
     result = oscwii_installer.install_app(_fake_app(), dest_root)
 

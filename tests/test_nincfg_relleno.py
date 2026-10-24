@@ -27,6 +27,7 @@ import zipfile
 
 import pytest
 
+from homebrew_falso import dol
 from wiibackup_manager import golden_configs, oplog, oscwii_installer
 from wiibackup_manager.golden_configs import GoldenConfigSpec, GoldenConfigStatus
 from wiibackup_manager.oscwii_client import HomebrewApp
@@ -34,7 +35,7 @@ from wiibackup_manager.oscwii_installer import InstallResult, InstallStatus
 
 # Lo que trae el ZIP real de Nintendont en OSC (resumido).
 ZIP_OSC = {
-    "apps/Nintendont/boot.dol": b"dol",
+    "apps/Nintendont/boot.dol": dol(b"dol"),
     "apps/Nintendont/meta.xml": b"<app/>",
     "apps/Nintendont/icon.png": b"png",
     "controllers/054C_05C4.ini": b"[perfil]",

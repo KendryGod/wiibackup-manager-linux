@@ -93,6 +93,7 @@ _INSTALL_STATUS_LABELS = {
     InstallStatus.INCOMPLETE_DOWNLOAD: _("Descarga incompleta, reintentá"),
     InstallStatus.HASH_MISMATCH: _("El archivo no coincide con lo esperado"),
     InstallStatus.BAD_ZIP: _("El archivo descargado está dañado"),
+    InstallStatus.BAD_CONTENT: _("El paquete trae un archivo dañado"),
     InstallStatus.UNSAFE_ZIP: _("El paquete no es seguro para instalar"),
     InstallStatus.UNSAFE_URL: _("La descarga apuntaba a un sitio no autorizado"),
     InstallStatus.UNSAFE_DEST_ROOT: _("El destino elegido no es válido"),

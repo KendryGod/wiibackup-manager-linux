@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from homebrew_falso import dol
 from wiibackup_manager import oscwii_client, oscwii_installer
 from wiibackup_manager.oscwii_client import HomebrewApp
 
@@ -28,7 +29,7 @@ def test_el_zip_siempre_cae_dentro_del_temporal(tmp_path, monkeypatch, slug):
     def _descarga(app, dest_path, cancel_event, on_progress):
         vistos.append(Path(dest_path))
         with zipfile.ZipFile(dest_path, "w") as zf:
-            zf.writestr("apps/App/boot.dol", b"dol")
+            zf.writestr("apps/App/boot.dol", dol(b"dol"))
         return True, "", "", ""
 
     monkeypatch.setattr(oscwii_installer, "_download_zip", _descarga)

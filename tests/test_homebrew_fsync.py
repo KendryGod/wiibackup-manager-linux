@@ -20,17 +20,18 @@ import zipfile
 
 import pytest
 
+from homebrew_falso import dol
 from wiibackup_manager import atomicfs, oscwii_installer
 from wiibackup_manager.oscwii_client import HomebrewApp
 
 APP = "apps/usbloader_gx"
 VIEJO = {
-    f"{APP}/boot.dol": b"viejo",
+    f"{APP}/boot.dol": dol(b"viejo"),
     f"{APP}/GXGlobal.cfg": b"# USB Loader GX R1280\n",
     f"{APP}/images/2D/RMCE01.png": b"png",
 }
 NUEVO = {
-    f"{APP}/boot.dol": b"nuevo",
+    f"{APP}/boot.dol": dol(b"nuevo"),
     f"{APP}/meta.xml": b"<app/>",
     "controllers/perfil.ini": b"[perfil]",
 }

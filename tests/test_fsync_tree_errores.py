@@ -12,11 +12,12 @@ from __future__ import annotations
 import os
 import zipfile
 
+from homebrew_falso import dol
 from wiibackup_manager import atomicfs, oscwii_installer
 from wiibackup_manager.oscwii_client import HomebrewApp
 
 APP = "apps/usbloader_gx"
-VIEJO = {f"{APP}/boot.dol": b"viejo", f"{APP}/GXGlobal.cfg": b"cfg",
+VIEJO = {f"{APP}/boot.dol": dol(b"viejo"), f"{APP}/GXGlobal.cfg": b"cfg",
          f"{APP}/images/2D/RMCE01.png": b"png"}
 
 
@@ -29,7 +30,7 @@ def test_una_subcarpeta_que_no_se_puede_listar_aborta_sin_borrar_el_respaldo(
 
     def _fake(app, dest_path, cancel_event, on_progress):
         with zipfile.ZipFile(dest_path, "w") as zf:
-            zf.writestr(f"{APP}/boot.dol", b"nuevo")
+            zf.writestr(f"{APP}/boot.dol", dol(b"nuevo"))
         return True, "", "", ""
 
     monkeypatch.setattr(oscwii_installer, "_download_zip", _fake)

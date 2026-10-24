@@ -14,6 +14,7 @@ import zipfile
 
 import pytest
 
+from homebrew_falso import dol
 from wiibackup_manager import oscwii_installer
 from wiibackup_manager.oscwii_client import HomebrewApp
 from wiibackup_manager.oscwii_installer import InstallStatus
@@ -60,7 +61,7 @@ def test_validate_zip_acepta_apps_y_controllers_juntos(tmp_path):
     y en "controllers/" en el mismo archivo."""
     zip_path = tmp_path / "Nintendont.zip"
     _make_zip(zip_path, {
-        "apps/Nintendont/boot.dol": b"A" * 100,
+        "apps/Nintendont/boot.dol": dol(b"A" * 100),
         "apps/Nintendont/meta.xml": b"<app/>",
         "controllers/gcadapter.ini": b"[controller]\n",
     })
@@ -81,7 +82,7 @@ def test_validate_zip_acepta_apps_y_controllers_juntos(tmp_path):
 def test_validate_zip_rechaza_entrada_fuera_de_lo_permitido(tmp_path):
     zip_path = tmp_path / "malicioso.zip"
     _make_zip(zip_path, {
-        "apps/Foo/boot.dol": b"A" * 10,
+        "apps/Foo/boot.dol": dol(b"A" * 10),
         "otra_carpeta/archivo.txt": b"x",
     })
 
@@ -133,7 +134,7 @@ def test_install_app_con_destino_valido_instala_normal(tmp_path, monkeypatch):
     dest_root.mkdir()
 
     zip_entries = {
-        "apps/TestApp/boot.dol": b"A" * 100,
+        "apps/TestApp/boot.dol": dol(b"A" * 100),
         "apps/TestApp/meta.xml": b"<app/>",
     }
 
@@ -146,7 +147,7 @@ def test_install_app_con_destino_valido_instala_normal(tmp_path, monkeypatch):
 
     assert result.ok, result.error
     assert result.status is InstallStatus.OK
-    assert (dest_root / "apps" / "TestApp" / "boot.dol").read_bytes() == b"A" * 100
+    assert (dest_root / "apps" / "TestApp" / "boot.dol").read_bytes() == dol(b"A" * 100)
     assert (dest_root / "apps" / "TestApp" / "meta.xml").read_bytes() == b"<app/>"
 
 
@@ -162,7 +163,7 @@ def test_extraccion_cortada_no_deja_temporales_en_la_unidad(tmp_path, monkeypatc
     (dest_root / "apps").mkdir(parents=True)
 
     def _fake_download_zip(app, dest_path, cancel_event, on_progress):
-        _make_zip(dest_path, {entrada: b"A" * 100})
+        _make_zip(dest_path, {entrada: dol(b"A" * 100)})
         return True, "", "", ""
     monkeypatch.setattr(oscwii_installer, "_download_zip", _fake_download_zip)
 
@@ -187,7 +188,7 @@ def test_extraccion_cortada_no_deja_temporales_en_la_unidad(tmp_path, monkeypatc
 def test_validate_zip_rechaza_colision_de_mayusculas_en_archivos(tmp_path):
     zip_path = tmp_path / "colision.zip"
     _make_zip(zip_path, {
-        "apps/Foo/boot.dol": b"A" * 10,
+        "apps/Foo/boot.dol": dol(b"A" * 10),
         "apps/Foo/meta.xml": b"<app>bueno</app>",
         "apps/Foo/META.XML": b"<app>malicioso</app>",
     })
@@ -207,8 +208,8 @@ def test_validate_zip_rechaza_colision_de_mayusculas_en_carpetas(tmp_path):
     de la otra y una de las dos desaparecería entera."""
     zip_path = tmp_path / "colision-carpetas.zip"
     _make_zip(zip_path, {
-        "apps/Foo/boot.dol": b"A" * 10,
-        "apps/foo/boot.dol": b"B" * 10,
+        "apps/Foo/boot.dol": dol(b"A" * 10),
+        "apps/foo/boot.dol": dol(b"B" * 10),
     })
 
     dest_root = tmp_path / "usb"
@@ -262,8 +263,8 @@ def test_validate_zip_rechaza_la_misma_ruta_dos_veces(tmp_path):
     depende de quién lo lea. Contenido ambiguo, se rechaza."""
     zip_path = tmp_path / "duplicada.zip"
     with zipfile.ZipFile(zip_path, "w") as zf:
-        zf.writestr("apps/Foo/boot.dol", b"bueno")
-        zf.writestr("apps/Foo/boot.dol", b"malicioso")
+        zf.writestr("apps/Foo/boot.dol", dol(b"bueno"))
+        zf.writestr("apps/Foo/boot.dol", dol(b"malicioso"))
 
     dest_root = tmp_path / "usb"
     (dest_root / "apps").mkdir(parents=True)
@@ -283,7 +284,7 @@ def test_validate_zip_acepta_entradas_de_carpeta_explicitas(tmp_path):
     with zipfile.ZipFile(zip_path, "w") as zf:
         zf.writestr("apps/", b"")
         zf.writestr("apps/Foo/", b"")
-        zf.writestr("apps/Foo/boot.dol", b"A" * 10)
+        zf.writestr("apps/Foo/boot.dol", dol(b"A" * 10))
         zf.writestr("apps/Foo/meta.xml", b"<app/>")
         zf.writestr("controllers/", b"")
         zf.writestr("controllers/perfil.ini", b"[c]\n")
@@ -308,7 +309,7 @@ def test_install_app_no_extrae_nada_de_un_zip_con_colision(tmp_path, monkeypatch
 
     def _fake_download_zip(app, dest_path, cancel_event, on_progress):
         _make_zip(dest_path, {
-            "apps/TestApp/boot.dol": b"A" * 100,
+            "apps/TestApp/boot.dol": dol(b"A" * 100),
             "apps/TestApp/meta.xml": b"<app>bueno</app>",
             "apps/TestApp/Meta.xml": b"<app>malicioso</app>",
         })

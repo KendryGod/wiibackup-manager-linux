@@ -92,7 +92,7 @@ from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
 
-from . import atomicfs, drives, formatting, library_ops, transfer_plan
+from . import atomicfs, drives, formatting, library_ops, transfer_plan, wii_formats
 from .i18n import _
 from .oscwii_client import (HomebrewApp, UnsafeDownloadURL,
                             open_allowlisted, safe_slug, url_rejection_reason)
@@ -174,6 +174,10 @@ class InstallStatus(Enum):
     INCOMPLETE_DOWNLOAD = "incomplete_download"
     HASH_MISMATCH = "hash_mismatch"
     BAD_ZIP = "bad_zip"
+    # El ZIP está sano, pero un `boot.dol`, `boot.elf` o `.wad` de adentro
+    # no tiene la estructura de su formato (ver `wii_formats`): un "404: Not
+    # Found" con el nombre del ejecutable, por ejemplo.
+    BAD_CONTENT = "bad_content"
     UNSAFE_ZIP = "unsafe_zip"
     # La URL de descarga (la del catálogo, o el destino de una
     # redirección) no pasó la lista blanca de esquema/host. Distinto de
@@ -475,6 +479,25 @@ def _check_name_collisions(infos: list) -> Optional[str]:
     return None
 
 
+def _archivo_danado(zf: zipfile.ZipFile) -> Optional[str]:
+    """El motivo por el que un `boot.dol`, `boot.elf` o `.wad` del ZIP no
+    sirve (ver `wii_formats`), o None si todos están bien formados.
+
+    `testzip` ya leyó cada miembro entero y comprobó su CRC, así que acá
+    se lee solo el principio de cada uno (`wii_formats.CABEZA`) y el
+    tamaño del directorio central es el de verdad."""
+    for info in zf.infolist():
+        if info.is_dir() or not wii_formats.hay_que_validar(info.filename):
+            continue
+        with zf.open(info) as f:
+            cabeza = f.read(wii_formats.CABEZA)
+        motivo = wii_formats.problema(info.filename, cabeza, info.file_size)
+        if motivo is not None:
+            return _("{name} está dañado: {reason}").format(name=info.filename,
+                                                            reason=motivo)
+    return None
+
+
 def _validate_zip(zip_path: Path, dest_root: Path) -> tuple:
     """Abre y valida el ZIP entero SIN extraer nada. Devuelve
     (zipfile.ZipFile, None, "") si todo salió bien -el ZipFile queda
@@ -545,6 +568,14 @@ def _validate_zip(zip_path: Path, dest_root: Path) -> tuple:
                     status = InstallStatus.UNSAFE_ZIP
                     error = _("el ZIP tiene entradas que colisionan en el "
                               "destino: {reason}; rechazado").format(reason=motivo)
+
+            # Lo último, con el paquete ya validado como ZIP: que los
+            # ejecutables y los WADs sean lo que dicen ser.
+            if status is None:
+                motivo = _archivo_danado(zf)
+                if motivo is not None:
+                    status = InstallStatus.BAD_CONTENT
+                    error = motivo
     except (zipfile.BadZipFile, OSError, EOFError) as e:
         status = InstallStatus.BAD_ZIP
         error = _("el ZIP está corrupto o truncado ({error})").format(error=e)

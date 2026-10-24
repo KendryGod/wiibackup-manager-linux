@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 
+from homebrew_falso import dol
 from wiibackup_manager import golden_configs, oplog, oscwii_installer
 from wiibackup_manager.golden_configs import GoldenConfigSpec, GoldenConfigStatus
 from wiibackup_manager.oscwii_client import HomebrewApp
@@ -30,7 +31,7 @@ from wiibackup_manager.oscwii_installer import InstallResult, InstallStatus
 
 # Lo que trae el ZIP real de OSC (usbloader_gx 4.0 r1283), sin los .lang.
 ZIP_OSC = {
-    "apps/usbloader_gx/boot.dol": b"dol",
+    "apps/usbloader_gx/boot.dol": dol(b"dol"),
     "apps/usbloader_gx/meta.xml": b"<app version='4.0 r1283'/>",
     "apps/usbloader_gx/icon.png": b"png",
     "apps/usbloader_gx/wiitdb.xml": b"<datafile/>",

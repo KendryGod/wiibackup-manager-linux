@@ -21,20 +21,21 @@ from pathlib import Path
 
 import pytest
 
+from homebrew_falso import dol
 from wiibackup_manager import atomicfs, oscwii_installer
 from wiibackup_manager.oscwii_client import HomebrewApp
 from wiibackup_manager.oscwii_installer import InstallStatus
 
 VIEJO = {
-    "apps/Nintendont/boot.dol": b"nintendont viejo",
+    "apps/Nintendont/boot.dol": dol(b"nintendont viejo"),
     "apps/Nintendont/meta.xml": b"<app version='1'/>",
-    "apps/Otra/boot.dol": b"otra vieja",
+    "apps/Otra/boot.dol": dol(b"otra vieja"),
     "controllers/perfil.ini": b"[perfil viejo]",
 }
 NUEVO = {
-    "apps/Nintendont/boot.dol": b"nintendont nuevo" * 10,
+    "apps/Nintendont/boot.dol": dol(b"nintendont nuevo" * 10),
     "apps/Nintendont/meta.xml": b"<app version='2'/>",
-    "apps/Otra/boot.dol": b"otra nueva" * 10,
+    "apps/Otra/boot.dol": dol(b"otra nueva" * 10),
     "controllers/perfil.ini": b"[perfil nuevo]",
     "controllers/otro.ini": b"[otro nuevo]",
 }
