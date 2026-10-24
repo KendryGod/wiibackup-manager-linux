@@ -825,6 +825,18 @@ def _detalle_de_io(exc, dest_root, era_montaje: bool = False) -> str:
     return str(exc)
 
 
+def _destino_no_escribible(dest_root: Path) -> Optional[OSError]:
+    """El error que daría escribir en `dest_root`, o None si es una
+    carpeta donde se puede escribir. No crea nada."""
+    if not dest_root.is_dir():
+        return NotADirectoryError(
+            _("{path} no existe o no es una carpeta").format(path=dest_root))
+    if not os.access(dest_root, os.W_OK | os.X_OK):
+        return PermissionError(
+            _("no hay permiso para escribir en {path}").format(path=dest_root))
+    return None
+
+
 def install_app(app: HomebrewApp, dest_root: Path, *,
                 cancel_event: Optional[threading.Event] = None,
                 on_progress: Optional[ProgressCallback] = None) -> InstallResult:
@@ -836,10 +848,11 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
     preparada, o cualquier carpeta que el usuario haya confirmado): esta
     función rechaza `dest_root` de entrada si es una ruta crítica del
     sistema operativo (`drives.is_critical_system_path`, mismo criterio
-    que el BLINDAJE 4 de Modo Fábrica), crea `dest_root/apps` si no
-    existe -para fallar rápido si el destino no es escribible, antes de
-    gastar tiempo en la descarga-, y nunca escribe fuera de las carpetas
-    permitidas (ver el comentario del módulo).
+    que el BLINDAJE 4 de Modo Fábrica) o si no es una carpeta escribible
+    -para fallar rápido, antes de gastar tiempo en la descarga, y sin
+    crear nada: lo que no llega a instalarse no deja rastro en la unidad-,
+    y nunca escribe fuera de las carpetas permitidas (ver el comentario
+    del módulo).
 
     Nunca lanza: cualquier fallo -de red, de integridad, de espacio, de
     E/S- vuelve como un `InstallResult` con el `status` que corresponda,
@@ -878,11 +891,14 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
                 _("la URL de descarga de la app fue rechazada: {reason} "
                   "({url})").format(reason=url_err, url=app.zip_url))
 
-        try:
-            (dest_root / "apps").mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            return InstallResult(_estado_de_io(e, dest_root, era_montaje), app.slug,
-                                 _detalle_de_io(e, dest_root, era_montaje))
+        # Fallar rápido si no se va a poder escribir, pero sin crear nada:
+        # `apps/` se creaba acá y quedaba vacía en la unidad si después la
+        # descarga fallaba o el paquete venía roto. Las carpetas las crea
+        # la transacción cuando ya hay algo que poner (`_instalar_todo`).
+        problema = _destino_no_escribible(dest_root)
+        if problema is not None:
+            return InstallResult(_estado_de_io(problema, dest_root, era_montaje), app.slug,
+                                 _detalle_de_io(problema, dest_root, era_montaje))
 
         with tempfile.TemporaryDirectory(prefix="wiibackup-manager-oscwii-") as tmp_dir:
             # El slug es contenido de red: sin sanear, "../x" sacaba el ZIP

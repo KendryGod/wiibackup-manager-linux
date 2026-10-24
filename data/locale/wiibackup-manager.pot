@@ -9,7 +9,7 @@ msgstr ""
 "Project-Id-Version: WiiBackup Manager\n"
 "Report-Msgid-Bugs-To: https://github.com/KendryGod/wiibackup-manager-linux/"
 "issues\n"
-"POT-Creation-Date: 2026-10-24 15:13-0600\n"
+"POT-Creation-Date: 2026-10-24 17:25-0600\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -687,24 +687,34 @@ msgstr ""
 msgid "el ZIP está corrupto o truncado ({error})"
 msgstr ""
 
-#: wiibackup_manager/oscwii_installer.py:865
+#: wiibackup_manager/oscwii_installer.py:833
+#, python-brace-format
+msgid "{path} no existe o no es una carpeta"
+msgstr ""
+
+#: wiibackup_manager/oscwii_installer.py:836
+#, python-brace-format
+msgid "no hay permiso para escribir en {path}"
+msgstr ""
+
+#: wiibackup_manager/oscwii_installer.py:878
 #, python-brace-format
 msgid ""
 "{path} es una ruta crítica del sistema operativo, se rechaza como destino de "
 "instalación"
 msgstr ""
 
-#: wiibackup_manager/oscwii_installer.py:878
+#: wiibackup_manager/oscwii_installer.py:891
 #, python-brace-format
 msgid "la URL de descarga de la app fue rechazada: {reason} ({url})"
 msgstr ""
 
-#: wiibackup_manager/oscwii_installer.py:922
+#: wiibackup_manager/oscwii_installer.py:938
 #, python-brace-format
 msgid "necesita {need} y quedan {free} en el destino"
 msgstr ""
 
-#: wiibackup_manager/oscwii_installer.py:947
+#: wiibackup_manager/oscwii_installer.py:963
 msgid "instalación cancelada"
 msgstr ""
 
