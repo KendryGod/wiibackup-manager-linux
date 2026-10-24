@@ -342,10 +342,12 @@ def test_el_wit_real_acepta_la_opcion_de_scrubbing(monkeypatch, tmp_path):
 # se le pasaron a `wit` de verdad. Se comprueba sobre el comando ya armado
 # (el que recibe el proceso), no sobre una reconstrucción aparte.
 def test_convert_deja_en_stderr_el_comando_exacto(monkeypatch, tmp_path, capsys):
+    """Con el `cd` a la carpeta desde la que corre `wit`: el destino va
+    como nombre relativo (ver `test_wit_espacios_dobles.py`)."""
     lanzado = {}
 
-    def _run_espia(args, dest, cb, cancel, **_k):
-        lanzado["args"] = args
+    def _run_espia(args, dest, cb, cancel, **kwargs):
+        lanzado.update(args=args, cwd=kwargs.get("cwd"))
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
     monkeypatch.setattr(wit_wrapper, "find_wit", lambda b: "/usr/bin/wit")
@@ -356,7 +358,9 @@ def test_convert_deja_en_stderr_el_comando_exacto(monkeypatch, tmp_path, capsys)
                         split=True, overwrite=True, scrub_update=False)
 
     stderr = capsys.readouterr().err
-    assert shlex.split(stderr.split("wit: ", 1)[1]) == lanzado["args"]
+    assert lanzado["cwd"] == str(tmp_path)
+    assert shlex.split(stderr.split("wit: ", 1)[1]) == ["cd", str(tmp_path), "&&",
+                                                        *lanzado["args"]]
     assert "--split-size" in lanzado["args"]
 
 
@@ -410,8 +414,8 @@ def test_el_wit_real_acepta_trunc(monkeypatch, tmp_path):
 def test_images_match_es_true_solo_con_cero(monkeypatch, tmp_path, codigo, coinciden):
     lanzado = {}
 
-    def _run_espia(binary, *args, timeout=None, cancel=None):
-        lanzado.update(args=[binary, *args], cancel=cancel)
+    def _run_espia(binary, *args, timeout=None, cancel=None, cwd=None):
+        lanzado.update(args=[binary, *args], cancel=cancel, cwd=cwd)
         return subprocess.CompletedProcess(args, codigo, stdout="", stderr="")
 
     monkeypatch.setattr(wit_wrapper, "find_wit", lambda b: "/usr/bin/wit")
@@ -420,7 +424,10 @@ def test_images_match_es_true_solo_con_cero(monkeypatch, tmp_path, codigo, coinc
 
     assert wit_wrapper.images_match(tmp_path / "a.ciso", tmp_path / "a.iso",
                                     cancel=token) is coinciden
-    assert lanzado["args"] == ["wit", "CMP", str(tmp_path / "a.ciso"), str(tmp_path / "a.iso")]
+    # El segundo es el que `wit` lee como destino: relativo, desde su
+    # carpeta (ver `test_wit_espacios_dobles.py`).
+    assert lanzado["args"] == ["wit", "CMP", str(tmp_path / "a.ciso"), "a.iso"]
+    assert lanzado["cwd"] == str(tmp_path)
     assert lanzado["cancel"] is token
 
 

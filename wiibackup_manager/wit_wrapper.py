@@ -333,12 +333,39 @@ def _strip_ansi(text: str) -> str:
     return _ANSI_ESCAPE_RE.sub("", text)
 
 
-def _log_command(args: list[str]) -> None:
+def _log_command(args: list[str], cwd: Optional[str] = None) -> None:
     """Deja en stderr el comando `wit` exacto que se lanza, copiable tal
     cual a una terminal. Es lo primero que hace falta para diagnosticar
     una transferencia lenta o rara: qué flags se pasaron de verdad, y no
-    los que uno cree que se pasaron."""
-    print(f"[wiibackup-manager] wit: {shlex.join(args)}", file=sys.stderr)
+    los que uno cree que se pasaron.
+
+    Con `cwd` (ver `_carpeta_y_nombre`) la línea arranca con el `cd` a esa
+    carpeta: el destino va como nombre relativo y sin el `cd` el comando
+    pegado a mano escribiría en otro lado."""
+    comando = shlex.join(args)
+    if cwd is not None:
+        comando = f"cd {shlex.quote(cwd)} && {comando}"
+    print(f"[wiibackup-manager] wit: {comando}", file=sys.stderr)
+
+
+def _carpeta_y_nombre(ruta: Path) -> tuple[str, str]:
+    """(carpeta, nombre) para pasarle `ruta` a `wit` como DESTINO: se lo
+    corre con la carpeta como directorio de trabajo y recibe solo el
+    nombre.
+
+    Medido con wit v3.05a r8638: el `--dest` de `COPY` y el segundo
+    archivo de `CMP` pasan por el filtro con el que `wit` arma nombres, que
+    entre otras cosas junta los espacios seguidos. La carpeta de un juego
+    de GameCube que arma la app puede tener dos ("Ocarina of Time  Master
+    Quest [D43E01]", al sacarle la "/" al título), y con la ruta entera
+    `wit` buscaba la carpeta con uno solo: `COPY` fallaba con "CAN'T CREATE
+    FILE" y `CMP` con "CAN'T OPEN FILE", que la app leía como "no
+    coincide". Lo mismo con una unidad montada con dos espacios en la
+    etiqueta. El origen de `COPY`, el primer archivo de `CMP` y las rutas
+    de `LIST`, `ISOSIZE` y `VERIFY` llegan tal cual: esas no hace falta
+    tocarlas."""
+    absoluta = Path(ruta).absolute()
+    return str(absoluta.parent), absoluta.name
 
 
 def find_wit(binary_name: str = "wit") -> Optional[str]:
@@ -731,6 +758,7 @@ def _run_with_progress(
     inactivity_timeout: Optional[float] = WIT_INACTIVITY_TIMEOUT,
     absolute_timeout: Optional[float] = WIT_ABSOLUTE_TIMEOUT,
     cleanup_on_abort: bool = True,
+    cwd: Optional[str] = None,
 ) -> subprocess.CompletedProcess:
     """Como `subprocess.run`, pero con `Popen` en vez de `.run()` para
     poder sondear cada 1s cuánto lleva escrito `wit`
@@ -757,12 +785,15 @@ def _run_with_progress(
     Con `cleanup_on_abort=False`, lo que `wit` deja a medio escribir al
     cancelar, fallar o vencer el timeout NO se borra acá: queda para quien
     llama (`library_ops.DestinationGuard`, que primero devuelve el
-    original a su lugar y recién después barre)."""
+    original a su lugar y recién después barre).
+
+    `cwd` es la carpeta desde la que corre `wit` (ver `_carpeta_y_nombre`);
+    `dest` va siempre con su ruta de verdad, que es la que se sondea."""
     # Lo que ya existía antes de arrancar: si hay que limpiar por una
     # cancelación, se borra solo lo que agregó ESTA operación.
     outputs_before = output_files(dest)
     with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
-        proc = _popen_wit(args, stdout=out_f, stderr=err_f)
+        proc = _popen_wit(args, stdout=out_f, stderr=err_f, cwd=cwd)
         # Si la cancelación llegó entre el chequeo previo y el Popen,
         # `attach` lo mata en el acto y devuelve False.
         running = cancel.attach(proc) if cancel is not None else True
@@ -1104,8 +1135,12 @@ def convert(
         args.append("--prealloc=OFF")
     if trunc:
         args.append("--trunc")
-    args += [str(src), "--dest", str(dest)]
-    _log_command(args)
+    # `wit` corre en la carpeta del destino y recibe solo el nombre (ver
+    # `_carpeta_y_nombre`). El origen va absoluto: relativo, `wit` lo
+    # buscaría en esa carpeta.
+    carpeta, nombre = _carpeta_y_nombre(dest)
+    args += [str(Path(src).absolute()), "--dest", nombre]
+    _log_command(args, cwd=carpeta)
 
     # UN SOLO camino de ejecución, haya o no callbacks. Antes, sin progreso
     # ni cancelación se caía en un `subprocess.run` con timeout, que al
@@ -1129,6 +1164,7 @@ def convert(
         inactivity_timeout=inactivity_timeout,
         absolute_timeout=absolute_timeout,
         cleanup_on_abort=cleanup_on_abort,
+        cwd=carpeta,
     )
 
     if cancel is not None and cancel.cancelled:
@@ -1151,7 +1187,7 @@ def _como_texto(valor) -> str:
 
 def _run_cancellable(
     binary: str, *args: str, timeout: Optional[float] = DEFAULT_WIT_TIMEOUT,
-    cancel: Optional[CancellationToken] = None,
+    cancel: Optional[CancellationToken] = None, cwd: Optional[str] = None,
 ) -> subprocess.CompletedProcess:
     """Corre `wit` esperando el resultado, con dos garantías que
     `subprocess.run` no da:
@@ -1165,12 +1201,15 @@ def _run_cancellable(
       el proceso directo. `wit` se lanza con `start_new_session=True`, o
       sea en su propio grupo, y `subprocess.run` solo le manda la señal al
       hijo directo: cualquier nieto quedaba vivo, posiblemente escribiendo
-      todavía en el destino."""
+      todavía en el destino.
+
+    `cwd` es la carpeta desde la que corre `wit` (ver `_carpeta_y_nombre`)."""
     if cancel is not None and cancel.cancelled:
         raise OperationCancelled(_("Operación cancelada antes de arrancar `wit`."))
 
     proc = _popen_wit(
         [binary, *args],
+        cwd=cwd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         # Con errores tolerantes, igual que `_run_with_progress`: `wit LIST
@@ -1225,11 +1264,16 @@ def images_match(a: Path, b: Path, binary: str = "wit",
     tampoco es "coinciden".
 
     `cancel` permite cortarlo desde el botón "Cancelar": lee los dos
-    archivos enteros. Cancelado, levanta `OperationCancelled`."""
+    archivos enteros. Cancelado, levanta `OperationCancelled`.
+
+    `b` es el que `wit` lee como destino: va relativo, con `wit` corriendo
+    en su carpeta (ver `_carpeta_y_nombre`), y `a` va absoluto."""
     if not find_wit(binary):
         raise WitNotFoundError(binary)
-    _log_command([binary, "CMP", str(a), str(b)])
-    result = _run_cancellable(binary, "CMP", str(a), str(b), cancel=cancel)
+    carpeta, nombre = _carpeta_y_nombre(b)
+    args = ["CMP", str(Path(a).absolute()), nombre]
+    _log_command([binary, *args], cwd=carpeta)
+    result = _run_cancellable(binary, *args, cancel=cancel, cwd=carpeta)
     return result.returncode == 0
 
 
