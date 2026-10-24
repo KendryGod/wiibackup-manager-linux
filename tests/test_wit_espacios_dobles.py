@@ -25,6 +25,7 @@ su docstring); `nombre_respetado_por_wit` lleva la tabla medida.
 """
 from __future__ import annotations
 
+import gettext
 import shlex
 from pathlib import Path
 
@@ -158,3 +159,97 @@ def test_el_comando_que_queda_en_el_log_se_puede_pegar_tal_cual(tmp_path, wit_fa
     linea = capsys.readouterr().err.split("[wiibackup-manager] wit: ", 1)[1].splitlines()[0]
     (carpeta, args), = wit_falso.llamadas()
     assert shlex.split(linea) == ["cd", carpeta, "&&", str(wit_falso.binario), *args]
+
+
+# ------------------------------------------ Nombres que `wit` reescribe --
+# Con el NOMBRE no alcanza la carpeta de trabajo: `wit COPY --dest "Zelda
+# MQ.iso"` (con dos espacios) escribe "Zelda MQ.iso" con uno, sale con 0, y
+# la app esperaba otro archivo. Con `--overwrite` pisaba el que ya estuviera
+# con ese otro nombre. Pasa con nombres que puso el cliente a mano, y con
+# los que armaba "Renombrar a estándar" para títulos con " / " o " : ".
+def test_convert_no_pisa_el_archivo_que_tiene_el_nombre_que_armaria_wit(tmp_path, wit_falso):
+    carpeta = tmp_path / "biblioteca"
+    carpeta.mkdir()
+    origen = carpeta / "Zelda  MQ [D43E01].ciso"
+    origen.write_bytes(b"D43E01 disco de prueba")
+    ajeno = carpeta / "Zelda MQ [D43E01].iso"
+    ajeno.write_bytes(b"otro juego del cliente")
+
+    resultado = wit_wrapper.convert(origen, origen.with_suffix(".iso"), "ISO",
+                                    str(wit_falso.binario), overwrite=True)
+
+    assert resultado.returncode != 0
+    assert ajeno.read_bytes() == b"otro juego del cliente"
+    assert sorted(p.name for p in carpeta.iterdir()) == sorted([origen.name, ajeno.name])
+    assert wit_falso.llamadas() == [], "no se tenía que llamar a wit"
+
+
+def test_el_aviso_dice_que_hacer_y_entra_entero(tmp_path, wit_falso):
+    """Los que muestran el error lo cortan en 200 caracteres
+    (`stderr.strip()[:200]`): el aviso tiene que entrar entero."""
+    origen = tmp_path / "Zelda  MQ.ciso"
+    origen.write_bytes(b"D43E01 disco de prueba")
+
+    resultado = wit_wrapper.convert(origen, origen.with_suffix(".iso"), "ISO",
+                                    str(wit_falso.binario))
+
+    aviso = resultado.stderr.strip()
+    assert "Renombralo" in aviso
+    assert len(aviso) <= 200
+
+
+def test_el_aviso_en_ingles_tambien_entra_entero(tmp_path, wit_falso, monkeypatch):
+    from test_smoke_gui import _poner_el_catalogo_en_ingles
+    locale = Path(__file__).resolve().parent.parent / "data" / "locale"
+    _poner_el_catalogo_en_ingles(
+        monkeypatch, gettext.translation("wiibackup-manager", str(locale), languages=["en"]))
+    origen = tmp_path / "Zelda  MQ.ciso"
+    origen.write_bytes(b"D43E01 disco de prueba")
+
+    resultado = wit_wrapper.convert(origen, origen.with_suffix(".iso"), "ISO",
+                                    str(wit_falso.binario))
+
+    aviso = resultado.stderr.strip()
+    assert aviso.startswith("Not converted"), aviso
+    assert len(aviso) <= 200
+
+
+def test_convertir_gamecube_con_un_nombre_que_wit_reescribe(tmp_path, wit_falso, monkeypatch):
+    """En la Biblioteca, donde el nombre lo pone el cliente o "Renombrar a
+    estándar": se avisa y no queda nada escrito."""
+    monkeypatch.setattr(transfer_plan, "estimate_output_size", lambda g, e, b: 10)
+    carpeta = tmp_path / "biblioteca"
+    carpeta.mkdir()
+    origen = carpeta / "The Legend of Zelda Ocarina of Time  Master Quest [D43E01].ciso"
+    origen.write_bytes(b"D43E01 disco de prueba")
+    juego = Game(path=origen, game_id="D43E01", title=TITULO_D43E01, fmt="CISO",
+                 size_bytes=origen.stat().st_size, identified_by="wit", console="gc")
+
+    with pytest.raises(RuntimeError, match="Renombralo"):
+        library_ops.convert_gamecube(juego, origen.with_suffix(".iso"), ".iso",
+                                     str(wit_falso.binario))
+
+    assert [p.name for p in carpeta.iterdir()] == [origen.name]
+
+
+@pytest.mark.parametrize("nombre", [
+    "game.iso", "RSBE01.wbfs", "disc2.ciso", "Pokémon.iso", "Pokémon.iso",
+    "日本語のゲーム.iso", "Mario & Sonic (USA) [RXXE01].wbfs", "Let's Tap #1, !.iso",
+    "a .ciso", ".oculto.iso", "a b.iso", "x" * 200 + ".iso",
+])
+def test_nombres_que_wit_deja_tal_cual(nombre):
+    assert wit_wrapper.wit_respeta_el_nombre(nombre)
+
+
+@pytest.mark.parametrize("nombre", [
+    "a  b.iso", "a   b.iso", "a\tb.iso", "a\nb.iso", "a\x01b.iso", "a\x7fb.iso",
+    " a.iso", "a.iso ",
+    "a*b.iso", "a:b.iso", "a;b.iso", "a?b.iso", "a@b.iso", "a\\b.iso", "a^b.iso",
+    "a`b.iso", "a|b.iso", "a~b.iso",
+    # Cualquier `%`, aunque `wit` deje algunos tal cual ("100%.iso"): qué
+    # secuencias expande (`%I` es el ID, `%T` el título...) depende de una
+    # tabla que no está documentada entera.
+    "a%Ib.iso", "a%%b.iso", "100%.iso",
+])
+def test_nombres_que_wit_reescribe(nombre):
+    assert not wit_wrapper.wit_respeta_el_nombre(nombre)

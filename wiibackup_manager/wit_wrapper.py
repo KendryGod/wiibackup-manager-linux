@@ -368,6 +368,34 @@ def _carpeta_y_nombre(ruta: Path) -> tuple[str, str]:
     return str(absoluta.parent), absoluta.name
 
 
+# Lo que `wit` le cambia al nombre de un destino además de los espacios
+# (medido con `wit COPY -t`, que dice adónde copiaría sin escribir nada):
+# `:` pasa a " - ", `%` arranca una secuencia (`%%` es "%", `%I` el ID del
+# disco, `%T` su título...) y el resto pasa a ser un espacio.
+_CARACTERES_QUE_WIT_CAMBIA = "*:;?@\\^`|~%"
+
+
+def wit_respeta_el_nombre(nombre: str) -> bool:
+    """True si `wit` escribe un destino llamado `nombre` con ese mismo
+    nombre.
+
+    La carpeta de trabajo (`_carpeta_y_nombre`) resuelve lo que tenga la
+    carpeta, pero el nombre igual pasa por el filtro de `wit`, que junta
+    los espacios seguidos, quita los del principio y del final y cambia
+    los caracteres de control y los de `_CARACTERES_QUE_WIT_CAMBIA`.
+    Medido con wit v3.05a r8638: `--dest "Zelda  MQ.iso"` escribe "Zelda
+    MQ.iso" y sale con 0. Respeta los acentos (compuestos o no), el resto
+    de Unicode, los nombres ocultos y los largos.
+
+    Todo `%` cuenta, aunque `wit` deje algunos tal cual ("100%.iso"): qué
+    secuencias expande depende de una tabla que no está documentada
+    entera."""
+    if nombre != nombre.strip(" ") or "  " in nombre:
+        return False
+    return not any(c in _CARACTERES_QUE_WIT_CAMBIA or ord(c) < 0x20 or c == "\x7f"
+                   for c in nombre)
+
+
 def find_wit(binary_name: str = "wit") -> Optional[str]:
     return shutil.which(binary_name)
 
@@ -1114,6 +1142,18 @@ def convert(
 
     if cancel is not None and cancel.cancelled:
         raise OperationCancelled(_("Operación cancelada antes de arrancar `wit`."))
+
+    if not wit_respeta_el_nombre(Path(dest).name):
+        # Ni se lo llama: escribiría el archivo con otro nombre (ver
+        # `wit_respeta_el_nombre`), quien llama esperaría el que pidió, y
+        # con `--overwrite` pisaba lo que ya estuviera con ese otro nombre.
+        # Quienes muestran el error lo cortan en 200 caracteres.
+        return subprocess.CompletedProcess(
+            args=[binary, "COPY"], returncode=1, stdout="",
+            stderr=_("No se convirtió: `wit` le cambiaría el nombre al archivo "
+                     "(espacios dobles o en los extremos, o alguno de {chars}) y "
+                     "escribiría otro. Renombralo y probá de nuevo.").format(
+                         chars=" ".join(_CARACTERES_QUE_WIT_CAMBIA)))
 
     # wit infiere el formato de salida por la extensión de --dest, así que
     # nos aseguramos de que dest tenga la extensión correcta antes de llamar.
