@@ -79,6 +79,7 @@ como ya hace `queue_manager.TransferQueue` para las transferencias.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import os
 import shutil
 import stat
@@ -167,6 +168,10 @@ PRESERVED_PATHS = {
 class InstallStatus(Enum):
     OK = "ok"
     DOWNLOAD_ERROR = "download_error"
+    # La conexión se cortó antes de que llegara todo el ZIP (ver
+    # `_download_zip`). Aparte de `DOWNLOAD_ERROR` porque lo que hay que
+    # hacer es claro y distinto: volver a intentar, nada más.
+    INCOMPLETE_DOWNLOAD = "incomplete_download"
     HASH_MISMATCH = "hash_mismatch"
     BAD_ZIP = "bad_zip"
     UNSAFE_ZIP = "unsafe_zip"
@@ -222,6 +227,28 @@ class CancelRequested(Exception):
     """Interna: corta el flujo de `install_app` apenas se pide cancelar."""
 
 
+class DescargaIncompleta(Exception):
+    """Interna: llegó menos de lo que el servidor anunció, o la conexión se
+    cortó a mitad de un envío `chunked`. `install_app` la devuelve como
+    `INCOMPLETE_DOWNLOAD`; es una excepción y no el `(False, motivo, ...)`
+    de `_download_zip` para que no se confunda con un error de descarga
+    cualquiera."""
+
+    def __init__(self, recibidos: int, esperados: Optional[int]):
+        super().__init__(recibidos, esperados)
+        self.recibidos = recibidos
+        self.esperados = esperados
+
+    def mensaje(self) -> str:
+        if self.esperados is None:
+            return _("Descarga incompleta: la conexión se cortó después de "
+                     "{got}. Reintentá.").format(
+                         got=formatting.format_size(self.recibidos))
+        return _("Descarga incompleta: llegaron {got} de {total}. Reintentá.").format(
+            got=formatting.format_size(self.recibidos),
+            total=formatting.format_size(self.esperados))
+
+
 @dataclass
 class InstallProgress:
     """Un evento de progreso. `phase` es "download" o "extract"; `fraction`
@@ -253,11 +280,19 @@ def _download_zip(app: HomebrewApp, dest_path: Path,
     """Descarga `app.zip_url` a `dest_path`, calculando md5 y sha256 al
     vuelo (una sola pasada por los bytes, sirve para lo que sea que la API
     haya provisto). Devuelve (True, "", md5_hex, sha256_hex) o
-    (False, motivo, "", ""); nunca lanza salvo `CancelRequested` y
-    `UnsafeDownloadURL`, que se dejan propagar para que `install_app` las
-    distinga de un error de red común."""
+    (False, motivo, "", ""); nunca lanza salvo `CancelRequested`,
+    `UnsafeDownloadURL` y `DescargaIncompleta`, que se dejan propagar para
+    que `install_app` las distinga de un error de red común.
+
+    Una conexión cortada no siempre avisa. Medido con Python 3.14.8: si el
+    servidor anunció un `Content-Length`, `resp.read(n)` devuelve lo que
+    llegó y después `b""`, sin ninguna excepción, así que lo recibido se
+    compara acá contra ese largo. Con `chunked` sí levanta
+    `http.client.IncompleteRead`, que no es un `OSError`: antes caía en el
+    `except Exception` de `install_app` como si hubiera fallado la unidad."""
     md5 = hashlib.md5()
     sha256 = hashlib.sha256()
+    written = 0
     try:
         # `open_allowlisted` valida la URL antes de abrir el socket (o
         # sea, antes de tocar `dest_path`), valida cada redirección antes
@@ -268,11 +303,15 @@ def _download_zip(app: HomebrewApp, dest_path: Path,
             if resp.status != 200:
                 return False, _("status HTTP {status}").format(status=resp.status), "", ""
 
-            total = resp.length or app.zip_compressed_size
+            # El `Content-Length`, tomado ANTES de leer: `http.client` lo
+            # va descontando a medida que llegan bytes. El tamaño del
+            # catálogo no sirve para esto (puede ser de una versión vieja
+            # del ZIP); solo para la barra cuando el servidor no anuncia nada.
+            esperado = resp.length
+            total = esperado or app.zip_compressed_size
             if total is not None and total > MAX_DOWNLOAD_BYTES:
                 return False, _("el archivo declarado supera el límite esperado"), "", ""
 
-            written = 0
             with dest_path.open("wb") as f:
                 while True:
                     _check_cancel(cancel_event)
@@ -287,11 +326,17 @@ def _download_zip(app: HomebrewApp, dest_path: Path,
                     sha256.update(chunk)
                     _report(on_progress, "download",
                            (written / total) if total else None)
+            if esperado is not None and written < esperado:
+                raise DescargaIncompleta(written, esperado)
     except CancelRequested:
         raise
+    except http.client.IncompleteRead:
+        raise DescargaIncompleta(written, None) from None
     except urllib.error.HTTPError as e:
         return False, f"HTTP {e.code}", "", ""
-    except (urllib.error.URLError, OSError, TimeoutError) as e:
+    except (urllib.error.URLError, OSError, TimeoutError, http.client.HTTPException) as e:
+        # `HTTPException` tampoco es un `OSError` (una respuesta que no es
+        # HTTP, por ejemplo): es la red, no la unidad.
         return False, str(e), "", ""
 
     return True, "", md5.hexdigest(), sha256.hexdigest()
@@ -869,6 +914,10 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
     except CancelRequested:
         return InstallResult(InstallStatus.CANCELLED, app.slug,
                              _("instalación cancelada"))
+    except DescargaIncompleta as e:
+        # Sale de `_download_zip`, antes de abrir el ZIP: en la unidad no se
+        # escribió nada de la app.
+        return InstallResult(InstallStatus.INCOMPLETE_DOWNLOAD, app.slug, e.mensaje())
     except UnsafeDownloadURL as e:
         # Sale de `_download_zip` (o de una redirección rechazada a mitad
         # de la descarga): la app no se instaló y nada del destino se
