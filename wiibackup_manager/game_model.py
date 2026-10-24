@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .disc_header import is_valid_game_id, validate_game_id
+from .wit_wrapper import CARACTERES_QUE_WIT_CAMBIA
 
 
 VALID_EXTENSIONS = {".iso", ".wbfs", ".ciso", ".wdf"}
@@ -44,6 +45,23 @@ def sanitize_filename(name: str) -> str:
     return name or "untitled"
 
 
+def _titulo_que_wit_respeta(titulo: str) -> str:
+    """`titulo` (ya pasado por `sanitize_filename`) sin lo que `wit` le
+    cambiaría al nombre de un destino (ver
+    `wit_wrapper.wit_respeta_el_nombre`): esos caracteres pasan a ser un
+    espacio y los espacios quedan de a uno y sin los de los extremos.
+
+    `sanitize_filename` saca la "/" o los ":" pero deja los espacios que
+    los rodeaban: "Ocarina of Time / Master Quest" quedaba con dos
+    espacios, y `wit` escribe ese nombre con uno solo. No va adentro de
+    `sanitize_filename` porque esa también arma la carpeta de un juego de
+    GameCube en la unidad, que tiene que seguir llamándose como en las
+    unidades ya preparadas."""
+    limpio = "".join(" " if (c in CARACTERES_QUE_WIT_CAMBIA or ord(c) < 0x20 or c == "\x7f")
+                     else c for c in titulo)
+    return " ".join(limpio.split()) or "untitled"
+
+
 def title_is_usable(title: str) -> bool:
     """True si `title` sirve para armar un nombre de archivo: no vacío,
     sin caracteres de reemplazo (U+FFFD, lo que deja un título que no se
@@ -59,8 +77,12 @@ def standard_filename(game: Game) -> str:
     Si el juego no está identificado (o su ID no es un ID6 válido) se
     omite el sufijo '[ID]' en vez de meter en el nombre del archivo algo
     que no es un ID: '??????' trae caracteres que FAT32 no acepta, y un ID
-    arbitrario leído del header podría traer separadores de ruta."""
-    safe_title = sanitize_filename(game.title)
+    arbitrario leído del header podría traer separadores de ruta.
+
+    El título va sin nada que `wit` le cambiaría al nombre (ver
+    `_titulo_que_wit_respeta`): convertir el juego después tiene que
+    poder escribir el archivo con este mismo nombre."""
+    safe_title = _titulo_que_wit_respeta(sanitize_filename(game.title))
     ext = game.path.suffix
     if not is_valid_game_id(game.game_id):
         return f"{safe_title}{ext}"

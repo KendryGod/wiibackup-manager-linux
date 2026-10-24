@@ -372,7 +372,7 @@ def _carpeta_y_nombre(ruta: Path) -> tuple[str, str]:
 # (medido con `wit COPY -t`, que dice adónde copiaría sin escribir nada):
 # `:` pasa a " - ", `%` arranca una secuencia (`%%` es "%", `%I` el ID del
 # disco, `%T` su título...) y el resto pasa a ser un espacio.
-_CARACTERES_QUE_WIT_CAMBIA = "*:;?@\\^`|~%"
+CARACTERES_QUE_WIT_CAMBIA = "*:;?@\\^`|~%"
 
 
 def wit_respeta_el_nombre(nombre: str) -> bool:
@@ -382,7 +382,7 @@ def wit_respeta_el_nombre(nombre: str) -> bool:
     La carpeta de trabajo (`_carpeta_y_nombre`) resuelve lo que tenga la
     carpeta, pero el nombre igual pasa por el filtro de `wit`, que junta
     los espacios seguidos, quita los del principio y del final y cambia
-    los caracteres de control y los de `_CARACTERES_QUE_WIT_CAMBIA`.
+    los caracteres de control y los de `CARACTERES_QUE_WIT_CAMBIA`.
     Medido con wit v3.05a r8638: `--dest "Zelda  MQ.iso"` escribe "Zelda
     MQ.iso" y sale con 0. Respeta los acentos (compuestos o no), el resto
     de Unicode, los nombres ocultos y los largos.
@@ -392,7 +392,7 @@ def wit_respeta_el_nombre(nombre: str) -> bool:
     entera."""
     if nombre != nombre.strip(" ") or "  " in nombre:
         return False
-    return not any(c in _CARACTERES_QUE_WIT_CAMBIA or ord(c) < 0x20 or c == "\x7f"
+    return not any(c in CARACTERES_QUE_WIT_CAMBIA or ord(c) < 0x20 or c == "\x7f"
                    for c in nombre)
 
 
@@ -1153,7 +1153,7 @@ def convert(
             stderr=_("No se convirtió: `wit` le cambiaría el nombre al archivo "
                      "(espacios dobles o en los extremos, o alguno de {chars}) y "
                      "escribiría otro. Renombralo y probá de nuevo.").format(
-                         chars=" ".join(_CARACTERES_QUE_WIT_CAMBIA)))
+                         chars=" ".join(CARACTERES_QUE_WIT_CAMBIA)))
 
     # wit infiere el formato de salida por la extensión de --dest, así que
     # nos aseguramos de que dest tenga la extensión correcta antes de llamar.
