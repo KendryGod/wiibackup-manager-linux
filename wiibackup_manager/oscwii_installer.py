@@ -145,7 +145,7 @@ class Destino(Enum):
 # catálogo el 2026-10-24: 39 apps se rechazaban enteras por esto. Cada una
 # es una carpeta con el nombre de la app, o una ruta fija que la app lee.
 # Lo que no está acá sigue rechazando el paquete entero.
-_CARPETAS_DE_DATOS = (
+CARPETAS_DE_DATOS = (
     ("cavestory",),                 # cavestory
     ("fbzx-wii",),                  # fbzx-wii
     ("frodo",),                     # frodo
@@ -173,6 +173,13 @@ _CARPETAS_DE_DATOS = (
     ("etc", "timidity"),            # openttd: la música (timidity.cfg)
     ("usr", "local", "lib", "timidity"),  # openttd: los instrumentos
 )
+# Cuántos niveles puede tener, como mucho, una ruta en una carpeta de
+# datos (contando el archivo). La más honda del catálogo tiene 7
+# (`smw/gfx/packs/Classic/tilesets/SMB1/<archivo>`). El Recovery Manager
+# recorre cada carpeta de datos hasta acá para encontrar los restos de una
+# instalación cortada (`recovery_service`), así que más hondo no se
+# escribe: el paquete se rechaza.
+MAX_COMPONENTES_DATOS = 8
 # Archivos sueltos en la raíz que una app lee por ese nombre: el `boot.dol`
 # de AnyTitleDeleterMOD abre "/database.txt" para mostrar los nombres de
 # los títulos.
@@ -206,8 +213,9 @@ def _clasificar(nombre: str) -> Optional[Destino]:
         return None
     if bajas[0] in _CARPETAS_OMITIDAS:
         return Destino.OMITIDO
-    for prefijo in _CARPETAS_DE_DATOS:
-        if bajas[:len(prefijo)] == prefijo and len(bajas) > len(prefijo):
+    for prefijo in CARPETAS_DE_DATOS:
+        if (bajas[:len(prefijo)] == prefijo
+                and len(prefijo) < len(bajas) <= MAX_COMPONENTES_DATOS):
             if prefijo == ("wad",) and not bajas[-1].endswith(".wad"):
                 return None
             return Destino.DATOS

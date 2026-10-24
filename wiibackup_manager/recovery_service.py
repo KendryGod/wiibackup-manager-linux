@@ -640,8 +640,8 @@ def is_locked_by_operation(ops, leftover: Leftover, *,
 
 
 # ------------------------------------------------------------- Escaneo --
-def _iter_entries(root: Path, depth: int) -> Iterator:
-    """Recorre `root` hasta `MAX_DEPTH` niveles, sin bajar nunca a una
+def _iter_entries(root: Path, depth: int, max_depth: int = MAX_DEPTH) -> Iterator:
+    """Recorre `root` hasta `max_depth` niveles, sin bajar nunca a una
     carpeta oculta.
 
     No bajar a las ocultas no es solo velocidad: un resto es siempre
@@ -664,13 +664,44 @@ def _iter_entries(root: Path, depth: int) -> Iterator:
         return
     for entry in entradas:
         yield entry
-        if not entry.name.startswith(".") and depth < MAX_DEPTH:
+        if not entry.name.startswith(".") and depth < max_depth:
             try:
                 es_dir = entry.is_dir(follow_symlinks=False)
             except OSError:
                 continue
             if es_dir:
-                yield from _iter_entries(Path(entry.path), depth + 1)
+                yield from _iter_entries(Path(entry.path), depth + 1, max_depth)
+
+
+def _hijas(carpeta: Path, nombre: str) -> list:
+    """Las subcarpetas de `carpeta` que se llaman `nombre` sin distinguir
+    mayúsculas: en FAT32 hay una sola, pero en una carpeta de ext4 pueden
+    estar `WiiFlow` y `wiiflow`. No sigue enlaces simbólicos."""
+    try:
+        with os.scandir(carpeta) as it:
+            return [Path(e.path) for e in it
+                    if e.name.lower() == nombre and e.is_dir(follow_symlinks=False)]
+    except OSError:
+        return []
+
+
+def _carpetas_de_datos(root: Path) -> Iterator:
+    """(carpeta, profundidad) de cada carpeta de datos de Homebrew
+    (`oscwii_installer.CARPETAS_DE_DATOS`) que existe en `root`.
+
+    La Store escribe ahí archivo por archivo, hasta
+    `oscwii_installer.MAX_COMPONENTES_DATOS` niveles desde la raíz, y los
+    restos de una instalación cortada quedan al lado de cada archivo:
+    mucho más hondo que `MAX_DEPTH`. Se recorren como raíces propias hasta
+    ese nivel, y solo ellas, para no bajar tanto en toda la unidad."""
+    for prefijo in oscwii_installer.CARPETAS_DE_DATOS:
+        carpetas = [root]
+        for nombre in prefijo:
+            carpetas = [h for c in carpetas for h in _hijas(c, nombre)]
+        # Las entradas de la carpeta están en el nivel `len(prefijo) + 1`
+        # desde la raíz y se listan con profundidad 0.
+        for carpeta in carpetas:
+            yield carpeta, oscwii_installer.MAX_COMPONENTES_DATOS - len(prefijo) - 1
 
 
 def scan(roots: Iterable[Path], *, ops=None,
@@ -701,12 +732,14 @@ def scan(roots: Iterable[Path], *, ops=None,
     for root in roots:
         root = Path(root)
         candidatos = []
-        for entry in _iter_entries(root, 0):
-            if not entry.name.startswith("."):
-                continue
-            leftover = classify(Path(entry.path))
-            if leftover is not None:
-                candidatos.append(leftover)
+        recorridos = [(root, MAX_DEPTH), *_carpetas_de_datos(root)]
+        for base, profundidad in recorridos:
+            for entry in _iter_entries(base, 0, profundidad):
+                if not entry.name.startswith("."):
+                    continue
+                leftover = classify(Path(entry.path))
+                if leftover is not None:
+                    candidatos.append(leftover)
         candidatos.extend(find_trashed_games(root))
         for leftover in candidatos:
             if not _esta_abandonado(leftover, now=ahora, is_alive=is_alive,
