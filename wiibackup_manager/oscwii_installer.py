@@ -380,6 +380,10 @@ class InstallProgress:
 
     phase: str
     fraction: Optional[float]
+    # Al extraer: cuántos archivos van y cuántos son (en una USB cada uno
+    # tarda ~100 ms, y un paquete grande son minutos).
+    done: Optional[int] = None
+    total: Optional[int] = None
 
 
 ProgressCallback = Callable[[InstallProgress], None]
@@ -391,9 +395,10 @@ def _check_cancel(cancel_event: Optional[threading.Event]) -> None:
 
 
 def _report(on_progress: Optional[ProgressCallback], phase: str,
-           fraction: Optional[float]) -> None:
+           fraction: Optional[float], done: Optional[int] = None,
+           total: Optional[int] = None) -> None:
     if on_progress is not None:
-        on_progress(InstallProgress(phase=phase, fraction=fraction))
+        on_progress(InstallProgress(phase=phase, fraction=fraction, done=done, total=total))
 
 
 # ----------------------------------------------------------- Descarga --
@@ -879,6 +884,14 @@ def _por_carpeta(rutas, dest_root: Path) -> tuple:
     return tuple(cuenta.items())
 
 
+# Desde cuántos archivos el aviso antes de instalar dice que puede tardar
+# varios minutos, aunque el paquete escriba solo en `apps/`. En una USB
+# montada por udisks (vfat con `flush`) el kernel espera ~100 ms al cerrar
+# cada archivo escrito: cavestory (4728) tardó 494,8 s en una FAT32 real,
+# lo mismo que escribiendo archivos sueltos sin nada más. 1000 son ~2 min.
+ARCHIVOS_QUE_TARDAN = 1000
+
+
 @dataclass(frozen=True)
 class AvisoDeInstalacion:
     """Lo que la Store muestra antes de escribir cuando el paquete escribe
@@ -896,13 +909,21 @@ class AvisoDeInstalacion:
     intocables: tuple
     # Lo que no se copia.
     omitidos: tuple
+    # Cuántos archivos se van a escribir (sin contar los distintos del
+    # usuario, que solo se escriben si se elige reemplazarlos). Con más de
+    # `ARCHIVOS_QUE_TARDAN`, el aviso dice que puede tardar varios minutos.
+    archivos: int = 0
 
 
 def _aviso(plan: PlanDeInstalacion, datos: DatosDelPaquete,
            dest_root: Path) -> Optional[AvisoDeInstalacion]:
     """El aviso para el usuario, o None si no hace falta: todo va a `apps/`
-    o `controllers/`, o lo de afuera ya está igual y no se omite nada."""
-    if not (datos.nuevos or datos.distintos or datos.intocables or plan.omitidos):
+    o `controllers/`, o lo de afuera ya está igual y no se omite nada, y
+    son `ARCHIVOS_QUE_TARDAN` archivos o menos."""
+    archivos = (sum(len(m) for m in plan.unidades.values()) + len(plan.sueltos)
+                + len(datos.nuevos))
+    if not (datos.nuevos or datos.distintos or datos.intocables or plan.omitidos
+            or archivos > ARCHIVOS_QUE_TARDAN):
         return None
 
     def _rel(ruta: Path) -> str:
@@ -914,7 +935,8 @@ def _aviso(plan: PlanDeInstalacion, datos: DatosDelPaquete,
         carpetas=_por_carpeta((r for _i, r in datos.nuevos), dest_root),
         distintos=tuple(_rel(r) for _i, r in datos.distintos),
         intocables=tuple(_rel(r) for r in datos.intocables),
-        omitidos=plan.omitidos)
+        omitidos=plan.omitidos,
+        archivos=archivos)
 
 
 def _agrupar_nuevos(nuevos: tuple, dest_root: Path) -> tuple[dict, list]:
@@ -1329,7 +1351,8 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
                 def _paso() -> None:
                     hechos[0] += 1
                     _report(on_progress, "extract",
-                           min(hechos[0] / total, 1.0) if total else 1.0)
+                           min(hechos[0] / total, 1.0) if total else 1.0,
+                           hechos[0], total)
 
                 written, huerfanos, conservados = _instalar_todo(
                     zf, unidades, sueltos, dest_root, cancel_event, _paso,

@@ -166,6 +166,9 @@ def _texto_del_aviso(aviso: oscwii_installer.AvisoDeInstalacion) -> str:
                   .format(folder=carpeta, n=n) for carpeta, n in aviso.carpetas])
     if escribe:
         partes.append(_("Va a escribir en:") + "\n" + _lista(escribe))
+    if aviso.archivos > oscwii_installer.ARCHIVOS_QUE_TARDAN:
+        partes.append(_("Son {n} archivos: puede tardar varios minutos.")
+                      .format(n=aviso.archivos))
     if aviso.carpetas:
         partes.append(_("Fuera de apps/ no se borra nada de lo que ya tengas: "
                         "solo se agregan archivos."))
@@ -729,9 +732,13 @@ class HomebrewStoreView(Gtk.Box):
         if progress.fraction is not None:
             state.fraction = progress.fraction
             pct = int(progress.fraction * 100)
-            state.message = (_("Descargando… {pct}%").format(pct=pct)
-                             if progress.phase == "download"
-                             else _("Extrayendo… {pct}%").format(pct=pct))
+            if progress.phase == "download":
+                state.message = _("Descargando… {pct}%").format(pct=pct)
+            elif progress.total:
+                state.message = _("Extrayendo… {done} de {total} archivos ({pct}%)").format(
+                    done=progress.done, total=progress.total, pct=pct)
+            else:
+                state.message = _("Extrayendo… {pct}%").format(pct=pct)
         else:
             state.message = (_("Descargando…") if progress.phase == "download"
                              else _("Extrayendo…"))
