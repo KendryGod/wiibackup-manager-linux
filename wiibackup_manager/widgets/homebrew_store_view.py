@@ -117,6 +117,9 @@ def _install_outcome(app: HomebrewApp, result) -> OperationOutcome:
             detalle += "; " + _("fuera de apps/: {folders}").format(
                 folders=", ".join(f"{carpeta} ({n})"
                                   for carpeta, n in result.carpetas_de_datos))
+        if result.wads:
+            detalle += "; " + _("WAD en /wad/ (se instala con YAWM desde la Wii): {names}").format(
+                names=", ".join(Path(w).name for w in result.wads))
         if result.datos_conservados:
             n = len(result.datos_conservados)
             detalle += "; " + ngettext("se conservó {n} archivo tuyo",
@@ -129,6 +132,13 @@ def _install_outcome(app: HomebrewApp, result) -> OperationOutcome:
     return OperationOutcome(
         oplog.STATUS_ERROR, app.name,
         result.error or _INSTALL_STATUS_LABELS.get(result.status, ""))
+
+
+def _texto_de_wads(n: int) -> str:
+    return ngettext("Se deja {n} WAD en /wad/: se instala con YAWM desde la Wii; "
+                    "esta app no instala en la NAND.",
+                    "Se dejan {n} WAD en /wad/: se instalan con YAWM desde la Wii; "
+                    "esta app no instala en la NAND.", n).format(n=n)
 
 
 # Cuántos nombres de cada lista entran en el aviso antes de "…y N más".
@@ -166,6 +176,8 @@ def _texto_del_aviso(aviso: oscwii_installer.AvisoDeInstalacion) -> str:
                   .format(folder=carpeta, n=n) for carpeta, n in aviso.carpetas])
     if escribe:
         partes.append(_("Va a escribir en:") + "\n" + _lista(escribe))
+    if aviso.wads:
+        partes.append(_texto_de_wads(len(aviso.wads)))
     if aviso.escribe_en_nand:
         partes.append(_("Esta app modifica la NAND de la Wii cuando la usás en la "
                         "consola. WiiBackup Manager no instala nada en la NAND."))
@@ -778,6 +790,10 @@ class HomebrewStoreView(Gtk.Box):
             self._show_toast(
                 _("'{name}' instalada ({n} archivo(s)).")
                 .format(name=app.name, n=len(result.installed_paths)))
+            if result.wads:
+                self._show_toast(
+                    _texto_de_wads(len(result.wads)) + " "
+                    + ", ".join(Path(w).name for w in result.wads))
             # Al reinstalar, que se sepa que lo del cliente sigue ahí (ver
             # `oscwii_installer.PRESERVED_PATHS`).
             if result.preserved_paths:

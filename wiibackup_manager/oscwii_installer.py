@@ -341,6 +341,8 @@ class InstallResult:
     # `datos_escritos` resumido: (carpeta de datos, cantidad), para el
     # historial.
     carpetas_de_datos: tuple = ()
+    # Los WADs que quedaron en `/wad/`, para instalarlos desde la Wii.
+    wads: tuple = ()
 
     @property
     def ok(self) -> bool:
@@ -875,6 +877,14 @@ def _carpeta_para_mostrar(ruta: Path, dest_root: Path) -> str:
     return "/".join(partes[:largo]) + "/"
 
 
+def _es_wad_para_un_gestor(ruta: Path, dest_root: Path) -> bool:
+    """Un WAD en `/wad/`, donde lo busca un gestor de WADs como YAWM desde
+    la Wii. Esta app no instala nada en la NAND: lo deja ahí y lo dice.
+    (En `wad/` solo entran `.wad`: ver `_clasificar`.)"""
+    partes = ruta.relative_to(dest_root).parts
+    return len(partes) >= 2 and partes[0].lower() == "wad"
+
+
 def _por_carpeta(rutas, dest_root: Path) -> tuple:
     """(carpeta, cantidad de archivos) de `rutas`, en el orden en que
     aparece cada carpeta."""
@@ -917,6 +927,8 @@ class AvisoDeInstalacion:
     # Si la app modifica la NAND de la Wii al usarla (`HomebrewApp.writes_to_nand`).
     # No hace aparecer el aviso: si aparece por otro motivo, lo dice.
     escribe_en_nand: bool = False
+    # WADs nuevos que quedan en `/wad/` (ver `_es_wad_para_un_gestor`).
+    wads: tuple = ()
 
 
 def _aviso(plan: PlanDeInstalacion, datos: DatosDelPaquete,
@@ -940,7 +952,8 @@ def _aviso(plan: PlanDeInstalacion, datos: DatosDelPaquete,
         distintos=tuple(_rel(r) for _i, r in datos.distintos),
         intocables=tuple(_rel(r) for r in datos.intocables),
         omitidos=plan.omitidos,
-        archivos=archivos)
+        archivos=archivos,
+        wads=tuple(_rel(r) for _i, r in datos.nuevos if _es_wad_para_un_gestor(r, dest_root)))
 
 
 def _agrupar_nuevos(nuevos: tuple, dest_root: Path) -> tuple[dict, list]:
@@ -1376,6 +1389,8 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
                              datos_escritos=datos_escritos,
                              datos_conservados=conservados_del_usuario,
                              carpetas_de_datos=_por_carpeta(datos_escritos, dest_root),
+                             wads=tuple(r for r in datos_escritos
+                                        if _es_wad_para_un_gestor(r, dest_root)),
                              omitidos=plan.omitidos)
 
     except CancelRequested:
