@@ -166,6 +166,9 @@ def _texto_del_aviso(aviso: oscwii_installer.AvisoDeInstalacion) -> str:
                   .format(folder=carpeta, n=n) for carpeta, n in aviso.carpetas])
     if escribe:
         partes.append(_("Va a escribir en:") + "\n" + _lista(escribe))
+    if aviso.escribe_en_nand:
+        partes.append(_("Esta app modifica la NAND de la Wii cuando la usás en la "
+                        "consola. WiiBackup Manager no instala nada en la NAND."))
     if aviso.archivos > oscwii_installer.ARCHIVOS_QUE_TARDAN:
         partes.append(_("Son {n} archivos: puede tardar varios minutos.")
                       .format(n=aviso.archivos))
@@ -277,6 +280,17 @@ class HomebrewAppCard(Gtk.Box):
         self.meta_label.add_css_class("dim-label")
         self.meta_label.add_css_class("caption")
         inner.append(self.meta_label)
+
+        # Las apps que modifican la NAND de la Wii al usarlas
+        # (`HomebrewApp.writes_to_nand`).
+        self.nand_label = Gtk.Label(xalign=0, label=_("Escribe en la NAND"),
+                                    tooltip_text=_(
+                                        "Al usarla en la consola, esta app modifica la "
+                                        "memoria interna de la Wii. WiiBackup Manager "
+                                        "solo la copia a la SD/USB."))
+        self.nand_label.add_css_class("warning")
+        self.nand_label.add_css_class("caption")
+        inner.append(self.nand_label)
 
         # Empuja el botón al fondo de la tarjeta aunque la descripción de
         # esta app en particular sea de una sola línea.
@@ -590,6 +604,7 @@ class HomebrewStoreView(Gtk.Box):
         meta = [p for p in (app.category, f"v{app.version}" if app.version else "") if p]
         card.meta_label.set_label(" · ".join(meta))
         card.meta_label.set_visible(bool(meta))
+        card.nand_label.set_visible(app.writes_to_nand)
 
         card.icon_picture.set_paintable(None)
         slug = app.slug

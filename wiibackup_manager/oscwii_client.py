@@ -208,7 +208,7 @@ def contents_cache_path() -> Path:
 class HomebrewApp:
     """Una app del repositorio de Open Shop Channel, con solo los campos
     que esta app usa (la respuesta real trae varios más: contributors,
-    flags, package_type, datos de "shop"/WAD, etc., que no hacen falta
+    package_type, datos de "shop"/WAD, etc., que no hacen falta
     para listar/descargar/instalar y por eso no se guardan)."""
 
     slug: str
@@ -230,6 +230,16 @@ class HomebrewApp:
     # si algún día aparecen.
     zip_sha256: Optional[str] = None
     zip_md5: Optional[str] = None
+    # Banderas del catálogo, p. ej. "WRITES_TO_NAND" (ver `writes_to_nand`).
+    flags: tuple = ()
+
+    @property
+    def writes_to_nand(self) -> bool:
+        """Si la app, al usarla en la consola, modifica la NAND de la Wii
+        (instaladores de cIOS, Priiloader, parcheadores...). Instalarla en
+        la SD/USB es igual que cualquier otra: lo que cambia es el riesgo
+        de usarla."""
+        return "WRITES_TO_NAND" in self.flags
 
     @classmethod
     def from_api_dict(cls, d: dict) -> Optional["HomebrewApp"]:
@@ -289,6 +299,7 @@ class HomebrewApp:
             peripherals=_str_tuple(d.get("peripherals")),
             zip_sha256=_str(d.get("sha256")) or None,
             zip_md5=_str(d.get("md5")) or None,
+            flags=_str_tuple(d.get("flags")),
         )
 
     def to_cache_dict(self) -> dict:
@@ -312,6 +323,7 @@ class HomebrewApp:
             "peripherals": list(self.peripherals),
             "sha256": self.zip_sha256,
             "md5": self.zip_md5,
+            "flags": list(self.flags),
         }
 
 

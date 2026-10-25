@@ -90,6 +90,7 @@ como ya hace `queue_manager.TransferQueue` para las transferencias.
 """
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import http.client
 import os
@@ -913,6 +914,9 @@ class AvisoDeInstalacion:
     # usuario, que solo se escriben si se elige reemplazarlos). Con más de
     # `ARCHIVOS_QUE_TARDAN`, el aviso dice que puede tardar varios minutos.
     archivos: int = 0
+    # Si la app modifica la NAND de la Wii al usarla (`HomebrewApp.writes_to_nand`).
+    # No hace aparecer el aviso: si aparece por otro motivo, lo dice.
+    escribe_en_nand: bool = False
 
 
 def _aviso(plan: PlanDeInstalacion, datos: DatosDelPaquete,
@@ -1311,6 +1315,8 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
                 # usuario y qué no se copia. None es "no instalar"; si no,
                 # si se reemplazan los archivos distintos del usuario.
                 aviso = _aviso(plan, datos, dest_root)
+                if aviso is not None and app.writes_to_nand:
+                    aviso = dataclasses.replace(aviso, escribe_en_nand=True)
                 if confirmar is not None and aviso is not None:
                     respuesta = confirmar(aviso)
                     _check_cancel(cancel_event)
