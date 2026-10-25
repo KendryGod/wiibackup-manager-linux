@@ -9,6 +9,7 @@ fondo y vuelve al hilo de GTK con `GLib.idle_add`, igual que
 `queue_manager.TransferQueue` para las transferencias."""
 from __future__ import annotations
 
+import os
 import threading
 from dataclasses import dataclass
 from enum import Enum
@@ -86,6 +87,9 @@ class _InstallState:
     cancel_event: Optional[threading.Event] = None
     # El aviso antes de instalar, mientras está abierto (ver `_mostrar_aviso`).
     dialogo: Optional[Adw.AlertDialog] = None
+    # (YAWM, destino) si en el aviso se marcó instalarlo también: se instala
+    # cuando esta app termina bien (ver `_on_install_done`).
+    yawm: Optional[tuple] = None
 
 
 # Motivo legible por `InstallStatus`, para el mensaje corto que se ve en la
@@ -204,16 +208,41 @@ def _texto_del_aviso(aviso: oscwii_installer.AvisoDeInstalacion) -> str:
     return "\n\n".join(partes)
 
 
+# El gestor de WADs que se ofrece instalar cuando un paquete deja un WAD
+# en /wad/: YAWM ModMii Edition, del catálogo de Open Shop Channel.
+YAWM_SLUG = "yawmME"
+
+
+def _yawm_a_ofrecer(aviso, catalogo: dict, dest_root: Path) -> Optional[HomebrewApp]:
+    """YAWM, si hay que ofrecerlo: el paquete deja un WAD en /wad/, YAWM
+    está en el catálogo y la unidad no lo tiene ya. Si no, None."""
+    yawm = catalogo.get(YAWM_SLUG)
+    if not aviso.wads or yawm is None:
+        return None
+    try:
+        with os.scandir(Path(dest_root) / "apps") as entradas:
+            if any(e.name.lower() == YAWM_SLUG.lower() for e in entradas):
+                return None
+    except OSError:
+        pass
+    return yawm
+
+
 # Lo que cada botón del aviso le contesta a `install_app` (ver su
 # parámetro `confirmar`): None no instala, True reemplaza los archivos
 # distintos del usuario, False los conserva.
 _RESPUESTAS_DEL_AVISO = {"cancel": None, "keep": False, "install": False, "replace": True}
 
 
-def _dialogo_del_aviso(nombre_app: str, aviso, al_responder) -> Adw.AlertDialog:
+def _dialogo_del_aviso(nombre_app: str, aviso, al_responder,
+                       ofrecer_yawm: Optional[tuple] = None) -> Adw.AlertDialog:
     """Dónde va a escribir el paquete, antes de tocar la unidad. Si choca
     con archivos del usuario, lo que se ofrece por defecto es conservarlos.
-    `al_responder` recibe None, False o True (`_RESPUESTAS_DEL_AVISO`)."""
+    `al_responder` recibe None, False o True (`_RESPUESTAS_DEL_AVISO`).
+
+    `ofrecer_yawm` es (nombre de YAWM, al_elegir): agrega una casilla
+    DESMARCADA para instalarlo también, y si no se cancela, `al_elegir`
+    recibe si quedó marcada (antes que `al_responder`)."""
     dialogo = Adw.AlertDialog(
         heading=_("¿Instalar '{name}'?").format(name=nombre_app),
         body=_texto_del_aviso(aviso))
@@ -229,8 +258,20 @@ def _dialogo_del_aviso(nombre_app: str, aviso, al_responder) -> Adw.AlertDialog:
         dialogo.set_response_appearance("install", Adw.ResponseAppearance.SUGGESTED)
         dialogo.set_default_response("install")
     dialogo.set_close_response("cancel")
-    dialogo.connect("response",
-                    lambda _d, respuesta: al_responder(_RESPUESTAS_DEL_AVISO.get(respuesta)))
+    casilla = None
+    if ofrecer_yawm is not None:
+        casilla = Gtk.CheckButton(
+            label=_("Instalar también {name} (para instalar el WAD desde la Wii)")
+            .format(name=ofrecer_yawm[0]), active=False)
+        dialogo.set_extra_child(casilla)
+
+    def _respuesta(_d, boton):
+        respuesta = _RESPUESTAS_DEL_AVISO.get(boton)
+        if casilla is not None and respuesta is not None:
+            ofrecer_yawm[1](casilla.get_active())
+        al_responder(respuesta)
+
+    dialogo.connect("response", _respuesta)
     return dialogo
 
 
@@ -351,6 +392,8 @@ class HomebrewStoreView(Gtk.Box):
         # Estado de instalación por slug, independiente de si hay o no una
         # tarjeta mostrándolo en este instante. Ver `_InstallState`.
         self._install_states: dict = {}
+        # El catálogo cargado, por slug (para ofrecer YAWM: `_yawm_a_ofrecer`).
+        self._apps_por_slug: dict = {}
 
         self._build_ui()
         self._refresh_dest_choices()
@@ -564,6 +607,7 @@ class HomebrewStoreView(Gtk.Box):
 
         self._apps_store.remove_all()
         self._card_by_slug.clear()
+        self._apps_por_slug = {app.slug: app for app in result.apps}
         for app in result.apps:
             self._apps_store.append(_AppItem(app))
 
@@ -685,11 +729,14 @@ class HomebrewStoreView(Gtk.Box):
             return
         self._start_install(app)
 
-    def _start_install(self, app: HomebrewApp):
-        if self._dest_path is None:
-            self._show_toast(_("Elegí primero un destino antes de instalar."))
-            return
-        dest_root = self._dest_path
+    def _start_install(self, app: HomebrewApp, dest_root: Optional[Path] = None):
+        """Instala `app` en el destino elegido, o en `dest_root` si se pasa
+        (YAWM va al mismo destino que la app que dejó el WAD)."""
+        if dest_root is None:
+            if self._dest_path is None:
+                self._show_toast(_("Elegí primero un destino antes de instalar."))
+                return
+            dest_root = self._dest_path
 
         try:
             op = self.ops.start(
@@ -714,7 +761,8 @@ class HomebrewStoreView(Gtk.Box):
 
         def confirmar(aviso):
             return _preguntar_y_esperar(
-                lambda responder: GLib.idle_add(self._mostrar_aviso, app, aviso, responder),
+                lambda responder: GLib.idle_add(self._mostrar_aviso, app, aviso,
+                                                responder, dest_root),
                 cancel_event)
 
         def worker():
@@ -734,14 +782,20 @@ class HomebrewStoreView(Gtk.Box):
         threading.Thread(target=worker, daemon=True,
                          name=f"oscwii-install-{app.slug}").start()
 
-    def _mostrar_aviso(self, app: HomebrewApp, aviso, responder) -> bool:
+    def _mostrar_aviso(self, app: HomebrewApp, aviso, responder, dest_root: Path) -> bool:
         state = self._install_states.get(app.slug)
         if state is not None:
             state.message = _("Esperando tu confirmación…")
             card = self._card_by_slug.get(app.slug)
             if card is not None and gtk_helpers.widget_is_alive(card) and card.app is app:
                 self._apply_install_state(card, state)
-        dialogo = _dialogo_del_aviso(app.name, aviso, responder)
+        ofrecer = None
+        yawm = _yawm_a_ofrecer(aviso, self._apps_por_slug, dest_root)
+        if yawm is not None and state is not None:
+            def _elegir(marcada: bool) -> None:
+                state.yawm = (yawm, dest_root) if marcada else None
+            ofrecer = (yawm.name, _elegir)
+        dialogo = _dialogo_del_aviso(app.name, aviso, responder, ofrecer)
         if state is not None:
             state.dialogo = dialogo
         dialogo.present(self)
@@ -783,6 +837,9 @@ class HomebrewStoreView(Gtk.Box):
         if anterior is not None and anterior.dialogo is not None:
             anterior.dialogo.force_close()
             anterior.dialogo = None
+        # YAWM, si se marcó en el aviso: después de esta app, y solo si se
+        # instaló bien.
+        yawm = anterior.yawm if anterior is not None else None
 
         if result.ok:
             state = _InstallState(kind=_CardState.DONE, fraction=1.0,
@@ -853,6 +910,8 @@ class HomebrewStoreView(Gtk.Box):
         card = self._card_by_slug.get(app.slug)
         if card is not None and gtk_helpers.widget_is_alive(card) and card.app is app:
             self._apply_install_state(card, state)
+        if result.ok and yawm is not None:
+            self._start_install(*yawm)
         return False
 
     # ------------------------------------------------------------- Cierre --
