@@ -485,6 +485,15 @@ trae su ZIP: si el cliente había ajustado el perfil de alguno de esos
 mandos, ese ajuste se pierde. Los perfiles de los demás mandos no se
 tocan.
 
+**Tarjetas SD en el lector integrado de la computadora.** Modo Fábrica no
+lista las SD que están en un lector integrado, como el Realtek PCIe de
+muchas notebooks, que el sistema ve como `mmcblk`. Modo Fábrica solo
+formatea lo que el kernel marca como removible, y el kernel nunca marca así
+a esos lectores. **Para preparar una SD, usá un lector USB.** En el lector
+integrado la SD aparece igual en Transferir, la Homebrew Store y Verificar
+Memoria, pero el Recovery Manager no la revisa al arrancar y después de
+verificarla no se ofrece "Formatear".
+
 ## Reportar un error o pedir una función
 
 Los reportes van a
@@ -1259,6 +1268,17 @@ lista, más la metadata extendida de GameTDB.
 - [ ] Listar y exportar lo que ya hay EN una unidad WBFS
 - [ ] Empaquetado como Flatpak
 - [ ] Traducciones (i18n)
+
+Candidatos para 0.2.5:
+
+- [ ] Modo Fábrica y Recovery Manager para las SD en lectores integrados
+      (`mmcblk` cuyo `device/type` sea `SD`; el almacenamiento interno
+      eMMC, que el kernel publica como `MMC`, queda afuera).
+- [ ] Verificar Memoria: la barra va un archivo atrasada en la lectura
+      (la línea con que `f3read` cierra cada archivo se toma como su
+      inicio) y termina antes del 100 %.
+- [ ] Mostrar los tamaños en GiB con su nombre: hoy una memoria de 256 GB
+      aparece como "238,4 GB", y puede parecer trucha.
 
 ## Licencia
 
