@@ -779,6 +779,21 @@ class WiiBackupWindow(Adw.ApplicationWindow):
         self._verify_switch_row.connect("notify::active",
                                         self._on_verify_switch_toggled)
         group.add(self._verify_switch_row)
+
+        # Prendido por defecto, al revés que el de Wii: ver el comentario de
+        # `config.Settings.verify_gamecube_copies`.
+        self._verify_gamecube_switch_row = Adw.SwitchRow(
+            title=_("Verificar copias de GameCube (más lento)"),
+            subtitle=_(
+                "Al terminar cada juego de GameCube, lo vuelve a leer de la "
+                "unidad y compara su SHA-1 con el del original. Encuentra la "
+                "memoria que guarda mal en silencio; a cambio, relee todo lo "
+                "que acaba de copiar."),
+            active=self.settings.verify_gamecube_copies,
+        )
+        self._verify_gamecube_switch_row.connect(
+            "notify::active", self._on_verify_gamecube_switch_toggled)
+        group.add(self._verify_gamecube_switch_row)
         general_page.add(group)
 
         # Los datos con los que se firma el Ticket de Entrega. Van acá, en
@@ -814,6 +829,14 @@ class WiiBackupWindow(Adw.ApplicationWindow):
 
     def _on_verify_switch_toggled(self, row, _pspec):
         self.settings.verify_after_copy = row.get_active()
+        error = config.try_save(self.settings)
+        if error:
+            self._show_toast(
+                _("No se pudo guardar la configuración: {error}. El cambio "
+                  "vale para esta sesión.").format(error=error))
+
+    def _on_verify_gamecube_switch_toggled(self, row, _pspec):
+        self.settings.verify_gamecube_copies = row.get_active()
         error = config.try_save(self.settings)
         if error:
             self._show_toast(

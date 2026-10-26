@@ -68,9 +68,12 @@ def _cargar(archivo: Path, datos: dict) -> config.Settings:
 
 
 def _sin_packs(s: config.Settings) -> dict:
+    """Lo cargado, sin los campos que una config de 0.2.2 no tiene: esos
+    entran con su valor por defecto (ver sus propios tests)."""
     from dataclasses import asdict
     datos = asdict(s)
     datos.pop("packs", None)
+    datos.pop("verify_gamecube_copies", None)
     return datos
 
 
@@ -139,7 +142,9 @@ def test_guardar_un_pack_no_pierde_las_demas_claves(archivo):
     s.save()
 
     en_disco = json.loads(archivo.read_text(encoding="utf-8"))
-    assert en_disco == {**CONFIG_022, "packs": {"Pack Mario": ["RMCE01", "SMNE01"]}}
+    # Lo que 0.2.2 no tenía se guarda con su valor por defecto.
+    assert en_disco == {**CONFIG_022, "packs": {"Pack Mario": ["RMCE01", "SMNE01"]},
+                        "verify_gamecube_copies": True}
     assert config.Settings.load().packs == {"Pack Mario": ["RMCE01", "SMNE01"]}
 
 

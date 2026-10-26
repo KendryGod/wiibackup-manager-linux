@@ -130,6 +130,14 @@ class Settings:
     # sorpresa -alguien que copia 40 juegos y de golpe tarda el doble sin
     # haberlo pedido va a pensar que la app se colgó.
     verify_after_copy: bool = False
+    # Si después de copiar un juego de GameCube se lo relee de la unidad y
+    # se compara su SHA-1 con el del original (ver
+    # `queue_manager.TransferQueue._verify_gamecube_copy`). ACTIVADO por
+    # defecto, al revés que `verify_after_copy`: un GameCube pesa como mucho
+    # 1,4 GB, la copia ya calcula el SHA-1 del original sin leerlo dos
+    # veces, y lo único que se agrega es releer el destino. Copiar a una
+    # memoria que guarda mal y no enterarse es peor que esa espera.
+    verify_gamecube_copies: bool = True
     # "Mi taller": los datos con los que se firma el Ticket de Entrega. Van
     # acá, en la configuración de cada usuario, y no en el código: la app
     # la usan talleres distintos y cada uno imprime su propia marca. Vacíos

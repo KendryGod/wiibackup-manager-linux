@@ -111,6 +111,10 @@ def test_la_ventana_se_arma_y_se_muestra(gtk, tmp_path, monkeypatch):
                 ajustes = win._content_stack.get_child_by_name("ajustes")
                 resultado["mi_taller_en_ajustes"] = (
                     win._shop_group.is_ancestor(ajustes))
+                # El switch de GameCube, en Ajustes y prendido por defecto.
+                fila = win._verify_gamecube_switch_row
+                resultado["switch_gamecube"] = (
+                    fila.get_title(), fila.get_active(), fila.is_ancestor(ajustes))
             finally:
                 self.quit()
             return False
@@ -129,6 +133,8 @@ def test_la_ventana_se_arma_y_se_muestra(gtk, tmp_path, monkeypatch):
     assert resultado.get("visible") is True
     assert "WiiBackup Manager" in resultado.get("titulo", "")
     assert resultado.get("mi_taller_en_ajustes") is True
+    assert resultado.get("switch_gamecube") == (
+        "Verificar copias de GameCube (más lento)", True, True)
     assert resultado.get("paginas") == {"juegos", "cola", "memoria", "fabrica",
                                         "tienda", "ajustes"}
     assert resultado.get("filas_sidebar") == ["juegos", "cola", "memoria",

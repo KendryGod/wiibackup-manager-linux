@@ -1674,7 +1674,8 @@ class TransferView(Gtk.Box):
             self.queue.add_jobs(items, dest_root, wit_binary=wit_binary,
                                 overwrite=overwrite,
                                 scrub_update=self.settings.scrub_update,
-                                verify_after_copy=self.settings.verify_after_copy)
+                                verify_after_copy=self.settings.verify_after_copy,
+                                verify_gamecube=self.settings.verify_gamecube_copies)
 
         threading.Thread(target=worker, daemon=True,
                          name="transfer-plan").start()
