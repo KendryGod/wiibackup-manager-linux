@@ -7,7 +7,7 @@ msgstr ""
 "Project-Id-Version: WiiBackup Manager\n"
 "Report-Msgid-Bugs-To: https://github.com/KendryGod/wiibackup-manager-linux/"
 "issues\n"
-"POT-Creation-Date: 2026-10-25 21:55-0600\n"
+"POT-Creation-Date: 2026-10-25 22:47-0600\n"
 "PO-Revision-Date: 2026-08-30 05:58-0600\n"
 "Last-Translator: GameFix SPS\n"
 "Language-Team: English\n"
@@ -306,51 +306,51 @@ msgstr "Original title"
 msgid "Título traducido"
 msgstr "Localized title"
 
-#: wiibackup_manager/golden_configs.py:299
-#: wiibackup_manager/golden_configs.py:311
+#: wiibackup_manager/golden_configs.py:307
+#: wiibackup_manager/golden_configs.py:319
 #, python-brace-format
 msgid "no se pudo leer el archivo maestro ({error})"
 msgstr "could not read the master file ({error})"
 
-#: wiibackup_manager/golden_configs.py:302
+#: wiibackup_manager/golden_configs.py:310
 #, python-brace-format
 msgid "el archivo maestro mide {size} bytes; se esperaban al menos {minimum}"
 msgstr "the master file is {size} bytes; at least {minimum} were expected"
 
-#: wiibackup_manager/golden_configs.py:314
+#: wiibackup_manager/golden_configs.py:322
 #, python-brace-format
 msgid "el archivo maestro no tiene la firma esperada ({found} != {expected})"
 msgstr ""
 "the master file does not have the expected signature ({found} != {expected})"
 
-#: wiibackup_manager/golden_configs.py:372
+#: wiibackup_manager/golden_configs.py:382
 msgid "la instalación de la app no terminó bien; no se tocó nada"
 msgstr "the app installation did not finish correctly; nothing was touched"
 
-#: wiibackup_manager/golden_configs.py:390
+#: wiibackup_manager/golden_configs.py:400
 #, python-brace-format
 msgid "no se encontró el archivo maestro ({path})"
 msgstr "the master file was not found ({path})"
 
-#: wiibackup_manager/golden_configs.py:408
+#: wiibackup_manager/golden_configs.py:418
 #, python-brace-format
 msgid "archivo maestro inválido, no se copió nada: {reason}"
 msgstr "invalid master file, nothing was copied: {reason}"
 
-#: wiibackup_manager/golden_configs.py:430
+#: wiibackup_manager/golden_configs.py:440
 msgid "Configuración maestra aplicada"
 msgstr "Master configuration applied"
 
-#: wiibackup_manager/golden_configs.py:435
+#: wiibackup_manager/golden_configs.py:445
 msgid "Configuración maestra no aplicada"
 msgstr "Master configuration not applied"
 
-#: wiibackup_manager/golden_configs.py:443
+#: wiibackup_manager/golden_configs.py:453
 #, python-brace-format
 msgid "ya había un {name} en la unidad y se dejó como estaba"
 msgstr "there was already a {name} on the drive and it was left as it was"
 
-#: wiibackup_manager/golden_configs.py:448
+#: wiibackup_manager/golden_configs.py:458
 #, python-brace-format
 msgid ""
 "el archivo maestro del repositorio es de relleno: no se copió nada y {name} "
@@ -1610,48 +1610,48 @@ msgstr "Choose a destination first before installing."
 msgid "No se puede ahora: {detail}."
 msgstr "Not possible right now: {detail}."
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:788
+#: wiibackup_manager/widgets/homebrew_store_view.py:789
 msgid "Esperando tu confirmación…"
 msgstr "Waiting for your confirmation…"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:817
+#: wiibackup_manager/widgets/homebrew_store_view.py:818
 #, python-brace-format
 msgid "Descargando… {pct}%"
 msgstr "Downloading… {pct}%"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:819
+#: wiibackup_manager/widgets/homebrew_store_view.py:820
 #, python-brace-format
 msgid "Extrayendo… {done} de {total} archivos ({pct}%)"
 msgstr "Extracting… {done} of {total} files ({pct}%)"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:822
+#: wiibackup_manager/widgets/homebrew_store_view.py:823
 #, python-brace-format
 msgid "Extrayendo… {pct}%"
 msgstr "Extracting… {pct}%"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:824
+#: wiibackup_manager/widgets/homebrew_store_view.py:825
 msgid "Descargando…"
 msgstr "Downloading…"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:825
+#: wiibackup_manager/widgets/homebrew_store_view.py:826
 msgid "Extrayendo…"
 msgstr "Extracting…"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:846
+#: wiibackup_manager/widgets/homebrew_store_view.py:847
 msgid "Instalada ✓"
 msgstr "Installed ✓"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:848
+#: wiibackup_manager/widgets/homebrew_store_view.py:849
 #, python-brace-format
 msgid "'{name}' instalada ({n} archivo(s))."
 msgstr "'{name}' installed ({n} file(s))."
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:858
+#: wiibackup_manager/widgets/homebrew_store_view.py:859
 #, python-brace-format
 msgid "Se conservaron los datos del cliente de '{name}': {paths}."
 msgstr "The customer's data for '{name}' was kept: {paths}."
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:867
+#: wiibackup_manager/widgets/homebrew_store_view.py:868
 #, python-brace-format
 msgid ""
 "'{name}' se instaló, pero no se pudo aplicar su configuración maestra: "
@@ -1660,12 +1660,12 @@ msgstr ""
 "'{name}' was installed, but its master configuration could not be applied: "
 "{detail}"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:872
+#: wiibackup_manager/widgets/homebrew_store_view.py:873
 #, python-brace-format
 msgid "Se aplicó la configuración maestra de '{name}'."
 msgstr "The master configuration for '{name}' was applied."
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:877
+#: wiibackup_manager/widgets/homebrew_store_view.py:878
 #, python-brace-format
 msgid ""
 "'{name}' se instaló. Ya había un {file} en la unidad y se dejó como estaba: "
@@ -1674,7 +1674,7 @@ msgstr ""
 "'{name}' was installed. There was already a {file} on the drive and it was "
 "left as it was: the master configuration was not applied."
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:884
+#: wiibackup_manager/widgets/homebrew_store_view.py:885
 #, python-brace-format
 msgid ""
 "'{name}' se instaló con su configuración de fábrica: la configuración "
@@ -1683,21 +1683,21 @@ msgstr ""
 "'{name}' was installed with its factory settings: the master configuration "
 "in the repository is a placeholder and was not copied."
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:896
+#: wiibackup_manager/widgets/homebrew_store_view.py:897
 #, python-brace-format
 msgid "'{name}' se instaló. {detail}"
 msgstr "'{name}' was installed. {detail}"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:901
+#: wiibackup_manager/widgets/homebrew_store_view.py:902
 #, python-brace-format
 msgid "Instalación de '{name}' cancelada."
 msgstr "Installation of '{name}' cancelled."
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:903
+#: wiibackup_manager/widgets/homebrew_store_view.py:904
 msgid "Error al instalar"
 msgstr "Installation error"
 
-#: wiibackup_manager/widgets/homebrew_store_view.py:906
+#: wiibackup_manager/widgets/homebrew_store_view.py:907
 #, python-brace-format
 msgid "No se pudo instalar '{name}': {detail}"
 msgstr "Could not install '{name}': {detail}"
@@ -2097,56 +2097,88 @@ msgstr "not `wit` ✗"
 msgid "no encontrado ✗"
 msgstr "not found ✗"
 
-#: wiibackup_manager/widgets/preferences_dialog.py:38
+#: wiibackup_manager/widgets/preferences_dialog.py:34
+msgid "No configurada: se usan las que trae la app"
+msgstr "Not set: the app's own are used"
+
+#: wiibackup_manager/widgets/preferences_dialog.py:42
 #: wiibackup_manager/window.py:322
 msgid "Preferencias"
 msgstr "Preferences"
 
-#: wiibackup_manager/widgets/preferences_dialog.py:43
+#: wiibackup_manager/widgets/preferences_dialog.py:47
 msgid "Biblioteca"
 msgstr "Library"
 
-#: wiibackup_manager/widgets/preferences_dialog.py:46
+#: wiibackup_manager/widgets/preferences_dialog.py:50
 msgid "Carpeta de la biblioteca"
 msgstr "Library folder"
 
-#: wiibackup_manager/widgets/preferences_dialog.py:54
+#: wiibackup_manager/widgets/preferences_dialog.py:58
 msgid "Unidad/carpeta WBFS (USB Loader)"
 msgstr "WBFS drive/folder (USB Loader)"
 
-#: wiibackup_manager/widgets/preferences_dialog.py:56
+#: wiibackup_manager/widgets/preferences_dialog.py:60
 msgid "No configurada"
 msgstr "Not configured"
 
-#: wiibackup_manager/widgets/preferences_dialog.py:62
+#: wiibackup_manager/widgets/preferences_dialog.py:66
 msgid "Motor de conversión"
 msgstr "Conversion engine"
 
-#: wiibackup_manager/widgets/preferences_dialog.py:72
+#: wiibackup_manager/widgets/preferences_dialog.py:76
 msgid "Elegir el programa `wit`"
 msgstr "Choose the `wit` program"
 
-#: wiibackup_manager/widgets/preferences_dialog.py:76
+#: wiibackup_manager/widgets/preferences_dialog.py:80
 msgid "Volver a buscar `wit` en el sistema"
 msgstr "Look for `wit` on the system again"
 
-#: wiibackup_manager/widgets/preferences_dialog.py:83
+#: wiibackup_manager/widgets/preferences_dialog.py:90
+#: wiibackup_manager/window.py:243 wiibackup_manager/window.py:727
+msgid "Homebrew Store"
+msgstr "Homebrew Store"
+
+#: wiibackup_manager/widgets/preferences_dialog.py:91
+msgid ""
+"Si elegís una carpeta, la tienda busca ahí primero las configuraciones "
+"maestras: nintendont/nincfg.bin para Nintendont y usbloadergx/GXGlobal.cfg "
+"para USB Loader GX. Nunca se pisa una configuración que ya esté en la unidad."
+msgstr ""
+"If you choose a folder, the store looks there first for the master "
+"configurations: nintendont/nincfg.bin for Nintendont and usbloadergx/"
+"GXGlobal.cfg for USB Loader GX. A configuration already on the drive is "
+"never overwritten."
+
+#: wiibackup_manager/widgets/preferences_dialog.py:96
+msgid "Carpeta de configuraciones maestras"
+msgstr "Master configurations folder"
+
+#: wiibackup_manager/widgets/preferences_dialog.py:100
+msgid "Elegir la carpeta"
+msgstr "Choose the folder"
+
+#: wiibackup_manager/widgets/preferences_dialog.py:104
+msgid "Usar las de la app"
+msgstr "Use the app's own"
+
+#: wiibackup_manager/widgets/preferences_dialog.py:112
 msgid "Carátulas"
 msgstr "Cover art"
 
-#: wiibackup_manager/widgets/preferences_dialog.py:85
+#: wiibackup_manager/widgets/preferences_dialog.py:114
 msgid "Región preferida"
 msgstr "Preferred region"
 
-#: wiibackup_manager/widgets/preferences_dialog.py:98
+#: wiibackup_manager/widgets/preferences_dialog.py:127
 msgid "Apariencia"
 msgstr "Appearance"
 
-#: wiibackup_manager/widgets/preferences_dialog.py:101
+#: wiibackup_manager/widgets/preferences_dialog.py:130
 msgid "Tema"
 msgstr "Theme"
 
-#: wiibackup_manager/widgets/preferences_dialog.py:103
+#: wiibackup_manager/widgets/preferences_dialog.py:132
 msgid ""
 "Solo tiene efecto con el tema estándar; un tema GTK de terceros manda sobre "
 "esto."
@@ -2154,19 +2186,23 @@ msgstr ""
 "Only takes effect with the default theme; a third-party GTK theme overrides "
 "this."
 
-#: wiibackup_manager/widgets/preferences_dialog.py:127
+#: wiibackup_manager/widgets/preferences_dialog.py:156
 msgid "Elegí la carpeta de tu biblioteca"
 msgstr "Choose your library folder"
 
-#: wiibackup_manager/widgets/preferences_dialog.py:144
+#: wiibackup_manager/widgets/preferences_dialog.py:173
 msgid "Elegí la carpeta/unidad WBFS"
 msgstr "Choose the WBFS folder/drive"
 
-#: wiibackup_manager/widgets/preferences_dialog.py:161
+#: wiibackup_manager/widgets/preferences_dialog.py:190
+msgid "Elegí la carpeta de configuraciones maestras"
+msgstr "Choose the master configurations folder"
+
+#: wiibackup_manager/widgets/preferences_dialog.py:213
 msgid "Elegí el programa `wit`"
 msgstr "Choose the `wit` program"
 
-#: wiibackup_manager/widgets/preferences_dialog.py:184
+#: wiibackup_manager/widgets/preferences_dialog.py:236
 #, python-brace-format
 msgid "{path} no es `wit` (Wiimms ISO Tools): no se cambió nada."
 msgstr "{path} is not `wit` (Wiimms ISO Tools): nothing was changed."
@@ -3164,10 +3200,6 @@ msgstr "Memory Check"
 #: wiibackup_manager/window.py:242 wiibackup_manager/window.py:513
 msgid "Modo Fábrica"
 msgstr "Factory Mode"
-
-#: wiibackup_manager/window.py:243 wiibackup_manager/window.py:727
-msgid "Homebrew Store"
-msgstr "Homebrew Store"
 
 #: wiibackup_manager/window.py:244
 msgid "Ajustes"

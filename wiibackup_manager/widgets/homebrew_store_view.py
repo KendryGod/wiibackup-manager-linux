@@ -776,7 +776,8 @@ class HomebrewStoreView(Gtk.Box):
             # archivo, no un ZIP entero) y no vale la pena otro salto de
             # hilo solo para eso.
             golden_result = golden_configs.maybe_apply(
-                app, dest_root, result, op_log=self.op_log)
+                app, dest_root, result, op_log=self.op_log,
+                local_dir=self.settings.golden_configs_dir)
             GLib.idle_add(self._on_install_done, app, result, op, golden_result)
 
         threading.Thread(target=worker, daemon=True,

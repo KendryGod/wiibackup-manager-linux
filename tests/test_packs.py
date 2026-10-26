@@ -74,6 +74,7 @@ def _sin_packs(s: config.Settings) -> dict:
     datos = asdict(s)
     datos.pop("packs", None)
     datos.pop("verify_gamecube_copies", None)
+    datos.pop("golden_configs_dir", None)
     return datos
 
 
@@ -144,7 +145,7 @@ def test_guardar_un_pack_no_pierde_las_demas_claves(archivo):
     en_disco = json.loads(archivo.read_text(encoding="utf-8"))
     # Lo que 0.2.2 no tenía se guarda con su valor por defecto.
     assert en_disco == {**CONFIG_022, "packs": {"Pack Mario": ["RMCE01", "SMNE01"]},
-                        "verify_gamecube_copies": True}
+                        "verify_gamecube_copies": True, "golden_configs_dir": ""}
     assert config.Settings.load().packs == {"Pack Mario": ["RMCE01", "SMNE01"]}
 
 

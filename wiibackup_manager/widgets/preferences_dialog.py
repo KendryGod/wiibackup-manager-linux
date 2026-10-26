@@ -30,6 +30,10 @@ def _estado_de_wit(binario: str) -> str:
     return estado if binario == WIT_DEL_SISTEMA else f"{estado} · {binario}"
 
 
+def _subtitulo_de_configs(carpeta: str) -> str:
+    return carpeta or _("No configurada: se usan las que trae la app")
+
+
 class PreferencesDialog(Adw.PreferencesDialog):
     def __init__(self, settings: config.Settings, on_saved):
         super().__init__()
@@ -79,6 +83,31 @@ class PreferencesDialog(Adw.PreferencesDialog):
         self._wit_row.add_suffix(self._wit_pick_btn)
         self._wit_row.add_suffix(self._wit_reset_btn)
         group2.add(self._wit_row)
+
+        # La carpeta del taller con sus configuraciones maestras (ver
+        # `config.Settings.golden_configs_dir`).
+        group_store = Adw.PreferencesGroup(
+            title=_("Homebrew Store"),
+            description=_("Si elegís una carpeta, la tienda busca ahí primero las "
+                          "configuraciones maestras: nintendont/nincfg.bin para "
+                          "Nintendont y usbloadergx/GXGlobal.cfg para USB Loader GX. "
+                          "Nunca se pisa una configuración que ya esté en la unidad."))
+        page.add(group_store)
+        self._golden_row = Adw.ActionRow(title=_("Carpeta de configuraciones maestras"))
+        self._golden_row.set_use_markup(False)
+        self._golden_row.set_subtitle(_subtitulo_de_configs(settings.golden_configs_dir))
+        pick_golden_btn = Gtk.Button(icon_name="folder-open-symbolic", valign=Gtk.Align.CENTER,
+                                     tooltip_text=_("Elegir la carpeta"))
+        pick_golden_btn.connect("clicked", self._pick_golden_dir)
+        self._golden_clear_btn = Gtk.Button(icon_name="edit-clear-symbolic",
+                                            valign=Gtk.Align.CENTER,
+                                            tooltip_text=_("Usar las de la app"))
+        self._golden_clear_btn.connect("clicked",
+                                       lambda *_a: self._usar_carpeta_de_configs(""))
+        self._golden_clear_btn.set_sensitive(bool(settings.golden_configs_dir))
+        self._golden_row.add_suffix(pick_golden_btn)
+        self._golden_row.add_suffix(self._golden_clear_btn)
+        group_store.add(self._golden_row)
 
         group3 = Adw.PreferencesGroup(title=_("Carátulas"))
         page.add(group3)
@@ -156,6 +185,29 @@ class PreferencesDialog(Adw.PreferencesDialog):
                 return
             self.settings.wbfs_drive_path = str(path)
             self._wbfs_row.set_subtitle(str(path))
+
+    def _pick_golden_dir(self, *_args):
+        dialog = Gtk.FileDialog(title=_("Elegí la carpeta de configuraciones maestras"))
+        dialog.select_folder(self.get_root(), None, self._on_golden_dir_picked)
+
+    def _on_golden_dir_picked(self, dialog, result):
+        try:
+            carpeta = dialog.select_folder_finish(result)
+        except Exception:
+            return
+        if carpeta:
+            path = gtk_helpers.local_path(carpeta)
+            if path is None:
+                self.add_toast(Adw.Toast(title=gtk_helpers.no_local_path_message()))
+                return
+            self._usar_carpeta_de_configs(str(path))
+
+    def _usar_carpeta_de_configs(self, carpeta: str) -> None:
+        """Vacía, vuelve a las configuraciones que trae la app. El guardado
+        lo hace la ventana al cerrarse el diálogo (`on_saved`)."""
+        self.settings.golden_configs_dir = carpeta
+        self._golden_row.set_subtitle(_subtitulo_de_configs(carpeta))
+        self._golden_clear_btn.set_sensitive(bool(carpeta))
 
     def _pick_wit(self, *_args):
         dialog = Gtk.FileDialog(title=_("Elegí el programa `wit`"))

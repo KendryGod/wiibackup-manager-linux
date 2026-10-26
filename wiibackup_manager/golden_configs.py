@@ -234,10 +234,18 @@ def _candidate_asset_dirs() -> list:
     return installed_data_dirs("assets/configs", "wiibackup-manager/configs")
 
 
-def find_asset(relative: str) -> Optional[Path]:
+def find_asset(relative: str, local_dir: Optional[str] = None) -> Optional[Path]:
     """Ruta del archivo maestro `relative` (p. ej. "nintendont/nincfg.bin"),
     en el primer directorio candidato donde exista, o None si no está en
-    ninguno."""
+    ninguno.
+
+    `local_dir` (`Settings.golden_configs_dir`, la carpeta del taller), si
+    hay, va primero. Un archivo de relleno ahí no gana: se sigue buscando
+    donde instala la app, como si no estuviera."""
+    if local_dir:
+        candidato = Path(local_dir) / relative
+        if candidato.is_file() and not is_placeholder(candidato):
+            return candidato
     for base in _candidate_asset_dirs():
         candidate = base / relative
         if candidate.is_file():
@@ -333,7 +341,8 @@ def _copy_atomic(src: Path, dest: Path) -> None:
 def maybe_apply(app: HomebrewApp, dest_root: Path,
                 install_result: "InstallResult",
                 op_log: Optional[oplog.OperationLog] = None,
-                registry: Optional[dict] = None) -> Optional[GoldenConfigResult]:
+                registry: Optional[dict] = None,
+                local_dir: Optional[str] = None) -> Optional[GoldenConfigResult]:
     """Si `app.slug` tiene una config maestra registrada, la copia a
     `dest_root` después de una instalación exitosa.
 
@@ -358,7 +367,8 @@ def maybe_apply(app: HomebrewApp, dest_root: Path,
 
     `registry` es inyectable para poder probar esta función con specs de
     prueba, sin depender de los archivos reales de `assets/configs/` ni de
-    su ruta instalada."""
+    su ruta instalada. `local_dir` es la carpeta del taller donde se busca
+    primero (ver `find_asset`)."""
     if registry is None:
         registry = GOLDEN_CONFIGS
 
@@ -383,7 +393,7 @@ def maybe_apply(app: HomebrewApp, dest_root: Path,
         _log(op_log, result)
         return result
 
-    asset_path = find_asset(spec.asset_relative)
+    asset_path = find_asset(spec.asset_relative, local_dir)
     if asset_path is None:
         result = GoldenConfigResult(
             GoldenConfigStatus.ASSET_MISSING, app.slug, spec.label,

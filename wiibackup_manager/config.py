@@ -138,6 +138,11 @@ class Settings:
     # veces, y lo único que se agrega es releer el destino. Copiar a una
     # memoria que guarda mal y no enterarse es peor que esa espera.
     verify_gamecube_copies: bool = True
+    # Una carpeta del taller donde la Homebrew Store busca PRIMERO las
+    # configuraciones maestras, con la misma estructura que `assets/configs`
+    # (`nintendont/nincfg.bin`, `usbloadergx/GXGlobal.cfg`; ver
+    # `golden_configs.find_asset`). Vacía, se usan las que trae la app.
+    golden_configs_dir: str = ""
     # "Mi taller": los datos con los que se firma el Ticket de Entrega. Van
     # acá, en la configuración de cada usuario, y no en el código: la app
     # la usan talleres distintos y cada uno imprime su propia marca. Vacíos
