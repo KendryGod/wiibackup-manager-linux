@@ -605,7 +605,7 @@ wiibackup_manager/
 
 ### 0.2.4
 
-32 commits desde la 0.2.3. La Homebrew Store instala ahora las apps que
+33 commits desde la 0.2.3. La Homebrew Store instala ahora las apps que
 escriben fuera de `apps/`, deja los WAD en `/wad/` y puede instalar desde
 una carpeta de esta PC; las copias de GameCube se verifican por SHA-1, y
 hay arreglos para `wit` con espacios dobles, para Modo Fábrica y para la
