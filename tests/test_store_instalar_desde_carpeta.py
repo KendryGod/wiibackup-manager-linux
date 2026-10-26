@@ -286,7 +286,7 @@ def test_una_carpeta_con_un_nombre_que_fat32_no_acepta_tambien(tmp_path, raiz):
 
 
 @pytest.mark.parametrize("nombre", ["wbfs/Juego [RMCE01]/RMCE01.wbfs", "nincfg.bin",
-                                    "wad/leeme.txt", ".Trashes/501/basura"])
+                                    "wad/leeme.txt", ".Trashes/501/basura", ".DS_Store"])
 def test_lo_que_no_va_en_una_carpeta_permitida_rechaza_la_carpeta(tmp_path, raiz, nombre):
     carpeta = _poner(tmp_path / "SD", {"apps/WiiDonut/boot.dol": dol(b"x"), nombre: b"x"})
 
