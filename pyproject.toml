@@ -12,6 +12,10 @@ license = { text = "MIT" }
 authors = [{ name = "GameFix SPS" }]
 dependencies = [
     "PyGObject>=3.42",
+    # El Ticket de Entrega en PDF (`pdf_export.py`). 1.18 es la primera con
+    # `PDFSurface.set_metadata` (y pide cairo 1.15.10 o más nuevo). En
+    # Fedora es el paquete `python3-cairo`.
+    "pycairo>=1.18",
 ]
 
 [project.optional-dependencies]
