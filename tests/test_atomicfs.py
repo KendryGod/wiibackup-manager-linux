@@ -18,6 +18,7 @@ meterse con lo que cada módulo decide hacer con eso, que sigue probado en
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import stat
 import threading
@@ -285,20 +286,94 @@ def test_stream_no_toca_el_destino_viejo_si_falla(tmp_path):
     assert [p.name for p in tmp_path.iterdir()] == ["archivo.bin"]
 
 
+def _descriptores_hacia(carpeta: Path) -> list:
+    """Adónde apuntan los descriptores de este proceso que están abiertos
+    sobre algo dentro de `carpeta` (un temporal borrado sigue apareciendo,
+    con " (deleted)" al final).
+
+    No sirve contar TODOS los de `/proc/self/fd`: en la suite hay hilos
+    nativos de GLib y Pango que abren y cierran descriptores por su cuenta
+    (ver `test_el_chequeo_de_descriptores_no_se_confunde_con_los_ajenos`)."""
+    adentro = []
+    for fd in os.listdir("/proc/self/fd"):
+        try:
+            destino = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:
+            continue
+        if destino.startswith(str(carpeta) + os.sep):
+            adentro.append(destino)
+    return adentro
+
+
 def test_stream_cierra_el_descriptor_aunque_el_bloque_falle(tmp_path):
     """El descriptor lo entrega `mkstemp` y queda a cargo del `with`: si
     el bloque revienta -por ejemplo al no poder abrir el origen de una
     copia- no puede quedar filtrado."""
     dest = tmp_path / "archivo.bin"
-    antes = len(os.listdir("/proc/self/fd"))
 
     for _ in range(50):
         with pytest.raises(FileNotFoundError):
             with atomicfs.atomic_write_stream(dest) as (_f, _tmp):
                 open(tmp_path / "no-existe.bin", "rb")
 
-    assert len(os.listdir("/proc/self/fd")) == antes
+    assert _descriptores_hacia(tmp_path) == []
     assert list(tmp_path.iterdir()) == []
+
+
+def test_el_chequeo_de_descriptores_no_se_confunde_con_los_ajenos(tmp_path, monkeypatch):
+    """Reproduce la falla del 2026-10-25 ("assert 19 == 20"). El fixture
+    autouse `sin_widgets_fuera_de_gui` del conftest importa GTK en el
+    primer test de la sesión, y con eso arrancan hilos nativos de GLib y
+    Pango: `[pango] fontcon` recorre las carpetas de fuentes y fontconfig
+    lee `/usr/share/fontconfig/conf.avail`, abriendo y cerrando
+    descriptores mientras corren los primeros tests -y este archivo es el
+    primero de la suite-. Acá unos descriptores ajenos se cierran durante
+    el bucle, que es lo que hace ese hilo; el código probado no filtró
+    nada. Son cinco y no uno para que el ruido de ese mismo hilo (uno o
+    dos descriptores) no alcance a compensarlo."""
+    ajenos = [os.open(os.devnull, os.O_RDONLY) for _ in range(5)]
+    real = atomicfs.atomic_write_stream
+
+    @contextlib.contextmanager
+    def _mientras_otro_hilo_cierra_lo_suyo(*a, **kw):
+        while ajenos:
+            os.close(ajenos.pop())
+        with real(*a, **kw) as abierto:
+            yield abierto
+
+    monkeypatch.setattr(atomicfs, "atomic_write_stream", _mientras_otro_hilo_cierra_lo_suyo)
+    try:
+        test_stream_cierra_el_descriptor_aunque_el_bloque_falle(tmp_path)
+        # Que de verdad se cerraron mientras corría el bucle.
+        assert ajenos == []
+    finally:
+        for fd in ajenos:
+            os.close(fd)
+
+
+def test_el_chequeo_de_descriptores_ve_uno_filtrado(tmp_path, monkeypatch):
+    """Y sigue viendo lo que tiene que ver: un descriptor que queda abierto
+    sobre un archivo de la carpeta del destino. El archivo se borra, como
+    el temporal de `mkstemp` al limpiar: la carpeta queda vacía y lo único
+    que lo delata es el descriptor."""
+    filtrados = []
+    real = atomicfs.atomic_write_stream
+
+    @contextlib.contextmanager
+    def _que_filtra(dest, *a, **kw):
+        filtrado = Path(dest).parent / f".filtrado-{len(filtrados)}"
+        filtrados.append(os.open(filtrado, os.O_CREAT | os.O_WRONLY, 0o600))
+        filtrado.unlink()
+        with real(dest, *a, **kw) as abierto:
+            yield abierto
+
+    monkeypatch.setattr(atomicfs, "atomic_write_stream", _que_filtra)
+    try:
+        with pytest.raises(AssertionError):
+            test_stream_cierra_el_descriptor_aunque_el_bloque_falle(tmp_path)
+    finally:
+        for fd in filtrados:
+            os.close(fd)
 
 
 def test_stream_con_fsync_baja_a_disco_antes_de_intercambiar(tmp_path, monkeypatch):
