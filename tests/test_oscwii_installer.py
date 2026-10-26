@@ -264,7 +264,9 @@ def test_validate_zip_rechaza_la_misma_ruta_dos_veces(tmp_path):
     zip_path = tmp_path / "duplicada.zip"
     with zipfile.ZipFile(zip_path, "w") as zf:
         zf.writestr("apps/Foo/boot.dol", dol(b"bueno"))
-        zf.writestr("apps/Foo/boot.dol", dol(b"malicioso"))
+        # zipfile avisa del nombre repetido: es justo el ZIP que se quiere.
+        with pytest.warns(UserWarning, match="Duplicate name: 'apps/Foo/boot.dol'"):
+            zf.writestr("apps/Foo/boot.dol", dol(b"malicioso"))
 
     dest_root = tmp_path / "usb"
     (dest_root / "apps").mkdir(parents=True)
