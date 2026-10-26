@@ -1461,6 +1461,11 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
 
 
 # ------------------------------------------------- Desde una carpeta --
+# El slug de lo que se instala desde una carpeta (`install_local_folder`):
+# "local:<carpeta>". Ninguno del catálogo lleva ":" (ver `safe_slug`).
+PREFIJO_LOCAL = "local:"
+
+
 class _CarpetaRechazada(Exception):
     """Interna: la carpeta elegida no se instala (`InstallStatus.BAD_FOLDER`).
     El mensaje dice por qué."""
@@ -1625,13 +1630,14 @@ def install_local_folder(carpeta: Path, dest_root: Path, *,
     que `install_app` (`_instalar_zip`): la misma validación, el mismo
     aviso, el espacio, la transacción y lo del cliente que se conserva. El
     aviso sale siempre, aunque todo vaya a `apps/`: lo que se instala no
-    viene del catálogo. El slug del resultado es "local:<carpeta>", que no
-    choca con ninguno del catálogo; las configuraciones maestras, atadas a
-    las apps del catálogo, no se aplican.
+    viene del catálogo. El slug del resultado es "local:<carpeta>"
+    (`PREFIJO_LOCAL`), que no choca con ninguno del catálogo; las
+    configuraciones maestras, atadas a las apps del catálogo, no se
+    aplican.
 
     Igual que `install_app`, nunca lanza."""
     carpeta = Path(carpeta)
-    slug = f"local:{carpeta.name}"
+    slug = PREFIJO_LOCAL + carpeta.name
     era_montaje = drives.is_mount_point(dest_root)
     try:
         dest_root = Path(dest_root)

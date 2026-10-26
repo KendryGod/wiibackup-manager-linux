@@ -101,6 +101,7 @@ _INSTALL_STATUS_LABELS = {
     InstallStatus.BAD_ZIP: _("El archivo descargado está dañado"),
     InstallStatus.BAD_CONTENT: _("El paquete trae un archivo dañado"),
     InstallStatus.UNSAFE_ZIP: _("El paquete no es seguro para instalar"),
+    InstallStatus.BAD_FOLDER: _("La carpeta no se puede instalar"),
     InstallStatus.UNSAFE_URL: _("La descarga apuntaba a un sitio no autorizado"),
     InstallStatus.UNSAFE_DEST_ROOT: _("El destino elegido no es válido"),
     InstallStatus.NO_SPACE: _("No hay espacio suficiente en el destino"),
@@ -215,9 +216,12 @@ YAWM_SLUG = "yawmME"
 
 def _yawm_a_ofrecer(aviso, catalogo: dict, dest_root: Path) -> Optional[HomebrewApp]:
     """YAWM, si hay que ofrecerlo: el paquete deja un WAD en /wad/, YAWM
-    está en el catálogo y la unidad no lo tiene ya. Si no, None."""
+    está en el catálogo, y ni la unidad ni lo que se instala (una carpeta
+    de esta PC con `apps/yawmME/`) lo tienen ya. Si no, None."""
     yawm = catalogo.get(YAWM_SLUG)
     if not aviso.wads or yawm is None:
+        return None
+    if any(r.rstrip("/").lower() == f"apps/{YAWM_SLUG.lower()}" for r in aviso.reemplaza):
         return None
     try:
         with os.scandir(Path(dest_root) / "apps") as entradas:
@@ -226,6 +230,21 @@ def _yawm_a_ofrecer(aviso, catalogo: dict, dest_root: Path) -> Optional[Homebrew
     except OSError:
         pass
     return yawm
+
+
+def _es_local(app: HomebrewApp) -> bool:
+    """Si `app` es una carpeta de esta PC (ver `_on_local_folder_picked`)."""
+    return app.slug.startswith(oscwii_installer.PREFIJO_LOCAL)
+
+
+def _texto_de_la_franja(nombre: str, progress) -> str:
+    """Lo que dice la franja mientras se instala una carpeta de esta PC."""
+    if progress.phase == "prepare":
+        return _("Preparando «{name}»… {done} de {total} archivos").format(
+            name=nombre, done=progress.done, total=progress.total)
+    return _("Instalando «{name}»… {done} de {total} archivos ({pct}%)").format(
+        name=nombre, done=progress.done, total=progress.total,
+        pct=int((progress.fraction or 0) * 100))
 
 
 # Lo que cada botón del aviso le contesta a `install_app` (ver su
@@ -394,6 +413,9 @@ class HomebrewStoreView(Gtk.Box):
         self._install_states: dict = {}
         # El catálogo cargado, por slug (para ofrecer YAWM: `_yawm_a_ofrecer`).
         self._apps_por_slug: dict = {}
+        # Lo que se está instalando desde una carpeta de esta PC, si hay algo
+        # (ver `_on_local_folder_picked`).
+        self._app_local: Optional[HomebrewApp] = None
 
         self._build_ui()
         self._refresh_dest_choices()
@@ -404,6 +426,13 @@ class HomebrewStoreView(Gtk.Box):
     def _build_ui(self):
         self.stale_banner = Adw.Banner(revealed=False)
         self.append(self.stale_banner)
+        # Lo que se instala desde una carpeta de esta PC no tiene tarjeta en
+        # el catálogo: su progreso va en esta franja (ver `_pintar_franja`).
+        # Sin markup: el título lleva el nombre de la carpeta.
+        self.local_banner = Adw.Banner(revealed=False, use_markup=False,
+                                       button_label=_("Cancelar"))
+        self.local_banner.connect("button-clicked", self._on_cancelar_local)
+        self.append(self.local_banner)
 
         # --- Destino ---
         dest_group = Adw.PreferencesGroup(
@@ -432,6 +461,15 @@ class HomebrewStoreView(Gtk.Box):
         folder_btn = Gtk.Button(label=_("Elegir carpeta…"))
         folder_btn.connect("clicked", self._on_pick_folder)
         dest_buttons.append(folder_btn)
+        # Elige lo que se instala, no el destino: va aparte, a la derecha.
+        dest_buttons.append(Gtk.Box(hexpand=True))
+        self.local_btn = Gtk.Button(label=_("Instalar desde una carpeta de esta PC…"))
+        self.local_btn.set_tooltip_text(_(
+            "Una app que no está en la tienda (su carpeta, con el boot.dol) o una "
+            "carpeta armada como la raíz de una SD (con apps/). Antes de escribir "
+            "se revisa entera y se muestra dónde va cada cosa."))
+        self.local_btn.connect("clicked", self._on_pick_local_folder)
+        dest_buttons.append(self.local_btn)
         self.append(dest_buttons)
 
         self.append(Gtk.Separator())
@@ -588,6 +626,31 @@ class HomebrewStoreView(Gtk.Box):
         self._manual_path = path
         self._refresh_dest_choices()
 
+    def _on_pick_local_folder(self, *_a):
+        if self._dest_path is None:
+            self._show_toast(_("Elegí primero un destino antes de instalar."))
+            return
+        dialog = Gtk.FileDialog(title=_("Elegí la carpeta a instalar"))
+        dialog.set_initial_folder(gtk_helpers.safe_initial_folder())
+        dialog.select_folder(self.get_root(), None, self._on_local_folder_picked)
+
+    def _on_local_folder_picked(self, dialog, result):
+        try:
+            folder = dialog.select_folder_finish(result)
+        except Exception:
+            return
+        if not folder:
+            return
+        path = gtk_helpers.local_path(folder)
+        if path is None:
+            self._show_toast(gtk_helpers.no_local_path_message())
+            return
+        # Sin tarjeta ni catálogo detrás: la app es solo el nombre de la
+        # carpeta, con un slug que no choca con ninguno del catálogo.
+        nombre = path.name or str(path)
+        self._start_install(HomebrewApp(slug=oscwii_installer.PREFIJO_LOCAL + nombre,
+                                        name=nombre), carpeta=path)
+
     # ----------------------------------------------------------- Catálogo --
     def _load_apps(self):
         self.state_stack.set_visible_child_name("loading")
@@ -729,9 +792,13 @@ class HomebrewStoreView(Gtk.Box):
             return
         self._start_install(app)
 
-    def _start_install(self, app: HomebrewApp, dest_root: Optional[Path] = None):
+    def _start_install(self, app: HomebrewApp, dest_root: Optional[Path] = None,
+                       carpeta: Optional[Path] = None):
         """Instala `app` en el destino elegido, o en `dest_root` si se pasa
-        (YAWM va al mismo destino que la app que dejó el WAD)."""
+        (YAWM va al mismo destino que la app que dejó el WAD). Con `carpeta`,
+        lo que se instala es esa carpeta de esta PC
+        (`oscwii_installer.install_local_folder`) y `app` solo le pone el
+        nombre (ver `_on_local_folder_picked`)."""
         if dest_root is None:
             if self._dest_path is None:
                 self._show_toast(_("Elegí primero un destino antes de instalar."))
@@ -741,7 +808,9 @@ class HomebrewStoreView(Gtk.Box):
         try:
             op = self.ops.start(
                 OperationKind.INSTALLING_HOMEBREW,
-                write=[dest_root / "apps" / app.slug],
+                # Lo de una carpeta puede ir a cualquier carpeta permitida de
+                # la unidad, no solo a `apps/<slug>`.
+                write=[dest_root if carpeta is not None else dest_root / "apps" / app.slug],
                 resources=drives.resources_for_mount_point(dest_root),
             )
         except OperationBusy as e:
@@ -755,6 +824,11 @@ class HomebrewStoreView(Gtk.Box):
         card = self._card_by_slug.get(app.slug)
         if card is not None:
             self._apply_install_state(card, state)
+        if carpeta is not None:
+            self._app_local = app
+            self.local_btn.set_sensitive(False)
+            self.local_banner.set_button_label(_("Cancelar"))
+            self._pintar_franja(app, _("Preparando «{name}»…").format(name=app.name))
 
         def on_progress(progress):
             GLib.idle_add(self._on_install_progress, app, progress)
@@ -766,6 +840,13 @@ class HomebrewStoreView(Gtk.Box):
                 cancel_event)
 
         def worker():
+            if carpeta is not None:
+                # Sin configuración maestra: van atadas a las apps del catálogo.
+                result = oscwii_installer.install_local_folder(
+                    carpeta, dest_root, cancel_event=cancel_event,
+                    on_progress=on_progress, confirmar=confirmar)
+                GLib.idle_add(self._on_install_done, app, result, op, None)
+                return
             result = oscwii_installer.install_app(
                 app, dest_root, cancel_event=cancel_event, on_progress=on_progress,
                 confirmar=confirmar)
@@ -790,6 +871,9 @@ class HomebrewStoreView(Gtk.Box):
             card = self._card_by_slug.get(app.slug)
             if card is not None and gtk_helpers.widget_is_alive(card) and card.app is app:
                 self._apply_install_state(card, state)
+        if _es_local(app):
+            self._pintar_franja(app, _("«{name}»: esperando tu confirmación…")
+                                .format(name=app.name))
         ofrecer = None
         yawm = _yawm_a_ofrecer(aviso, self._apps_por_slug, dest_root)
         if yawm is not None and state is not None:
@@ -824,6 +908,8 @@ class HomebrewStoreView(Gtk.Box):
         else:
             state.message = (_("Descargando…") if progress.phase == "download"
                              else _("Extrayendo…"))
+        if _es_local(app):
+            self._pintar_franja(app, _texto_de_la_franja(app.name, progress))
 
         card = self._card_by_slug.get(app.slug)
         if card is not None and gtk_helpers.widget_is_alive(card) and card.app is app:
@@ -911,9 +997,34 @@ class HomebrewStoreView(Gtk.Box):
         card = self._card_by_slug.get(app.slug)
         if card is not None and gtk_helpers.widget_is_alive(card) and card.app is app:
             self._apply_install_state(card, state)
+        if _es_local(app):
+            self._app_local = None
+            self.local_banner.set_revealed(False)
+            self.local_btn.set_sensitive(True)
         if result.ok and yawm is not None:
             self._start_install(*yawm)
         return False
+
+    def _pintar_franja(self, app: HomebrewApp, texto: str) -> None:
+        """La franja de arriba, para lo que se instala desde una carpeta de
+        esta PC (no tiene tarjeta). Después de Cancelar sigue diciendo
+        "Cancelando…" hasta que termina."""
+        state = self._install_states.get(app.slug)
+        if state is not None and state.cancel_event is not None and state.cancel_event.is_set():
+            return
+        self.local_banner.set_title(texto)
+        self.local_banner.set_revealed(True)
+
+    def _on_cancelar_local(self, *_a):
+        app = self._app_local
+        state = self._install_states.get(app.slug) if app is not None else None
+        if state is None or state.cancel_event is None:
+            return
+        # Lo que queda lo dice el hilo de instalación al notar el
+        # `cancel_event`, como con la tarjeta (`_on_card_action_clicked`).
+        state.cancel_event.set()
+        self.local_banner.set_title(_("Cancelando «{name}»…").format(name=app.name))
+        self.local_banner.set_button_label("")
 
     # ------------------------------------------------------------- Cierre --
     def shutdown(self):
