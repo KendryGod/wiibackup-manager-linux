@@ -485,15 +485,33 @@ a la unidad: el `GXGlobal.cfg` de USB Loader GX lleva la marca
 (solo la firma y la versión; con él, Nintendont no leería los puertos de
 control de GameCube). Las dos apps arrancan con su configuración de
 fábrica, y en el historial queda una nota. Para usar una configuración
-maestra de verdad, reemplazá el archivo por uno que haya guardado la
-propia app: se copia solo a una unidad que no tenga el suyo, y uno que ya
-esté en la unidad no se pisa nunca.
+maestra de verdad, elegí en **Preferencias → Homebrew Store → Carpeta de
+configuraciones maestras** una carpeta con los archivos que haya guardado
+la propia app, con la misma estructura (`nintendont/nincfg.bin`,
+`usbloadergx/GXGlobal.cfg`): la tienda los busca ahí primero, y un
+archivo de relleno en esa carpeta no cuenta. Se copian solo a una unidad
+que no tenga el suyo, y uno que ya esté en la unidad no se pisa nunca. A
+lo que se instala desde una carpeta de esta PC no se le aplican.
 
 **Perfiles de mandos de Nintendont.** Reinstalar o actualizar Nintendont
 desde la Homebrew Store vuelve a escribir los `controllers/*.ini` que
 trae su ZIP: si el cliente había ajustado el perfil de alguno de esos
 mandos, ese ajuste se pierde. Los perfiles de los demás mandos no se
 tocan.
+
+**Instalar desde una carpeta de esta PC.** La carpeta se rechaza entera
+si trae algo que un paquete de Open Shop Channel tampoco puede traer: por
+ejemplo un `nincfg.bin`, una carpeta `wbfs/` o un `.DS_Store` en la
+raíz. El mensaje dice qué archivo fue: sacalo de la carpeta y volvé a
+probar.
+
+**Paquetes grandes en FAT32.** Instalar uno con miles de archivos tarda
+minutos. En una FAT32 montada como la monta el escritorio (udisks, con la
+opción `flush`), cerrar cada archivo escrito cuesta unos 100 ms:
+cavestory, con 4728 archivos, tardó 8 min 15 s en una imagen FAT32
+montada así, y archivos sueltos escritos sin la app cuestan lo mismo
+cada uno. Antes de instalar un paquete de más de 1000 archivos, la tienda
+avisa que puede tardar varios minutos.
 
 **Tarjetas SD en el lector integrado de la computadora.** Modo Fábrica no
 lista las SD que están en un lector integrado, como el Realtek PCIe de
@@ -503,6 +521,16 @@ a esos lectores. **Para preparar una SD, usá un lector USB.** En el lector
 integrado la SD aparece igual en Transferir, la Homebrew Store y Verificar
 Memoria, pero el Recovery Manager no la revisa al arrancar y después de
 verificarla no se ofrece "Formatear".
+
+**Tarjetas SD de 64 GB o más en la Wii.** Son SDXC, y la ranura SD de la
+Wii está pensada para SDHC (hasta 32 GB). Una SDXC formateada en FAT32
+puede andar en la ranura de la consola, pero no está garantizado, y no se
+probó.
+
+**Verificar Memoria en unidades grandes.** Tarda: la propia página estima
+alrededor de una hora por cada 30 GB, así que una de 256 GB lleva unas
+8,5 horas. Es esa estimación, no una medición: una verificación completa
+de 256 GB no se corrió.
 
 ## Reportar un error o pedir una función
 
