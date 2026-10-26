@@ -188,6 +188,10 @@ Si el último comando imprime una versión, quedó instalado. Si da error
 404 al descargar, entrá a [wit.wiimm.de](https://wit.wiimm.de/) y fijate
 cuál es la versión actual para cambiarla en el comando.
 
+Si preferís no instalarlo en el sistema (por ejemplo, dejarlo en una
+carpeta de tu usuario), elegí el archivo `wit` en **Preferencias → Motor
+de conversión**: la app comprueba que conteste como `wit` antes de usarlo.
+
 ### 3. Bajar e instalar la app
 
 ```bash

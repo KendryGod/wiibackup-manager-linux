@@ -9,7 +9,7 @@ msgstr ""
 "Project-Id-Version: WiiBackup Manager\n"
 "Report-Msgid-Bugs-To: https://github.com/KendryGod/wiibackup-manager-linux/"
 "issues\n"
-"POT-Creation-Date: 2026-10-25 21:50-0600\n"
+"POT-Creation-Date: 2026-10-25 21:55-0600\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -1927,72 +1927,100 @@ msgstr ""
 msgid "No se pudo formatear: {error}"
 msgstr ""
 
-#: wiibackup_manager/widgets/preferences_dialog.py:21
-#: wiibackup_manager/window.py:322
-msgid "Preferencias"
-msgstr ""
-
-#: wiibackup_manager/widgets/preferences_dialog.py:26
-msgid "Biblioteca"
-msgstr ""
-
+#: wiibackup_manager/widgets/preferences_dialog.py:24
+#: wiibackup_manager/widgets/preferences_dialog.py:28
 #: wiibackup_manager/widgets/preferences_dialog.py:29
-msgid "Carpeta de la biblioteca"
-msgstr ""
-
-#: wiibackup_manager/widgets/preferences_dialog.py:37
-msgid "Unidad/carpeta WBFS (USB Loader)"
-msgstr ""
-
-#: wiibackup_manager/widgets/preferences_dialog.py:39
-msgid "No configurada"
-msgstr ""
-
-#: wiibackup_manager/widgets/preferences_dialog.py:45
-msgid "Motor de conversión"
-msgstr ""
-
-#: wiibackup_manager/widgets/preferences_dialog.py:48
-msgid "detectado ✓"
-msgstr ""
-
-#: wiibackup_manager/widgets/preferences_dialog.py:49
-msgid "no encontrado ✗"
-msgstr ""
-
-#: wiibackup_manager/widgets/preferences_dialog.py:51
 #, python-brace-format
 msgid "Estado: {status}"
 msgstr ""
 
+#: wiibackup_manager/widgets/preferences_dialog.py:24
+msgid "detectado ✓"
+msgstr ""
+
+#: wiibackup_manager/widgets/preferences_dialog.py:25
+#, python-brace-format
+msgid "{version} en {path}"
+msgstr ""
+
+#: wiibackup_manager/widgets/preferences_dialog.py:28
+msgid "no es `wit` ✗"
+msgstr ""
+
+#: wiibackup_manager/widgets/preferences_dialog.py:29
+msgid "no encontrado ✗"
+msgstr ""
+
+#: wiibackup_manager/widgets/preferences_dialog.py:38
+#: wiibackup_manager/window.py:322
+msgid "Preferencias"
+msgstr ""
+
+#: wiibackup_manager/widgets/preferences_dialog.py:43
+msgid "Biblioteca"
+msgstr ""
+
+#: wiibackup_manager/widgets/preferences_dialog.py:46
+msgid "Carpeta de la biblioteca"
+msgstr ""
+
 #: wiibackup_manager/widgets/preferences_dialog.py:54
-msgid "Carátulas"
+msgid "Unidad/carpeta WBFS (USB Loader)"
 msgstr ""
 
 #: wiibackup_manager/widgets/preferences_dialog.py:56
-msgid "Región preferida"
+msgid "No configurada"
 msgstr ""
 
-#: wiibackup_manager/widgets/preferences_dialog.py:69
-msgid "Apariencia"
+#: wiibackup_manager/widgets/preferences_dialog.py:62
+msgid "Motor de conversión"
 msgstr ""
 
 #: wiibackup_manager/widgets/preferences_dialog.py:72
+msgid "Elegir el programa `wit`"
+msgstr ""
+
+#: wiibackup_manager/widgets/preferences_dialog.py:76
+msgid "Volver a buscar `wit` en el sistema"
+msgstr ""
+
+#: wiibackup_manager/widgets/preferences_dialog.py:83
+msgid "Carátulas"
+msgstr ""
+
+#: wiibackup_manager/widgets/preferences_dialog.py:85
+msgid "Región preferida"
+msgstr ""
+
+#: wiibackup_manager/widgets/preferences_dialog.py:98
+msgid "Apariencia"
+msgstr ""
+
+#: wiibackup_manager/widgets/preferences_dialog.py:101
 msgid "Tema"
 msgstr ""
 
-#: wiibackup_manager/widgets/preferences_dialog.py:74
+#: wiibackup_manager/widgets/preferences_dialog.py:103
 msgid ""
 "Solo tiene efecto con el tema estándar; un tema GTK de terceros manda sobre "
 "esto."
 msgstr ""
 
-#: wiibackup_manager/widgets/preferences_dialog.py:98
+#: wiibackup_manager/widgets/preferences_dialog.py:127
 msgid "Elegí la carpeta de tu biblioteca"
 msgstr ""
 
-#: wiibackup_manager/widgets/preferences_dialog.py:115
+#: wiibackup_manager/widgets/preferences_dialog.py:144
 msgid "Elegí la carpeta/unidad WBFS"
+msgstr ""
+
+#: wiibackup_manager/widgets/preferences_dialog.py:161
+msgid "Elegí el programa `wit`"
+msgstr ""
+
+#: wiibackup_manager/widgets/preferences_dialog.py:184
+#, python-brace-format
+msgid "{path} no es `wit` (Wiimms ISO Tools): no se cambió nada."
 msgstr ""
 
 #: wiibackup_manager/widgets/recovery_dialog.py:62
@@ -3831,31 +3859,31 @@ msgstr ""
 msgid "Cancelando antes de cerrar…"
 msgstr ""
 
-#: wiibackup_manager/wit_wrapper.py:429
+#: wiibackup_manager/wit_wrapper.py:453
 #, python-brace-format
 msgid ""
 "`wit` no respondió en {seconds:.0f}s: se lo dio por colgado y se canceló la "
 "operación."
 msgstr ""
 
-#: wiibackup_manager/wit_wrapper.py:865
+#: wiibackup_manager/wit_wrapper.py:889
 #, python-brace-format
 msgid ""
 "`wit` no escribió un solo byte en {minutes:.0f} minutos: se lo dio por "
 "colgado y se canceló la operación."
 msgstr ""
 
-#: wiibackup_manager/wit_wrapper.py:872
+#: wiibackup_manager/wit_wrapper.py:896
 #, python-brace-format
 msgid ""
 "`wit` lleva más de {hours:.0f} horas sin terminar: se canceló la operación."
 msgstr ""
 
-#: wiibackup_manager/wit_wrapper.py:1144 wiibackup_manager/wit_wrapper.py:1248
+#: wiibackup_manager/wit_wrapper.py:1168 wiibackup_manager/wit_wrapper.py:1272
 msgid "Operación cancelada antes de arrancar `wit`."
 msgstr ""
 
-#: wiibackup_manager/wit_wrapper.py:1153
+#: wiibackup_manager/wit_wrapper.py:1177
 #, python-brace-format
 msgid ""
 "No se convirtió: `wit` le cambiaría el nombre al archivo (espacios dobles o "
@@ -3863,6 +3891,6 @@ msgid ""
 "de nuevo."
 msgstr ""
 
-#: wiibackup_manager/wit_wrapper.py:1266 wiibackup_manager/wit_wrapper.py:1289
+#: wiibackup_manager/wit_wrapper.py:1290 wiibackup_manager/wit_wrapper.py:1313
 msgid "Operación cancelada por el usuario."
 msgstr ""

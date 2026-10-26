@@ -404,6 +404,30 @@ def is_available(binary_name: str = "wit") -> bool:
     return find_wit(binary_name) is not None
 
 
+# Lo que contesta `wit --version`: "wit: Wiimms ISO Tool v3.05a r8638 x86_64
+# - Dirk Clemens - 2026-08-14".
+_WIT_VERSION_RE = re.compile(r"Wiimms ISO Tools? (v\S+(?: r\d+)?)")
+
+
+def wit_version(binary_name: str = "wit", timeout: float = 3.0) -> Optional[str]:
+    """La versión de `binary_name` ("v3.05a r8638") si se puede ejecutar y
+    contesta como `wit`, o None.
+
+    Es lo que se mira antes de guardar la ruta que se elige en Preferencias:
+    un archivo cualquiera, uno sin permiso de ejecución o un programa que no
+    es `wit` dan None. Con `timeout`, uno que se cuelga tampoco traba."""
+    ruta = find_wit(binary_name) if binary_name else None
+    if ruta is None:
+        return None
+    try:
+        r = subprocess.run([ruta, "--version"], capture_output=True, text=True,
+                           timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = _WIT_VERSION_RE.search(r.stdout + r.stderr)
+    return m.group(1) if m else None
+
+
 def _run(
     binary: str, *args: str, timeout: Optional[float] = DEFAULT_WIT_TIMEOUT
 ) -> subprocess.CompletedProcess:
