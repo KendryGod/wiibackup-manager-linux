@@ -77,16 +77,21 @@ todo lo que hizo.
   entregar el equipo. Lleva la marca de tu taller (nombre, eslogan, logo,
   color y WhatsApp con código QR), que se carga en **Ajustes → General → Mi
   taller**; tiene un modo oscuro con la marca y uno claro para imprimir
-- **Verificación después de copiar** (opcional, apagada por defecto): al
-  terminar cada juego lo vuelve a leer de la unidad con `wit VERIFY` para
-  confirmar que lo que quedó escrito está bien, y no solo que la copia
-  terminó sin dar error -que es lo que se ve cuando el pendrive falla en
-  silencio. Un juego que se copia entero pero no pasa la verificación
-  queda marcado aparte de un error de copia: son dos problemas distintos,
-  y este deja un archivo que ocupa lugar y no anda en la consola. Se
-  prende en Ajustes; cuesta tiempo real (relee todo lo que acaba de
-  escribir) y solo aplica a juegos de Wii, porque `wit VERIFY` no acepta
-  imágenes de GameCube
+- **Verificación después de copiar**: al terminar cada juego lo vuelve a
+  leer de la unidad para confirmar que lo que quedó escrito está bien, y
+  no solo que la copia terminó sin dar error -que es lo que se ve cuando
+  el pendrive falla en silencio. Un juego que se copia entero pero no
+  pasa la verificación queda marcado aparte de un error de copia: son dos
+  problemas distintos, y este deja un archivo que ocupa lugar y no anda
+  en la consola. Cuesta tiempo real, porque relee todo lo que acaba de
+  escribir. Cada consola tiene su interruptor en **Ajustes → General →
+  Transferencias**:
+  - **Wii**, "Verificar después de copiar" (apagado por defecto): lo
+    revisa con `wit VERIFY`.
+  - **GameCube**, "Verificar copias de GameCube (más lento)" (prendido por
+    defecto): compara el SHA-1 de lo que quedó en la unidad con el del
+    original, que se calcula mientras se copia, y lo deja en el
+    historial. `wit VERIFY` no acepta imágenes de GameCube
 
 **Verificar memoria**
 
