@@ -40,7 +40,9 @@ de aplicarla desde la interfaz.
 """
 from __future__ import annotations
 
+import hashlib
 import itertools
+import os
 import sys
 import threading
 import time
@@ -71,7 +73,9 @@ class JobStatus(Enum):
 
     PENDING = N_("Pendiente")
     RUNNING = N_("Copiando")
-    # Releyendo lo que se acabó de escribir (ver `Settings.verify_after_copy`).
+    # Releyendo lo que se acabó de escribir: con `wit VERIFY` los de Wii (ver
+    # `Settings.verify_after_copy`) y comparando el SHA-1 con el del origen
+    # los de GameCube (`TransferJob.verify_gamecube`).
     # No es final: la copia ya terminó, pero la tarea todavía no tiene
     # veredicto.
     VERIFYING = N_("Verificando")
@@ -157,6 +161,13 @@ class TransferJob:
     # mismo motivo que `scrub_update`: apagar el switch a mitad de una
     # tanda no le cambia las reglas a lo que ya está en la fila.
     verify_after_copy: bool = False
+    # Verificar las copias de GameCube comparando el SHA-1 del origen con el
+    # de lo que quedó en la unidad (ver `_verify_gamecube_copy`), congelado
+    # al encolar igual que `verify_after_copy`.
+    verify_gamecube: bool = False
+    # El SHA-1 del origen, cuando se comparó: va al historial, no a la fila
+    # (es el que publica Redump para cada disco de GameCube).
+    verify_hash: str = ""
     # Qué pasó con la verificación, en una frase, cuando NO hubo veredicto
     # malo: que salió bien, que no aplica, o por qué no se pudo hacer. Va
     # aparte de `error_msg` a propósito -esto no es un error y no tiene que
@@ -242,7 +253,9 @@ _PROGRESS_INTERVAL = 0.1
 #   después se descarta de la caché para que VERIFY lea de la unidad y no
 #   de la RAM (ver `fileops.flush_and_drop_cache`). Sin esta fase ese resto
 #   se escribía DURANTE la verificación y el tiempo se cargaba ahí.
-# - "verify": `wit VERIFY` releyendo lo que quedó en la unidad.
+# - "verify": releer lo que quedó en la unidad: `wit VERIFY` en un juego de
+#   Wii, o calcular el SHA-1 y compararlo con el del origen en uno de
+#   GameCube (ver `TransferQueue._verify_gamecube_copy`).
 #
 # Sin verificación no hay `fsync`: el log anota igual cuánto quedaba
 # pendiente al terminar la copia (ver `_pending_writeback_bytes`).
@@ -404,7 +417,8 @@ class TransferQueue:
     # ------------------------------------------------------------ Encolar --
     def add_jobs(self, items, dest_root, wit_binary: str = "wit",
                  overwrite: bool = False, scrub_update: bool = True,
-                 verify_after_copy: bool = False) -> list[TransferJob]:
+                 verify_after_copy: bool = False,
+                 verify_gamecube: bool = False) -> list[TransferJob]:
         """Encola juegos hacia `dest_root` y devuelve las tareas creadas.
 
         `items` puede ser una lista de `Game` o de `transfer_plan.TransferItem`.
@@ -430,6 +444,7 @@ class TransferQueue:
                 wit_binary=wit_binary, overwrite=overwrite,
                 output_bytes=output_bytes, scrub_update=scrub_update,
                 verify_after_copy=verify_after_copy,
+                verify_gamecube=verify_gamecube,
             )
             nuevos.append(job)
 
@@ -818,6 +833,12 @@ class TransferQueue:
         # montaje" significa algo; ver `drives.device_is_gone`.
         raiz_era_montaje = drives.is_mount_point(job.dest_root)
 
+        # GameCube se copia byte a byte (ver `library_ops._write_to_drive`):
+        # el SHA-1 del origen sale de la misma lectura de la copia, y después
+        # se compara con el de lo que quedó en la unidad.
+        sha1_origen = (hashlib.sha1()
+                       if job.game.console == "gc" and job.verify_gamecube else None)
+
         try:
             try:
                 dest = library_ops.send_to_wbfs_drive(
@@ -828,6 +849,7 @@ class TransferQueue:
                     scrub_update=job.scrub_update,
                     flush_progress_cb=on_flush,
                     op_log=self.ops.log,
+                    source_digest=sha1_origen,
                 )
             finally:
                 # Antes que los `except` de abajo, que ya cierran la tarea:
@@ -897,7 +919,13 @@ class TransferQueue:
                                  oplog.STATUS_ERROR, op=op)
             return
 
-        if not job.verify_after_copy:
+        if sha1_origen is not None:
+            self._verify_gamecube_copy(job, dest, op, raiz_era_montaje,
+                                       sha1_origen.hexdigest())
+            return
+        # Un GameCube no pasa por `wit VERIFY` (solo acepta discos de Wii):
+        # se verifica con su propio switch, acá arriba.
+        if not job.verify_after_copy or job.game.console == "gc":
             self._finish_job(job, JobStatus.DONE, "", oplog.STATUS_OK, op=op)
             return
         self._verify_copy(job, dest, op, raiz_era_montaje)
@@ -917,16 +945,17 @@ class TransferQueue:
         Sale SIEMPRE por `_finish_job`: acá ya hay un archivo escrito en
         la unidad del cliente, así que ninguna rama puede terminar sin
         dejar dicho qué se sabe de él."""
-        if job.game.console == "gc" or self._dest_is_gamecube(job, dest):
+        if self._dest_is_gamecube(job, dest):
             # Comprobado contra `wit` v3.05a: VERIFY contesta
             # `WRONG FILE TYPE ... Wii ISO image expected` y sale con 4
             # ante una imagen de GameCube. Correrlo igual marcaría como
             # corrupto TODO juego de GameCube copiado, que es peor que no
-            # verificar: la única lectura honesta es decir que acá no hay
-            # nada que verificar. Y si el GameCube quedó dentro de un WBFS,
-            # VERIFY sale con 0 sin leer nada: un "verificado" falso. Por
-            # eso este filtro depende de que `console` venga del disco y no
-            # del prefijo del ID (ver `wit_wrapper.identify`).
+            # verificar. Los que la tarea ya sabe que son de GameCube no
+            # llegan acá (se comparan por SHA-1, ver `_copy`); este es el
+            # caso de un GameCube que la tarea creía de Wii y quedó dentro
+            # de un WBFS, donde VERIFY sale con 0 sin leer nada: un
+            # "verificado" falso. Y como `wit` convirtió el formato, no hay
+            # bytes iguales al origen con los que comparar.
             job.verify_note = _("sin verificar: `wit VERIFY` solo acepta "
                                 "imágenes de Wii")
             self._finish_job(job, JobStatus.DONE, "", oplog.STATUS_OK, op=op)
@@ -1010,6 +1039,84 @@ class TransferQueue:
                      partes).format(n=partes)
             if partes > 1 else _("verificado"))
         self._finish_job(job, JobStatus.DONE, "", oplog.STATUS_OK, op=op)
+
+    def _verify_gamecube_copy(self, job: TransferJob, dest: Path, op,
+                              raiz_era_montaje: bool, sha1_origen: str) -> None:
+        """Relee lo que quedó en la unidad y lo compara con el SHA-1 del
+        origen, que se calculó mientras se copiaba.
+
+        Igual que `_verify_copy`: corre dentro de la operación de la copia
+        y sale SIEMPRE por `_finish_job`. Antes de releer, la copia se baja
+        a la unidad y se saca de la caché (`_sync_copy`): si no, se leería
+        de la RAM lo mismo que se acaba de escribir, no lo que la unidad
+        guardó."""
+        if not self._sync_copy(job, [dest], op, raiz_era_montaje):
+            return
+        self._update(job, status=JobStatus.VERIFYING, progress=0.0,
+                     speed_text=_("Comparando con el original…"))
+        inicio = time.monotonic()
+        ultimo = [0.0]
+        total = [0]
+
+        def on_leidos(leidos: int) -> None:
+            ahora = time.monotonic()
+            if ahora - ultimo[0] < _PROGRESS_INTERVAL:
+                return
+            ultimo[0] = ahora
+            self._report_verify_progress(job, leidos, total[0], ahora, inicio)
+
+        try:
+            try:
+                total[0] = os.path.getsize(dest)
+                sha1_destino = fileops.hash_file(dest, "sha1", cancel=job.cancel_token,
+                                                 progress_cb=on_leidos)
+            finally:
+                self._end_phase(job, "verify", inicio)
+        except wit_wrapper.OperationCancelled:
+            # Como en `_verify_copy`: la copia ya estaba entera en la unidad;
+            # lo que se canceló es la relectura.
+            job.verify_note = _("verificación cancelada")
+            self._finish_job(job, JobStatus.DONE, "", oplog.STATUS_PARTIAL, op=op)
+            return
+        except OSError as e:
+            if drives.device_is_gone(
+                    mount_point=job.dest_root if raiz_era_montaje else None,
+                    known_dir=job.dest_root, exc=e):
+                self._finish_job(job, JobStatus.DEVICE_DISCONNECTED,
+                                 drives.disconnected_message(),
+                                 oplog.STATUS_DISCONNECTED, op=op)
+                return
+            # "No sé" no es "está mal" (ver `_verify_copy`).
+            job.verify_note = _("no se pudo verificar: {detail}").format(detail=e)
+            self._finish_job(job, JobStatus.DONE, "", oplog.STATUS_PARTIAL, op=op)
+            return
+
+        job.verify_hash = sha1_origen
+        if sha1_destino != sha1_origen:
+            self._finish_job(
+                job, JobStatus.CORRUPT,
+                _("Se copió entero, pero al releerlo no es igual al original: "
+                  "el SHA-1 no coincide."),
+                oplog.STATUS_PARTIAL, op=op)
+            return
+        job.verify_note = _("verificado: igual al original (SHA-1)")
+        self._finish_job(job, JobStatus.DONE, "", oplog.STATUS_OK, op=op)
+
+    def _report_verify_progress(self, job: TransferJob, leidos: int, total: int,
+                                ahora: float, desde: float) -> None:
+        """La barra y el texto mientras se relee: "45% · 25.1 MB/s · ~30s
+        restantes". La velocidad y el tiempo restante, recién después del
+        primer segundo, como en `_report_progress`."""
+        # Tope en 0.99, como en la copia: el veredicto todavía no está.
+        fraccion = min(leidos / (total or 1), 0.99)
+        texto = f"{int(fraccion * 100)}%"
+        transcurrido = ahora - desde
+        if transcurrido > 1 and leidos > 0:
+            velocidad = leidos / transcurrido
+            texto += " · " + _format_speed(velocidad)
+            texto += _(" · ~{eta} restantes").format(
+                eta=formatting.format_eta(max(total - leidos, 0) / velocidad))
+        self._update(job, progress=fraccion, speed_text=texto)
 
     @staticmethod
     def _dest_is_gamecube(job: TransferJob, dest: Path) -> bool:
@@ -1147,6 +1254,10 @@ class TransferQueue:
             # cosas, qué pasó con la copia y qué pasó con la relectura.
             if job.verify_note:
                 detalle = f"{detalle} · {job.verify_note}"
+            # El SHA-1 del original solo en el historial: en la fila no le
+            # sirve a nadie, y acá permite comparar con el de Redump.
+            if job.verify_hash:
+                detalle = f"{detalle} · SHA-1 {job.verify_hash}"
             # Lo mismo con los tiempos por fase: ante una transferencia que
             # tardó de más, el historial tiene que poder decir dónde.
             if job.phase_times:

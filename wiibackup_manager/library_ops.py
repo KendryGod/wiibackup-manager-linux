@@ -644,6 +644,7 @@ def send_to_wbfs_drive(
     scrub_update: bool = True,
     flush_progress_cb: Optional[Callable[[], None]] = None,
     op_log=None,
+    source_digest=None,
 ) -> Path:
     """Copia `game` a la estructura estándar 'wbfs/<ID6>/<ID6>.wbfs' que
     reconocen los USB Loaders de Wii (USB Loader GX, CFG USB Loader, etc.)
@@ -699,7 +700,12 @@ def send_to_wbfs_drive(
 
     `op_log` es el historial donde queda constancia si un reemplazo
     cortado no pudo devolver el original a su nombre (ver
-    `DestinationGuard`)."""
+    `DestinationGuard`).
+
+    `source_digest` (un objeto de `hashlib`) recibe los bytes del origen en
+    la copia directa de GameCube, para comparar después con lo que quedó en
+    la unidad (ver `queue_manager`). En los caminos de Wii no se usa: `wit`
+    convierte el formato, así que origen y destino no son los mismos bytes."""
     if cancel is not None and cancel.cancelled:
         raise wit_wrapper.OperationCancelled("Transferencia cancelada por el usuario.")
 
@@ -719,7 +725,8 @@ def send_to_wbfs_drive(
     dest_dir.mkdir(parents=True, exist_ok=True)
     try:
         return _write_to_drive(game, dest, wit_binary, bytes_progress_cb,
-                               cancel, scrub_update, flush_progress_cb, op_log)
+                               cancel, scrub_update, flush_progress_cb, op_log,
+                               source_digest)
     except BaseException:
         # Cancelada o fallida: lo que la copia escribió ya lo limpiaron
         # `atomicfs` o `DestinationGuard`, y la carpeta del juego
@@ -734,7 +741,7 @@ def send_to_wbfs_drive(
 
 def _write_to_drive(game: Game, dest: Path, wit_binary: str,
                     bytes_progress_cb, cancel, scrub_update,
-                    flush_progress_cb, op_log=None) -> Path:
+                    flush_progress_cb, op_log=None, source_digest=None) -> Path:
     """El cuerpo de `send_to_wbfs_drive`, ya con la carpeta del juego
     creada: copia directa o conversión con `wit`, según el caso."""
     dest_dir = dest.parent
@@ -747,7 +754,8 @@ def _write_to_drive(game: Game, dest: Path, wit_binary: str,
         with DestinationGuard(dest, enabled=bool(gc_group(dest)),
                               op_log=op_log, group=gc_group) as guard:
             _copy_with_progress(game.path, dest,
-                                bytes_progress_cb or (lambda _n: None), cancel)
+                                bytes_progress_cb or (lambda _n: None), cancel,
+                                digest=source_digest)
             guard.commit()
         return dest
 

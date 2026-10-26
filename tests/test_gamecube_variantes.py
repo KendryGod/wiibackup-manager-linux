@@ -81,7 +81,7 @@ def test_si_la_copia_falla_la_variante_vieja_vuelve(usb, tmp_path, monkeypatch):
     raiz, carpeta = usb
     (carpeta / "game.ciso").write_bytes(b"viejo ciso")
 
-    def copia_que_falla(src, dest, cb, cancel=None):
+    def copia_que_falla(src, dest, cb, cancel=None, digest=None):
         raise OSError(errno.ENOSPC, "No space left on device")
 
     monkeypatch.setattr(library_ops, "_copy_with_progress", copia_que_falla)
@@ -113,9 +113,9 @@ def test_la_variante_vieja_se_borra_recien_con_lo_nuevo_en_disco(
     real = library_ops._copy_with_progress
     vistos = {}
 
-    def copia_espiada(src, dest, cb, cancel=None):
+    def copia_espiada(src, dest, cb, cancel=None, digest=None):
         vistos["durante"] = sorted(p.name for p in carpeta.iterdir())
-        real(src, dest, cb, cancel)
+        real(src, dest, cb, cancel, digest=digest)
         vistos["al_terminar"] = sorted(p.name for p in carpeta.iterdir())
 
     monkeypatch.setattr(library_ops, "_copy_with_progress", copia_espiada)
@@ -252,7 +252,7 @@ def test_con_otro_titulo_el_original_se_aparta_y_vuelve_si_falla(
     raiz, carpeta = usb_otro_titulo
     vistos = {}
 
-    def copia_que_falla(src, dest, cb, cancel=None):
+    def copia_que_falla(src, dest, cb, cancel=None, digest=None):
         vistos["durante"] = sorted(p.name for p in carpeta.iterdir())
         raise OSError(errno.ENOSPC, "No space left on device")
 

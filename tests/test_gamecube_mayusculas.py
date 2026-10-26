@@ -86,7 +86,7 @@ def test_si_la_copia_falla_vuelve_la_variante_en_mayusculas(usb, tmp_path, monke
     raiz, carpeta = usb
     (carpeta / "GAME.ISO").write_bytes(b"viejo")
 
-    def copia_que_falla(src, dest, cb, cancel=None):
+    def copia_que_falla(src, dest, cb, cancel=None, digest=None):
         raise OSError(errno.ENOSPC, "No space left on device")
 
     monkeypatch.setattr(library_ops, "_copy_with_progress", copia_que_falla)

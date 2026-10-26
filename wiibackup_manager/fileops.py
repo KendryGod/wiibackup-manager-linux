@@ -7,6 +7,7 @@ aporta el intercambio atómico que usan por dentro.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import time
@@ -92,6 +93,7 @@ def _copy_with_progress(
     dest: Path,
     progress_cb: Callable[[int], None],
     cancel: Optional["wit_wrapper.CancellationToken"] = None,
+    digest=None,
 ) -> None:
     """Igual que `shutil.copy2(src, dest)` (copia contenido + metadata),
     pero reportando cuánto lleva copiado cada ~1s vía `progress_cb`, algo
@@ -135,7 +137,11 @@ def _copy_with_progress(
     final, que no se puede interrumpir: cancelar no hacía nada y la copia
     terminaba como "Completado". Así, la cancelación se mira mientras la
     unidad trabaja, y un temporal cancelado se borra con lo que no llegó a
-    bajar todavía descartado de la caché en vez de escrito."""
+    bajar todavía descartado de la caché en vez de escrito.
+
+    `digest`, si se pasa (un objeto de `hashlib`), recibe cada bloque leído
+    del origen: el hash del origen sale de la misma lectura de la copia, sin
+    leerlo dos veces (ver la verificación de GameCube en `queue_manager`)."""
     def cortar_si_cancelaron() -> None:
         if cancel is not None and cancel.cancelled:
             raise wit_wrapper.OperationCancelled(
@@ -154,6 +160,8 @@ def _copy_with_progress(
                 buf = fsrc.read(_COPY_CHUNK_BYTES)
                 if not buf:
                     break
+                if digest is not None:
+                    digest.update(buf)
                 fdst.write(buf)
                 written += len(buf)
                 fdst.flush()
@@ -168,6 +176,35 @@ def _copy_with_progress(
         bajada.finish()
         cortar_si_cancelaron()
     progress_cb(written)
+
+
+def hash_file(path: Path, algoritmo: str = "sha1",
+              cancel: Optional["wit_wrapper.CancellationToken"] = None,
+              progress_cb: Optional[Callable[[int], None]] = None) -> str:
+    """El hash de `path` (en hexadecimal), leído de a bloques de
+    `_COPY_CHUNK_BYTES`.
+
+    Con `cancel`, se mira entre bloques y levanta `OperationCancelled`:
+    releer un juego entero de una unidad lenta son minutos. `progress_cb`
+    recibe lo leído hasta el momento después de cada bloque.
+
+    No saca nada de la caché: para que lo leído venga de la unidad y no de
+    la RAM, quien llama tiene que llamar antes a `flush_and_drop_cache`."""
+    h = hashlib.new(algoritmo)
+    leido = 0
+    with open(path, "rb") as f:
+        while True:
+            if cancel is not None and cancel.cancelled:
+                raise wit_wrapper.OperationCancelled(
+                    "Verificación cancelada por el usuario.")
+            buf = f.read(_COPY_CHUNK_BYTES)
+            if not buf:
+                break
+            h.update(buf)
+            leido += len(buf)
+            if progress_cb is not None:
+                progress_cb(leido)
+    return h.hexdigest()
 
 
 def copy_atomic(src: Path, dest: Path) -> None:

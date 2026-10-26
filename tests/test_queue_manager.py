@@ -690,8 +690,10 @@ def test_gamecube_no_se_verifica_porque_wit_verify_no_lo_acepta(
         make_game, tmp_path, monkeypatch):
     """Comprobado contra `wit` v3.05a: VERIFY contesta `WRONG FILE TYPE ...
     Wii ISO image expected` ante una imagen de GameCube. Correrlo igual
-    marcaría como corrupto todo juego de GameCube copiado, así que con el
-    switch prendido la cola ni lo intenta y lo deja dicho."""
+    marcaría como corrupto todo juego de GameCube copiado, así que el switch
+    de Wii ni lo intenta. Los de GameCube tienen su propio switch, que
+    compara el SHA-1 (ver `test_gamecube_verificado.py`); apagado, la copia
+    termina como cualquier otra sin verificar, sin nota."""
     monkeypatch.setattr(transfer_plan, "free_space", lambda path: 10 ** 12)
 
     def _no_deberia_llamarse(*_a, **_k):
@@ -705,12 +707,14 @@ def test_gamecube_no_se_verifica_porque_wit_verify_no_lo_acepta(
     dest_root = tmp_path / "dest"
     dest_root.mkdir()
     cola, log = _cola_con_log(tmp_path)
-    job = cola.add_jobs([juego], dest_root, verify_after_copy=True)[0]
+    job = cola.add_jobs([juego], dest_root, verify_after_copy=True,
+                        verify_gamecube=False)[0]
     esperar_final(job)
     cola.shutdown(wait=5)
 
     assert job.status is JobStatus.DONE, job.error_msg
-    assert "solo acepta" in job.verify_note
+    assert job.verify_note == ""
+    assert "verify" not in job.phase_times
     assert log.entries()[0].status == oplog.STATUS_OK
 
 
