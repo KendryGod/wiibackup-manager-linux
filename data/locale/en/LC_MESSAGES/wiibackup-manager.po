@@ -7,7 +7,7 @@ msgstr ""
 "Project-Id-Version: WiiBackup Manager\n"
 "Report-Msgid-Bugs-To: https://github.com/KendryGod/wiibackup-manager-linux/"
 "issues\n"
-"POT-Creation-Date: 2026-10-25 19:45-0600\n"
+"POT-Creation-Date: 2026-10-25 21:50-0600\n"
 "PO-Revision-Date: 2026-08-30 05:58-0600\n"
 "Last-Translator: GameFix SPS\n"
 "Language-Team: English\n"
@@ -16,6 +16,21 @@ msgstr ""
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+#: wiibackup_manager/app.py:35
+#, python-brace-format
+msgid ""
+"WiiBackup Manager necesita libadwaita {minima} o más nueva, y este sistema "
+"tiene la {actual}. Actualizá libadwaita (viene con GNOME 46 o más nuevo) y "
+"volvé a abrir la app."
+msgstr ""
+"WiiBackup Manager needs libadwaita {minima} or newer, and this system has "
+"{actual}. Update libadwaita (it comes with GNOME 46 or newer) and open the "
+"app again."
+
+#: wiibackup_manager/app.py:75
+msgid "No se puede abrir WiiBackup Manager"
+msgstr "WiiBackup Manager can't open"
 
 #: wiibackup_manager/disc_header.py:78
 msgid "Game ID inválido: {game_id!r} (se esperaban 6 caracteres A-Z/0-9)"

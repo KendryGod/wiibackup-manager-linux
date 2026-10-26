@@ -129,7 +129,8 @@ todo lo que hizo.
 ## Requisitos
 
 - **Linux con GNOME** (probado en Fedora; debería andar en cualquier
-  distribución con GTK4 y libadwaita)
+  distribución con GTK4 y libadwaita **1.5 o más nueva**, la de GNOME 46:
+  con una más vieja la app no abre y avisa por qué)
 - **Python 3.10 o más nuevo**
 - **`wit` (Wiimms ISO Tools)** — opcional pero muy recomendado. Sin `wit`
   la app abre y lista ISOs planas, pero no puede identificar WBFS/CISO/WDF
