@@ -603,6 +603,120 @@ wiibackup_manager/
 
 ## Changelog
 
+### 0.2.4
+
+32 commits desde la 0.2.3. La Homebrew Store instala ahora las apps que
+escriben fuera de `apps/`, deja los WAD en `/wad/` y puede instalar desde
+una carpeta de esta PC; las copias de GameCube se verifican por SHA-1, y
+hay arreglos para `wit` con espacios dobles, para Modo Fábrica y para la
+instalación.
+
+#### Homebrew Store
+
+- **Apps que escriben fuera de `apps/`.** Las 39 apps del catálogo que
+  traen algo fuera de `apps/` (WiiFlow, postloader, Homebrew Browser,
+  Super Mario War, OpenTTD, cavestory…) se rechazaban enteras; ahora se
+  instalan. Sus carpetas de datos (`smw/`, `mame/`, `WiiFlow/plugins/`…)
+  se fusionan con lo que hay: lo que no existe entra, lo que ya está igual
+  no se toca, un archivo del usuario con otro contenido se conserva salvo
+  que se elija reemplazarlo, uno de 0 bytes del paquete no reemplaza
+  nunca, y no se borra nada. La documentación suelta y la basura conocida
+  (`__MACOSX/`) no se copian. Todo entra en la misma transacción que la
+  app. Probado con las 39 apps reales: los 7060 archivos que quedan fuera
+  de `apps/` son iguales a los del ZIP, y reinstalarlas no cambia ninguno.
+- **Dónde va a escribir, antes de escribir.** Si un paquete escribe fuera
+  de `apps/`, omite algo, choca con un archivo del usuario o va a escribir
+  más de 1000 archivos, la tienda lo muestra y pregunta antes de tocar la
+  unidad; si choca con archivos del usuario, lo que ofrece por defecto es
+  conservarlos. Con más de 1000 archivos avisa que puede tardar varios
+  minutos, y el progreso los cuenta ("N de M archivos"). El historial
+  anota qué se escribió fuera de `apps/`.
+- **WAD en `/wad/`.** El WAD de un paquete (el forwarder de postloader es
+  el único del catálogo) se valida y queda en `/wad/`. La tienda dice que
+  se instala con YAWM desde la Wii —esta app no instala nada en la NAND—
+  y, si la unidad no tiene YAWM ModMii Edition, ofrece instalarlo también,
+  con una casilla desmarcada.
+- **"Escribe en la NAND"** en la tarjeta de las 51 apps del catálogo que
+  modifican la memoria interna de la Wii al usarlas.
+- **Ejecutables y descargas.** `boot.dol`, `boot.elf` y los `.wad` se
+  validan antes de instalar: un ZIP íntegro con un "404: Not Found" en
+  lugar del ejecutable ya no queda como "Instalada ✓" (los 395 ejecutables
+  y WAD del catálogo pasan). Una descarga cortada dice "Descarga
+  incompleta, reintentá", en vez de "El archivo descargado está dañado" o
+  "Error al escribir en el destino", y una instalación que no llega a
+  escribir ya no deja una `apps/` vacía en la unidad.
+- **Nunca fuera de la unidad.** Cada ruta del paquete se comprueba contra
+  la raíz real del destino: si `apps/` era un enlace hacia afuera, antes
+  se podía escribir fuera de la unidad.
+- **Recovery Manager** encuentra también los restos de una instalación
+  cortada en las carpetas de datos.
+
+#### Instalar desde una carpeta de esta PC
+
+- **Botón "Instalar desde una carpeta de esta PC…"** en la Homebrew Store,
+  aparte del "Elegir carpeta…" del destino. Acepta la carpeta de una app
+  (con su `boot.dol` o `boot.elf`, que va a `apps/<nombre>/`) o una armada
+  como la raíz de una SD (con `apps/`, y lo demás que puede traer un
+  paquete de OSC). Pasa por las mismas reglas y la misma transacción que
+  un paquete de la tienda, y el aviso de dónde va a escribir sale siempre.
+  El progreso va en una franja arriba, con Cancelar.
+- Antes de tocar la unidad revisa la carpeta entera, sin seguir enlaces, y
+  la rechaza si trae un enlace simbólico, un archivo especial, un nombre
+  que FAT32 no acepta, algo fuera de las carpetas permitidas, dos nombres
+  que en FAT32 son el mismo o más de 512 MB. La copia de paso va a la
+  caché del usuario, no a `/tmp`.
+- Probado con 41 paquetes reales de OSC: instalados desde el ZIP y desde
+  la carpeta donde se descomprimieron, dejan los mismos 7576 archivos.
+
+#### Preferencias
+
+- **Carpeta de configuraciones maestras** (Preferencias → Homebrew
+  Store): la tienda busca ahí primero `nintendont/nincfg.bin` y
+  `usbloadergx/GXGlobal.cfg`, con las mismas comprobaciones de siempre y
+  sin pisar nunca la que ya está en la unidad.
+- **Ruta de `wit`** (Preferencias → Motor de conversión): se elige el
+  archivo, y la app comprueba que conteste como `wit` antes de usarlo. La
+  fila muestra la versión y la ruta.
+
+#### GameCube
+
+- **Copias verificadas por SHA-1.** Al terminar de copiar un juego de
+  GameCube, se relee de la unidad y se compara su SHA-1 con el del
+  original, calculado mientras se copiaba; el historial guarda el SHA-1.
+  Interruptor "Verificar copias de GameCube (más lento)" en Ajustes →
+  General → Transferencias, prendido por defecto. Lo que suma es la
+  relectura: con un juego de 1,38 GB en una imagen FAT32 limitada a 30
+  MiB/s de lectura (un USB 2.0 simulado), 46 s.
+
+#### `wit` y los espacios dobles
+
+- **Convertir y comparar en carpetas con dos espacios seguidos.** `wit`
+  junta los espacios seguidos al armar nombres: convertir un juego cuya
+  carpeta en la unidad tiene dos (la de "Ocarina of Time / Master Quest",
+  al sacarle la "/") fallaba, y compararlo daba "no coincide". Ahora
+  `wit` corre desde la carpeta del destino.
+- **`wit` ya no escribe un archivo con otro nombre.** Si el nombre de
+  destino es de los que `wit` reescribe, la app no lo llama y dice que
+  hay que renombrarlo.
+- **"Renombrar a estándar" ya no arma nombres que `wit` reescribe:** con
+  los 6720 títulos de GameTDB en inglés eran 198, y ahora son 0.
+
+#### Modo Fábrica
+
+- **Rechaza los discos con sectores lógicos distintos de 512 bytes**
+  antes de desmontar, de pedir la contraseña y de tocar nada: con 4096,
+  sus 64 sectores por clúster darían 256 KB, fuera de lo que admite FAT32
+  (medido con `mkfs.fat -S 4096`).
+
+#### Instalación
+
+- Con libadwaita anterior a la 1.5, la app avisa por qué en la terminal y
+  en un diálogo, en vez de no abrir.
+- `pycairo` (1.18 o más nuevo) declarado en `pyproject.toml` y
+  `requirements.txt`: el Ticket de Entrega lo necesita.
+- `metainfo.xml` de AppStream (licencia MIT), para GNOME Software y
+  Flathub.
+
 ### 0.2.3
 
 59 commits desde la 0.2.2. Tres funciones nuevas para el taller en
