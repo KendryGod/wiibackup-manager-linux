@@ -7,7 +7,7 @@ msgstr ""
 "Project-Id-Version: WiiBackup Manager\n"
 "Report-Msgid-Bugs-To: https://github.com/KendryGod/wiibackup-manager-linux/"
 "issues\n"
-"POT-Creation-Date: 2026-10-25 18:45-0600\n"
+"POT-Creation-Date: 2026-10-25 19:45-0600\n"
 "PO-Revision-Date: 2026-08-30 05:58-0600\n"
 "Last-Translator: GameFix SPS\n"
 "Language-Team: English\n"
@@ -43,7 +43,7 @@ msgstr "Could not unmount the drive."
 msgid "No se pudo expulsar la unidad: {error}"
 msgstr "Could not eject the drive: {error}"
 
-#: wiibackup_manager/drives.py:935
+#: wiibackup_manager/drives.py:961
 #, python-brace-format
 msgid ""
 "{dev} ya no es un dispositivo removible (o desapareció). Se aborta el "
@@ -52,7 +52,7 @@ msgstr ""
 "{dev} is no longer a removable device (or it disappeared). Formatting is "
 "aborted for safety."
 
-#: wiibackup_manager/drives.py:940
+#: wiibackup_manager/drives.py:966
 #, python-brace-format
 msgid ""
 "El tamaño de {dev} cambió desde que se confirmó ({before} → {after} bytes). "
@@ -61,7 +61,7 @@ msgstr ""
 "The size of {dev} changed since it was confirmed ({before} → {after} bytes). "
 "It may be a different device: formatting is aborted for safety."
 
-#: wiibackup_manager/drives.py:951
+#: wiibackup_manager/drives.py:977
 #, python-brace-format
 msgid ""
 "La identidad física de {dev} cambió desde que se confirmó ({before} → "
@@ -72,7 +72,7 @@ msgstr ""
 "{after}). It may be a different device of the same size plugged into the "
 "same port: formatting is aborted for safety."
 
-#: wiibackup_manager/drives.py:967
+#: wiibackup_manager/drives.py:993
 #, python-brace-format
 msgid ""
 "{dev} tiene una partición montada en {mounts}, que es un punto de montaje "
@@ -81,22 +81,22 @@ msgstr ""
 "{dev} has a partition mounted at {mounts}, which is an operating system "
 "mount point. Formatting is aborted."
 
-#: wiibackup_manager/drives.py:1030
+#: wiibackup_manager/drives.py:1056
 #, python-brace-format
 msgid "{partition} se formateó pero no se pudo montar después: {error}"
 msgstr "{partition} was formatted but could not be mounted afterwards: {error}"
 
-#: wiibackup_manager/drives.py:1033
+#: wiibackup_manager/drives.py:1059
 #, python-brace-format
 msgid "{partition} se formateó pero no se pudo montar después."
 msgstr "{partition} was formatted but could not be mounted afterwards."
 
-#: wiibackup_manager/drives.py:1046
+#: wiibackup_manager/drives.py:1072
 #, python-brace-format
 msgid "No se pudo revisar el punto de montaje {path}: {error}"
 msgstr "Could not check the mount point {path}: {error}"
 
-#: wiibackup_manager/drives.py:1051
+#: wiibackup_manager/drives.py:1077
 #, python-brace-format
 msgid ""
 "La unidad quedó montada en {path}, pero ese montaje pertenece al usuario "
@@ -109,7 +109,7 @@ msgstr ""
 "set by the mount: unmount it and mount it again from the file manager as "
 "your user."
 
-#: wiibackup_manager/drives.py:1374
+#: wiibackup_manager/drives.py:1401
 #, python-brace-format
 msgid ""
 "{dev} pesa {size:.1f} TiB: Modo Fábrica arma una tabla de particiones MBR, "
@@ -119,6 +119,17 @@ msgstr ""
 "{dev} is {size:.1f} TiB: Factory Mode creates an MBR partition table, the "
 "one USB Loader GX and Nintendont read, and that table does not support disks "
 "larger than 2 TiB. The disk was not touched."
+
+#: wiibackup_manager/drives.py:1411
+#, python-brace-format
+msgid ""
+"{dev} usa sectores de {size} bytes: Modo Fábrica solo prepara discos con "
+"sectores de 512 bytes, que son los que leen USB Loader GX y Nintendont. No "
+"se tocó el disco."
+msgstr ""
+"{dev} uses {size}-byte sectors: Factory Mode only prepares disks with 512-"
+"byte sectors, the ones USB Loader GX and Nintendont read. The disk was not "
+"touched."
 
 #: wiibackup_manager/f3_wrapper.py:306
 #, python-brace-format

@@ -468,6 +468,21 @@ class DeviceTooLargeError(FormatGuardError):
     contraseña y de correr nada sobre el disco."""
 
 
+class UnsupportedSectorSizeError(FormatGuardError):
+    """Modo Fábrica: el disco usa sectores lógicos de un tamaño distinto de
+    512 bytes (ver `logical_block_size`). Se levanta antes de desmontar, de
+    pedir la contraseña y de correr nada sobre el disco."""
+
+
+# El sector lógico con el que trabaja Modo Fábrica. Los 64 sectores por
+# clúster (`WII_USB_SECTORS_PER_CLUSTER`) son 32 KB solo con sectores de 512
+# bytes: con `mkfs.fat -S 4096 -s 64` el clúster queda de 256 KB, fuera de
+# lo que admite FAT32, y los loaders de Wii leen discos de 512 bytes por
+# sector. Las memorias USB y las SD tienen 512; los de 4096 son algunos
+# discos externos.
+WII_USB_LOGICAL_SECTOR_BYTES = 512
+
+
 # Lo más grande que admite una tabla MBR ("msdos"), que es la que arma Modo
 # Fábrica porque es la que leen USB Loader GX y Nintendont: inicio y largo
 # de cada partición van en 32 bits de sectores de 512 bytes, o sea 2 TiB.
@@ -518,6 +533,17 @@ def device_size_bytes(device_path) -> int | None:
     size_path = _SYS_BLOCK / _device_name(device_path) / "size"
     try:
         return int(size_path.read_text().strip()) * 512
+    except (OSError, ValueError):
+        return None
+
+
+def logical_block_size(device_path) -> int | None:
+    """El tamaño del sector lógico de `device_path` en bytes, según el
+    kernel (/sys/block/<disco>/queue/logical_block_size), o None si no se
+    pudo leer."""
+    ruta = _SYS_BLOCK / _device_name(device_path) / "queue" / "logical_block_size"
+    try:
+        return int(ruta.read_text().strip())
     except (OSError, ValueError):
         return None
 
@@ -1367,8 +1393,9 @@ def format_as_wii_usb(device: BlockDevice, *, run=subprocess.run,
     carpetas de un loader de Wii adentro.
 
     Devuelve el punto de montaje final. Levanta lo mismo que
-    `format_fat32`, y `DeviceTooLargeError` -sin haber tocado el disco-
-    si pasa de lo que admite la tabla MBR."""
+    `format_fat32`, y -sin haber tocado el disco- `DeviceTooLargeError` si
+    pasa de lo que admite la tabla MBR, y `UnsupportedSectorSizeError` si el
+    kernel dice que sus sectores lógicos no son de 512 bytes."""
     if device.size_bytes > MBR_MAX_BYTES:
         raise DeviceTooLargeError(
             _("{dev} pesa {size:.1f} TiB: Modo Fábrica arma una tabla de "
@@ -1376,6 +1403,15 @@ def format_as_wii_usb(device: BlockDevice, *, run=subprocess.run,
               "esa tabla no admite discos de más de 2 TiB. No se tocó el "
               "disco.").format(dev=device.path,
                                size=device.size_bytes / 2 ** 40))
+    # Solo se rechaza lo que se pudo leer y no es 512. Sin el dato se sigue
+    # como siempre: es lo que tienen todas las memorias USB y SD.
+    sector = logical_block_size(device.path)
+    if sector is not None and sector != WII_USB_LOGICAL_SECTOR_BYTES:
+        raise UnsupportedSectorSizeError(
+            _("{dev} usa sectores de {size} bytes: Modo Fábrica solo prepara "
+              "discos con sectores de 512 bytes, que son los que leen USB "
+              "Loader GX y Nintendont. No se tocó el disco.").format(
+                  dev=device.path, size=sector))
     punto_montaje = format_fat32(device, run=run, label=label,
                                  sectors_per_cluster=sectors_per_cluster,
                                  mount_timeout=mount_timeout)

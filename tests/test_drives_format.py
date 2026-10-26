@@ -435,3 +435,88 @@ def test_el_mensaje_del_disco_grande_esta_traducido(entorno, monkeypatch):
 
     assert "Factory Mode" in str(info.value)
     assert "2 TiB" in str(info.value)
+
+
+# ------------------------------ Modo Fábrica: sectores lógicos de 512 --
+# `-s 64` son 64 SECTORES: 32 KB solo si el sector lógico es de 512 bytes.
+# Medido con `mkfs.fat -F 32 -S 4096 -s 64` sobre 256 GB: clústeres de
+# 256 KB, fuera de lo que admite FAT32, y los loaders de Wii leen discos de
+# 512 bytes por sector. Las memorias USB y las SD de 128/256 GB tienen 512;
+# los de 4096 son algunos discos externos.
+def _sector_logico(device, valor: str) -> None:
+    cola = drives._SYS_BLOCK / device.path.name / "queue"
+    cola.mkdir(exist_ok=True)
+    (cola / "logical_block_size").write_text(valor)
+
+
+@pytest.mark.parametrize("sector", [4096, 2048, 1024])
+def test_modo_fabrica_rechaza_sectores_que_no_son_de_512_sin_tocar_el_disco(entorno, sector):
+    herramientas, device, _punto = entorno(particiones=["/dev/sdb1"], tabla="msdos")
+    _sector_logico(device, f"{sector}\n")
+
+    with pytest.raises(drives.FormatGuardError) as info:
+        drives.format_as_wii_usb(device, run=herramientas.run, mount_timeout=2.0)
+
+    assert type(info.value).__name__ == "UnsupportedSectorSizeError"
+    assert herramientas.llamadas() == [], "se llegó a correr algo sobre el disco"
+    assert str(sector) in str(info.value)
+    assert str(device.path) in str(info.value)
+    assert "No se tocó el disco" in str(info.value)
+
+
+@pytest.mark.parametrize("contenido", [None, "512\n", "", "basura\n"],
+                         ids=["sin-archivo", "512", "vacio", "ilegible"])
+def test_con_512_o_sin_poder_leerlo_modo_fabrica_sigue_como_siempre(entorno, contenido):
+    """Lo que no se puede leer no bloquea: se asume 512, que es lo que
+    tienen todas las memorias USB y SD (y lo que suponía Modo Fábrica)."""
+    herramientas, device, punto = entorno(particiones=["/dev/sdb1"], tabla="msdos")
+    if contenido is not None:
+        _sector_logico(device, contenido)
+
+    assert drives.format_as_wii_usb(device, run=herramientas.run,
+                                    mount_timeout=2.0) == punto
+    assert _mkfs(herramientas)[1:] == [
+        "-F", "32", "-s", "64", "-n", drives.WII_USB_LABEL, "/dev/sdb1"]
+
+
+def test_el_formateo_general_no_mira_el_sector(entorno):
+    """El de "Verificar Memoria" deja elegir el clúster a `mkfs.vfat`, que
+    lo ajusta al sector del disco: el rechazo es solo de Modo Fábrica."""
+    herramientas, device, punto = entorno(particiones=["/dev/sdb1"], tabla="msdos")
+    _sector_logico(device, "4096\n")
+
+    assert _formatear(herramientas, device) == punto
+
+
+@pytest.mark.parametrize("contenido, esperado", [("4096\n", 4096), ("512", 512),
+                                                 ("", None), ("x\n", None)])
+def test_logical_block_size_lee_el_kernel(entorno, contenido, esperado):
+    _herramientas, device, _punto = entorno()
+    _sector_logico(device, contenido)
+
+    assert drives.logical_block_size(device.path) == esperado
+
+
+def test_logical_block_size_sin_el_archivo_es_none(entorno):
+    _herramientas, device, _punto = entorno()
+
+    assert drives.logical_block_size(device.path) is None
+
+
+def test_el_mensaje_del_sector_esta_traducido(entorno, monkeypatch):
+    import gettext
+    from wiibackup_manager import i18n
+    catalogo = gettext.translation(
+        "wiibackup-manager",
+        localedir=str(Path(__file__).resolve().parent.parent / "data" / "locale"),
+        languages=["en"])
+    monkeypatch.setattr(i18n, "_", catalogo.gettext)
+    monkeypatch.setattr(drives, "_", catalogo.gettext)
+    herramientas, device, _punto = entorno()
+    _sector_logico(device, "4096\n")
+
+    with pytest.raises(drives.FormatGuardError) as info:
+        drives.format_as_wii_usb(device, run=herramientas.run, mount_timeout=2.0)
+
+    assert "Factory Mode" in str(info.value)
+    assert "4096" in str(info.value) and "512" in str(info.value)
