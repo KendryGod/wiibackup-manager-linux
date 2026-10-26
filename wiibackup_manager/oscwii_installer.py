@@ -82,6 +82,10 @@ Flujo de `install_app`, en orden, y por qué:
    Nunca se ejecuta ni el binario (.dol/.elf) ni ningún script: se copian
    bytes nomás.
 
+`install_local_folder` instala lo de una carpeta de esta PC por el mismo
+camino: revisa la carpeta, arma con ella un ZIP sin comprimir en la caché
+del usuario y sigue desde el paso 3 (`_instalar_zip`).
+
 Nada de esto usa GLib: igual que `gametdb.py`, este módulo es agnóstico de
 la interfaz. `install_app` es una función sincrónica y bloqueante; quien
 la llame desde la UI (Paso 3) es responsable de correrla en un hilo de
@@ -105,7 +109,7 @@ from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
 
-from . import atomicfs, drives, formatting, library_ops, transfer_plan, wii_formats
+from . import atomicfs, config, drives, formatting, library_ops, transfer_plan, wii_formats
 from .i18n import _
 from .oscwii_client import (HomebrewApp, UnsafeDownloadURL,
                             open_allowlisted, safe_slug, url_rejection_reason)
@@ -290,6 +294,12 @@ class InstallStatus(Enum):
     # Found" con el nombre del ejecutable, por ejemplo.
     BAD_CONTENT = "bad_content"
     UNSAFE_ZIP = "unsafe_zip"
+    # La carpeta de esta PC que se eligió (`install_local_folder`) no tiene
+    # ninguna de las dos formas, no se pudo leer o copiar, o trae algo que
+    # no se instala: un enlace simbólico, un archivo especial, un nombre
+    # que FAT32 no acepta, algo fuera de las carpetas permitidas o más de
+    # lo que puede traer un paquete.
+    BAD_FOLDER = "bad_folder"
     # La URL de descarga (la del catálogo, o el destino de una
     # redirección) no pasó la lista blanca de esquema/host. Distinto de
     # `DOWNLOAD_ERROR`: no es que la descarga haya fallado, es que ni
@@ -377,9 +387,11 @@ class DescargaIncompleta(Exception):
 
 @dataclass
 class InstallProgress:
-    """Un evento de progreso. `phase` es "download" o "extract"; `fraction`
-    va de 0.0 a 1.0 (o None si todavía no se sabe el total, p. ej. sin
-    Content-Length y sin tamaño declarado por la API)."""
+    """Un evento de progreso. `phase` es "download" o "extract" ("prepare"
+    mientras se arma la copia de una carpeta de esta PC: ver
+    `install_local_folder`); `fraction` va de 0.0 a 1.0 (o None si todavía
+    no se sabe el total, p. ej. sin Content-Length y sin tamaño declarado
+    por la API)."""
 
     phase: str
     fraction: Optional[float]
@@ -907,7 +919,9 @@ ARCHIVOS_QUE_TARDAN = 1000
 class AvisoDeInstalacion:
     """Lo que la Store muestra antes de escribir cuando el paquete escribe
     fuera de `apps/` y `controllers/`, omite algo o choca con algo del
-    usuario (ver `install_app`). Rutas relativas a la raíz de la unidad."""
+    usuario (ver `install_app`), y siempre que lo que se instala viene de
+    una carpeta de esta PC (`install_local_folder`). Rutas relativas a la
+    raíz de la unidad."""
 
     # Lo de `apps/` y `controllers/`: carpetas que se reemplazan enteras
     # ("apps/smw-wiigii/") y archivos sueltos.
@@ -932,14 +946,15 @@ class AvisoDeInstalacion:
 
 
 def _aviso(plan: PlanDeInstalacion, datos: DatosDelPaquete,
-           dest_root: Path) -> Optional[AvisoDeInstalacion]:
+           dest_root: Path, siempre: bool = False) -> Optional[AvisoDeInstalacion]:
     """El aviso para el usuario, o None si no hace falta: todo va a `apps/`
     o `controllers/`, o lo de afuera ya está igual y no se omite nada, y
-    son `ARCHIVOS_QUE_TARDAN` archivos o menos."""
+    son `ARCHIVOS_QUE_TARDAN` archivos o menos. Con `siempre` (lo que viene
+    de una carpeta de esta PC, que no tiene un catálogo detrás) sale igual."""
     archivos = (sum(len(m) for m in plan.unidades.values()) + len(plan.sueltos)
                 + len(datos.nuevos))
-    if not (datos.nuevos or datos.distintos or datos.intocables or plan.omitidos
-            or archivos > ARCHIVOS_QUE_TARDAN):
+    if not (siempre or datos.nuevos or datos.distintos or datos.intocables
+            or plan.omitidos or archivos > ARCHIVOS_QUE_TARDAN):
         return None
 
     def _rel(ruta: Path) -> str:
@@ -1232,6 +1247,103 @@ def _destino_no_escribible(dest_root: Path) -> Optional[OSError]:
     return None
 
 
+def _instalar_zip(zip_path: Path, slug: str, dest_root: Path, *,
+                  cancel_event: Optional[threading.Event],
+                  on_progress: Optional[ProgressCallback],
+                  reemplazar: bool,
+                  confirmar: Optional[Callable[[AvisoDeInstalacion], Optional[bool]]],
+                  escribe_en_nand: bool = False,
+                  siempre_avisar: bool = False) -> InstallResult:
+    """Valida el ZIP de `zip_path` e instala lo que trae en `dest_root` como
+    una sola transacción (los pasos 3 a 5 del comentario del módulo). Lo
+    comparten `install_app`, con el ZIP que se bajó de OSC, e
+    `install_local_folder`, con el que se arma con una carpeta de esta PC.
+
+    Con `siempre_avisar`, `confirmar` se llama aunque el paquete solo
+    escriba en `apps/` (ver `_aviso`). Lanza lo mismo que la validación y
+    `_instalar_todo` (`CancelRequested`, `OSError`,
+    `library_ops.RollbackFailedError`): quien llama lo convierte en un
+    `InstallResult`."""
+    zf, zip_status, zip_err = _validate_zip(zip_path, dest_root)
+    if zf is None:
+        return InstallResult(zip_status, slug, zip_err)
+
+    try:
+        members = [i for i in zf.infolist() if not i.is_dir()]
+        plan = _planificar(members)
+        unidades, sueltos = plan.unidades, list(plan.sueltos)
+        datos = _comparar_datos(zf, plan.datos, dest_root)
+        # Con el paquete ya validado y antes de tocar la unidad: qué
+        # va a escribir fuera de `apps/`, qué choca con lo del
+        # usuario y qué no se copia. None es "no instalar"; si no,
+        # si se reemplazan los archivos distintos del usuario.
+        aviso = _aviso(plan, datos, dest_root, siempre=siempre_avisar)
+        if aviso is not None and escribe_en_nand:
+            aviso = dataclasses.replace(aviso, escribe_en_nand=True)
+        if confirmar is not None and aviso is not None:
+            respuesta = confirmar(aviso)
+            _check_cancel(cancel_event)
+            if respuesta is None:
+                raise CancelRequested()
+            reemplazar = bool(respuesta)
+        # Fuera de `apps/` lo del usuario se conserva: un archivo
+        # distinto solo se reemplaza si se pidió, y uno vacío del
+        # paquete nunca (ver `DatosDelPaquete.intocables`).
+        reemplazados = datos.distintos if reemplazar else ()
+        conservados_del_usuario = datos.intocables + (
+            () if reemplazar else tuple(r for _i, r in datos.distintos))
+        carpetas_de_datos, nuevos_sueltos = _agrupar_nuevos(datos.nuevos, dest_root)
+        archivos_de_datos = (tuple((i, r, False) for i, r in nuevos_sueltos)
+                             + tuple((i, r, True) for i, r in reemplazados))
+        a_escribir = ([i for m in unidades.values() for i in m] + sueltos
+                      + [i for i, _r in datos.nuevos] + [i for i, _r in reemplazados])
+
+        cluster = _cluster_size(dest_root)
+        # Lo del cliente se copia mientras la versión anterior sigue
+        # en su lugar: ocupa lugar dos veces hasta el final, y hay
+        # que contarlo.
+        del_cliente = _plan_del_cliente(unidades, dest_root, cluster)
+
+        needed = (_space_needed(a_escribir, cluster)
+                  + sum(item.ocupa for item in del_cliente))
+        free = transfer_plan.free_space(dest_root)
+        if free is not None and needed > free:
+            return InstallResult(
+                InstallStatus.NO_SPACE, slug,
+                _("necesita {need} y quedan {free} en el destino").format(
+                    need=formatting.format_size(needed),
+                    free=formatting.format_size(free)))
+
+        total = len(a_escribir) + sum(item.archivos for item in del_cliente)
+        hechos = [0]
+
+        def _paso() -> None:
+            hechos[0] += 1
+            _report(on_progress, "extract",
+                   min(hechos[0] / total, 1.0) if total else 1.0,
+                   hechos[0], total)
+
+        written, huerfanos, conservados = _instalar_todo(
+            zf, unidades, sueltos, dest_root, cancel_event, _paso,
+            tuple(del_cliente), carpetas_de_datos, archivos_de_datos)
+    finally:
+        zf.close()
+
+    datos_escritos = tuple(
+        [c / rel for c, contenido in carpetas_de_datos.items() for _i, rel in contenido]
+        + [r for _i, r, _x in archivos_de_datos])
+    return InstallResult(InstallStatus.OK, slug,
+                         installed_paths=tuple(written),
+                         orphaned_backups=tuple(huerfanos),
+                         preserved_paths=tuple(conservados),
+                         datos_escritos=datos_escritos,
+                         datos_conservados=conservados_del_usuario,
+                         carpetas_de_datos=_por_carpeta(datos_escritos, dest_root),
+                         wads=tuple(r for r in datos_escritos
+                                    if _es_wad_para_un_gestor(r, dest_root)),
+                         omitidos=plan.omitidos)
+
+
 def install_app(app: HomebrewApp, dest_root: Path, *,
                 cancel_event: Optional[threading.Event] = None,
                 on_progress: Optional[ProgressCallback] = None,
@@ -1314,84 +1426,9 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
 
             _check_cancel(cancel_event)
 
-            zf, zip_status, zip_err = _validate_zip(tmp_zip, dest_root)
-            if zf is None:
-                return InstallResult(zip_status, app.slug, zip_err)
-
-            try:
-                members = [i for i in zf.infolist() if not i.is_dir()]
-                plan = _planificar(members)
-                unidades, sueltos = plan.unidades, list(plan.sueltos)
-                datos = _comparar_datos(zf, plan.datos, dest_root)
-                # Con el paquete ya validado y antes de tocar la unidad: qué
-                # va a escribir fuera de `apps/`, qué choca con lo del
-                # usuario y qué no se copia. None es "no instalar"; si no,
-                # si se reemplazan los archivos distintos del usuario.
-                aviso = _aviso(plan, datos, dest_root)
-                if aviso is not None and app.writes_to_nand:
-                    aviso = dataclasses.replace(aviso, escribe_en_nand=True)
-                if confirmar is not None and aviso is not None:
-                    respuesta = confirmar(aviso)
-                    _check_cancel(cancel_event)
-                    if respuesta is None:
-                        raise CancelRequested()
-                    reemplazar = bool(respuesta)
-                # Fuera de `apps/` lo del usuario se conserva: un archivo
-                # distinto solo se reemplaza si se pidió, y uno vacío del
-                # paquete nunca (ver `DatosDelPaquete.intocables`).
-                reemplazados = datos.distintos if reemplazar else ()
-                conservados_del_usuario = datos.intocables + (
-                    () if reemplazar else tuple(r for _i, r in datos.distintos))
-                carpetas_de_datos, nuevos_sueltos = _agrupar_nuevos(datos.nuevos, dest_root)
-                archivos_de_datos = (tuple((i, r, False) for i, r in nuevos_sueltos)
-                                     + tuple((i, r, True) for i, r in reemplazados))
-                a_escribir = ([i for m in unidades.values() for i in m] + sueltos
-                              + [i for i, _r in datos.nuevos] + [i for i, _r in reemplazados])
-
-                cluster = _cluster_size(dest_root)
-                # Lo del cliente se copia mientras la versión anterior sigue
-                # en su lugar: ocupa lugar dos veces hasta el final, y hay
-                # que contarlo.
-                del_cliente = _plan_del_cliente(unidades, dest_root, cluster)
-
-                needed = (_space_needed(a_escribir, cluster)
-                          + sum(item.ocupa for item in del_cliente))
-                free = transfer_plan.free_space(dest_root)
-                if free is not None and needed > free:
-                    return InstallResult(
-                        InstallStatus.NO_SPACE, app.slug,
-                        _("necesita {need} y quedan {free} en el destino").format(
-                            need=formatting.format_size(needed),
-                            free=formatting.format_size(free)))
-
-                total = len(a_escribir) + sum(item.archivos for item in del_cliente)
-                hechos = [0]
-
-                def _paso() -> None:
-                    hechos[0] += 1
-                    _report(on_progress, "extract",
-                           min(hechos[0] / total, 1.0) if total else 1.0,
-                           hechos[0], total)
-
-                written, huerfanos, conservados = _instalar_todo(
-                    zf, unidades, sueltos, dest_root, cancel_event, _paso,
-                    tuple(del_cliente), carpetas_de_datos, archivos_de_datos)
-            finally:
-                zf.close()
-
-        datos_escritos = tuple(
-            [c / rel for c, contenido in carpetas_de_datos.items() for _i, rel in contenido]
-            + [r for _i, r, _x in archivos_de_datos])
-        return InstallResult(InstallStatus.OK, app.slug,
-                             installed_paths=tuple(written),
-                             orphaned_backups=tuple(huerfanos),
-                             preserved_paths=tuple(conservados),
-                             datos_escritos=datos_escritos,
-                             datos_conservados=conservados_del_usuario,
-                             carpetas_de_datos=_por_carpeta(datos_escritos, dest_root),
-                             wads=tuple(r for r in datos_escritos
-                                        if _es_wad_para_un_gestor(r, dest_root)),
-                             omitidos=plan.omitidos)
+            return _instalar_zip(tmp_zip, app.slug, dest_root, cancel_event=cancel_event,
+                                 on_progress=on_progress, reemplazar=reemplazar,
+                                 confirmar=confirmar, escribe_en_nand=app.writes_to_nand)
 
     except CancelRequested:
         return InstallResult(InstallStatus.CANCELLED, app.slug,
@@ -1420,4 +1457,219 @@ def install_app(app: HomebrewApp, dest_root: Path, *,
                              _detalle_de_io(e, dest_root, era_montaje))
     except Exception as e:  # noqa: BLE001 - red de seguridad final
         return InstallResult(_estado_de_io(e, dest_root, era_montaje), app.slug,
+                             _detalle_de_io(e, dest_root, era_montaje))
+
+
+# ------------------------------------------------- Desde una carpeta --
+class _CarpetaRechazada(Exception):
+    """Interna: la carpeta elegida no se instala (`InstallStatus.BAD_FOLDER`).
+    El mensaje dice por qué."""
+
+
+# Lo que FAT32 y exFAT no aceptan en un nombre (`vfat_bad_char` en el
+# kernel), además de los caracteres de control. Un punto o un espacio al
+# final tampoco: Windows los saca del nombre, y el driver vfat de Linux
+# saca los puntos ("a." y "a" serían el mismo archivo). Una carpeta de esta
+# PC puede traer cualquiera de las dos cosas, y en la unidad la copia
+# fallaría a mitad.
+_CARACTERES_QUE_FAT32_NO_ACEPTA = frozenset('<>:"\\|?*')
+
+
+def _nombre_que_fat32_no_acepta(nombre: str) -> bool:
+    return (nombre.endswith((".", " "))
+            or any(c in _CARACTERES_QUE_FAT32_NO_ACEPTA or ord(c) < 0x20 for c in nombre))
+
+
+def _mensaje_de_nombre(nombre: str) -> str:
+    return _('FAT32 no acepta el nombre {name} (lleva <>:"\\|?*, un carácter de '
+             'control, o un punto o un espacio al final); rechazada').format(name=nombre)
+
+
+def _mensaje_de_especial(nombre: str) -> str:
+    return _("la carpeta contiene {name}, que no es un archivo ni una carpeta; "
+             "rechazada").format(name=nombre)
+
+
+def _forma_de_la_carpeta(carpeta: Path) -> Optional[str]:
+    """Dónde va lo de `carpeta` en la unidad, como prefijo de cada nombre:
+    "" si es la raíz de una unidad (trae `apps/`), "apps/<carpeta>/" si es
+    la carpeta de una app (trae su `boot.dol` o `boot.elf`, que la Wii lee
+    sin distinguir mayúsculas), o None si no tiene ninguna de las dos
+    formas. Levanta OSError si no se puede leer."""
+    nombres = os.listdir(carpeta)
+    if "apps" in nombres:
+        return ""
+    if carpeta.name and any(n.lower() in ("boot.dol", "boot.elf") for n in nombres):
+        return f"apps/{carpeta.name}/"
+    return None
+
+
+def _archivos_de_la_carpeta(carpeta: Path, prefijo: str,
+                            cancel_event: Optional[threading.Event]) -> list:
+    """(ruta en esta PC, nombre en el paquete) de cada archivo de `carpeta`,
+    recorrida en orden y sin seguir enlaces. Lo primero que no se puede
+    instalar levanta `_CarpetaRechazada`: un enlace simbólico, algo que no
+    es un archivo ni una carpeta, un nombre que FAT32 no acepta, un archivo
+    que no va en ninguna carpeta que la Store puede usar (`_clasificar`) o
+    más de `MAX_UNCOMPRESSED_TOTAL_BYTES` en total. Solo lee."""
+    if prefijo and _nombre_que_fat32_no_acepta(carpeta.name):
+        raise _CarpetaRechazada(_mensaje_de_nombre(carpeta.name))
+    archivos: list = []
+    total = 0
+    pendientes = [(carpeta, "")]
+    while pendientes:
+        _check_cancel(cancel_event)
+        actual, relativo = pendientes.pop()
+        with os.scandir(actual) as it:
+            entradas = sorted(it, key=lambda e: e.name)
+        subcarpetas = []
+        for entrada in entradas:
+            ruta = relativo + entrada.name
+            if _nombre_que_fat32_no_acepta(entrada.name):
+                raise _CarpetaRechazada(_mensaje_de_nombre(ruta))
+            info = entrada.stat(follow_symlinks=False)
+            if stat.S_ISLNK(info.st_mode):
+                raise _CarpetaRechazada(_("la carpeta contiene un enlace simbólico ({name}); "
+                                          "rechazada").format(name=ruta))
+            if stat.S_ISDIR(info.st_mode):
+                subcarpetas.append((Path(entrada.path), ruta + "/"))
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                raise _CarpetaRechazada(_mensaje_de_especial(ruta))
+            if _clasificar(prefijo + ruta) is None:
+                raise _CarpetaRechazada(_(
+                    "la carpeta trae {name}, que no va en ninguna de las carpetas que la "
+                    "Store puede usar (apps/, controllers/, los .wad de wad/ y las "
+                    "carpetas de datos de las apps conocidas); rechazada").format(name=ruta))
+            total += info.st_size
+            if total > MAX_UNCOMPRESSED_TOTAL_BYTES:
+                raise _CarpetaRechazada(_(
+                    "la carpeta tiene más de {limit}, lo máximo que puede traer un "
+                    "paquete; rechazada").format(
+                        limit=formatting.format_size(MAX_UNCOMPRESSED_TOTAL_BYTES)))
+            archivos.append((Path(entrada.path), prefijo + ruta))
+        pendientes.extend(reversed(subcarpetas))
+    return archivos
+
+
+def _revisar_la_carpeta(carpeta: Path, cancel_event: Optional[threading.Event]) -> list:
+    """Lo de `_archivos_de_la_carpeta`, con la forma de la carpeta ya
+    decidida y sin dos nombres que en la unidad serían el mismo. Levanta
+    `_CarpetaRechazada` con el motivo. Solo lee."""
+    try:
+        prefijo = _forma_de_la_carpeta(carpeta)
+        if prefijo is None:
+            raise _CarpetaRechazada(_(
+                "la carpeta no tiene apps/ ni un boot.dol o boot.elf: elegí la raíz de una "
+                "SD o USB armada (con apps/) o la carpeta de una app (con su boot.dol o "
+                "boot.elf)"))
+        archivos = _archivos_de_la_carpeta(carpeta, prefijo, cancel_event)
+    except OSError as e:
+        raise _CarpetaRechazada(_("no se pudo leer la carpeta: {error}").format(error=e)) from e
+    # Acá dos nombres pueden ser distintos solo por las mayúsculas (ext4 las
+    # distingue) y en la unidad ser el mismo. `_validate_zip` lo vuelve a
+    # mirar en el ZIP.
+    motivo = _check_name_collisions([zipfile.ZipInfo(nombre) for _o, nombre in archivos])
+    if motivo is not None:
+        raise _CarpetaRechazada(_("la carpeta tiene nombres que colisionan en el destino: "
+                                  "{reason}; rechazada").format(reason=motivo))
+    return archivos
+
+
+def _armar_zip(archivos: list, zip_path: Path,
+               cancel_event: Optional[threading.Event],
+               on_progress: Optional[ProgressCallback]) -> None:
+    """Copia `archivos` (ver `_archivos_de_la_carpeta`) a un ZIP sin
+    comprimir en `zip_path`. La carpeta ya se revisó, pero puede haber
+    cambiado: cada archivo se abre sin seguir enlaces y sin quedarse
+    esperando si ahora es un FIFO, y tiene que seguir siendo un archivo
+    común."""
+    total = len(archivos)
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        for hechos, (origen, nombre) in enumerate(archivos, 1):
+            _check_cancel(cancel_event)
+            fd = os.open(origen, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+            with open(fd, "rb") as src:
+                if not stat.S_ISREG(os.fstat(src.fileno()).st_mode):
+                    raise _CarpetaRechazada(_mensaje_de_especial(nombre))
+                # Sin comprimir: es una copia de paso. Va en el `ZipInfo`
+                # porque con uno explícito `ZipFile.open` no usa la
+                # compresión del archivo.
+                info = zipfile.ZipInfo(nombre)
+                info.compress_type = zipfile.ZIP_STORED
+                with zf.open(info, "w") as dst:
+                    shutil.copyfileobj(src, dst, DOWNLOAD_CHUNK_SIZE)
+            _report(on_progress, "prepare", hechos / total, hechos, total)
+
+
+def install_local_folder(carpeta: Path, dest_root: Path, *,
+                         cancel_event: Optional[threading.Event] = None,
+                         on_progress: Optional[ProgressCallback] = None,
+                         reemplazar: bool = False,
+                         confirmar: Optional[Callable[[AvisoDeInstalacion], Optional[bool]]] = None,
+                         ) -> InstallResult:
+    """Instala en `dest_root` lo que hay en `carpeta`, una carpeta de esta
+    PC, con las mismas reglas que una app de OSC. Acepta dos formas (ver
+    `_forma_de_la_carpeta`):
+
+    - la raíz de una unidad, con `apps/` (y lo que un paquete puede traer
+      además: `controllers/`, `wad/`, las carpetas de `CARPETAS_DE_DATOS`),
+      que se copia tal cual;
+    - la carpeta de una app, con su `boot.dol` o `boot.elf`, que va a
+      `apps/<nombre de la carpeta>/`.
+
+    Antes de tocar la unidad, la carpeta se revisa entera
+    (`_archivos_de_la_carpeta`) y se copia a un ZIP sin comprimir en la
+    caché del usuario, no en /tmp: en Fedora /tmp vive en RAM, y la carpeta
+    puede traer hasta `MAX_UNCOMPRESSED_TOTAL_BYTES`. Desde ahí sigue igual
+    que `install_app` (`_instalar_zip`): la misma validación, el mismo
+    aviso, el espacio, la transacción y lo del cliente que se conserva. El
+    aviso sale siempre, aunque todo vaya a `apps/`: lo que se instala no
+    viene del catálogo. El slug del resultado es "local:<carpeta>", que no
+    choca con ninguno del catálogo; las configuraciones maestras, atadas a
+    las apps del catálogo, no se aplican.
+
+    Igual que `install_app`, nunca lanza."""
+    carpeta = Path(carpeta)
+    slug = f"local:{carpeta.name}"
+    era_montaje = drives.is_mount_point(dest_root)
+    try:
+        dest_root = Path(dest_root)
+        if drives.is_critical_system_path(dest_root):
+            return InstallResult(
+                InstallStatus.UNSAFE_DEST_ROOT, slug,
+                _("{path} es una ruta crítica del sistema operativo, se rechaza "
+                  "como destino de instalación").format(path=dest_root))
+        problema = _destino_no_escribible(dest_root)
+        if problema is not None:
+            return InstallResult(_estado_de_io(problema, dest_root, era_montaje), slug,
+                                 _detalle_de_io(problema, dest_root, era_montaje))
+
+        archivos = _revisar_la_carpeta(carpeta, cancel_event)
+        copia = None
+        try:
+            try:
+                config.CACHE_DIR.mkdir(parents=True, exist_ok=True)
+                copia = Path(tempfile.mkdtemp(prefix="wiibackup-manager-carpeta-",
+                                              dir=config.CACHE_DIR))
+                _armar_zip(archivos, copia / "carpeta.zip", cancel_event, on_progress)
+            except OSError as e:
+                raise _CarpetaRechazada(_("no se pudo preparar la copia de la carpeta: "
+                                          "{error}").format(error=e)) from e
+            return _instalar_zip(copia / "carpeta.zip", slug, dest_root,
+                                 cancel_event=cancel_event, on_progress=on_progress,
+                                 reemplazar=reemplazar, confirmar=confirmar,
+                                 siempre_avisar=True)
+        finally:
+            if copia is not None:
+                shutil.rmtree(copia, ignore_errors=True)
+    except _CarpetaRechazada as e:
+        return InstallResult(InstallStatus.BAD_FOLDER, slug, str(e))
+    except CancelRequested:
+        return InstallResult(InstallStatus.CANCELLED, slug, _("instalación cancelada"))
+    except library_ops.RollbackFailedError as e:
+        # Como en `install_app`: falló y además no volvió la versión anterior.
+        return InstallResult(InstallStatus.ROLLBACK_FAILED, slug, e.user_message())
+    except Exception as e:  # noqa: BLE001 - red de seguridad final
+        return InstallResult(_estado_de_io(e, dest_root, era_montaje), slug,
                              _detalle_de_io(e, dest_root, era_montaje))

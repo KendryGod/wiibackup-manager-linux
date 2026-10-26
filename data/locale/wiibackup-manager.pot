@@ -9,7 +9,7 @@ msgstr ""
 "Project-Id-Version: WiiBackup Manager\n"
 "Report-Msgid-Bugs-To: https://github.com/KendryGod/wiibackup-manager-linux/"
 "issues\n"
-"POT-Creation-Date: 2026-10-25 22:47-0600\n"
+"POT-Creation-Date: 2026-10-25 23:12-0600\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -597,7 +597,7 @@ msgid "ningún elemento de la respuesta tiene el formato esperado"
 msgstr ""
 
 #: wiibackup_manager/oscwii_client.py:384
-#: wiibackup_manager/oscwii_installer.py:435
+#: wiibackup_manager/oscwii_installer.py:447
 #, python-brace-format
 msgid "status HTTP {status}"
 msgstr ""
@@ -615,127 +615,184 @@ msgstr ""
 msgid "la URL del ícono"
 msgstr ""
 
-#: wiibackup_manager/oscwii_installer.py:370
+#: wiibackup_manager/oscwii_installer.py:380
 #, python-brace-format
 msgid "Descarga incompleta: la conexión se cortó después de {got}. Reintentá."
 msgstr ""
 
-#: wiibackup_manager/oscwii_installer.py:373
+#: wiibackup_manager/oscwii_installer.py:383
 #, python-brace-format
 msgid "Descarga incompleta: llegaron {got} de {total}. Reintentá."
 msgstr ""
 
-#: wiibackup_manager/oscwii_installer.py:433
+#: wiibackup_manager/oscwii_installer.py:445
 msgid "la URL de descarga del catálogo"
 msgstr ""
 
-#: wiibackup_manager/oscwii_installer.py:444
+#: wiibackup_manager/oscwii_installer.py:456
 msgid "el archivo declarado supera el límite esperado"
 msgstr ""
 
-#: wiibackup_manager/oscwii_installer.py:454
+#: wiibackup_manager/oscwii_installer.py:466
 msgid "la descarga supera el límite esperado"
 msgstr ""
 
-#: wiibackup_manager/oscwii_installer.py:489
+#: wiibackup_manager/oscwii_installer.py:501
 #, python-brace-format
 msgid "el SHA-256 no coincide (esperado {expected}, descargado {found})"
 msgstr ""
 
-#: wiibackup_manager/oscwii_installer.py:494
+#: wiibackup_manager/oscwii_installer.py:506
 #, python-brace-format
 msgid "el MD5 no coincide (esperado {expected}, descargado {found})"
 msgstr ""
 
-#: wiibackup_manager/oscwii_installer.py:584
+#: wiibackup_manager/oscwii_installer.py:596
 #, python-brace-format
 msgid ""
 "\"{file}\" es un archivo y \"{folder}\" necesita ese mismo nombre como "
 "carpeta"
 msgstr ""
 
-#: wiibackup_manager/oscwii_installer.py:587
+#: wiibackup_manager/oscwii_installer.py:599
 #, python-brace-format
 msgid ""
 "\"{first}\" y \"{second}\" son el mismo nombre en el destino (FAT32/exFAT no "
 "distingue mayúsculas)"
 msgstr ""
 
-#: wiibackup_manager/oscwii_installer.py:591
+#: wiibackup_manager/oscwii_installer.py:603
 #, python-brace-format
 msgid "\"{path}\" aparece dos veces en el ZIP"
 msgstr ""
 
-#: wiibackup_manager/oscwii_installer.py:626
+#: wiibackup_manager/oscwii_installer.py:638
 #, python-brace-format
 msgid "{name} está dañado: {reason}"
 msgstr ""
 
-#: wiibackup_manager/oscwii_installer.py:643
+#: wiibackup_manager/oscwii_installer.py:655
 #, python-brace-format
 msgid "el archivo descargado no es un ZIP válido ({error})"
 msgstr ""
 
-#: wiibackup_manager/oscwii_installer.py:654
+#: wiibackup_manager/oscwii_installer.py:666
 #, python-brace-format
 msgid "el ZIP está corrupto o truncado (falló {member})"
 msgstr ""
 
-#: wiibackup_manager/oscwii_installer.py:662
+#: wiibackup_manager/oscwii_installer.py:674
 msgid "el contenido descomprimido supera el límite esperado"
 msgstr ""
 
-#: wiibackup_manager/oscwii_installer.py:678
+#: wiibackup_manager/oscwii_installer.py:690
 #, python-brace-format
 msgid "el ZIP contiene un symlink ({name}), rechazado"
 msgstr ""
 
-#: wiibackup_manager/oscwii_installer.py:684
+#: wiibackup_manager/oscwii_installer.py:696
 #, python-brace-format
 msgid ""
 "el ZIP escribe en {name}, que no está entre las carpetas que la Store puede "
 "usar; rechazado"
 msgstr ""
 
-#: wiibackup_manager/oscwii_installer.py:698
+#: wiibackup_manager/oscwii_installer.py:710
 #, python-brace-format
 msgid "el ZIP tiene entradas que colisionan en el destino: {reason}; rechazado"
 msgstr ""
 
-#: wiibackup_manager/oscwii_installer.py:710
+#: wiibackup_manager/oscwii_installer.py:722
 #, python-brace-format
 msgid "el ZIP está corrupto o truncado ({error})"
 msgstr ""
 
-#: wiibackup_manager/oscwii_installer.py:1228
+#: wiibackup_manager/oscwii_installer.py:1243
 #, python-brace-format
 msgid "{path} no existe o no es una carpeta"
 msgstr ""
 
-#: wiibackup_manager/oscwii_installer.py:1231
+#: wiibackup_manager/oscwii_installer.py:1246
 #, python-brace-format
 msgid "no hay permiso para escribir en {path}"
 msgstr ""
 
-#: wiibackup_manager/oscwii_installer.py:1276
+#: wiibackup_manager/oscwii_installer.py:1313
+#, python-brace-format
+msgid "necesita {need} y quedan {free} en el destino"
+msgstr ""
+
+#: wiibackup_manager/oscwii_installer.py:1388
+#: wiibackup_manager/oscwii_installer.py:1641
 #, python-brace-format
 msgid ""
 "{path} es una ruta crítica del sistema operativo, se rechaza como destino de "
 "instalación"
 msgstr ""
 
-#: wiibackup_manager/oscwii_installer.py:1289
+#: wiibackup_manager/oscwii_installer.py:1401
 #, python-brace-format
 msgid "la URL de descarga de la app fue rechazada: {reason} ({url})"
 msgstr ""
 
-#: wiibackup_manager/oscwii_installer.py:1363
-#, python-brace-format
-msgid "necesita {need} y quedan {free} en el destino"
+#: wiibackup_manager/oscwii_installer.py:1435
+#: wiibackup_manager/oscwii_installer.py:1669
+msgid "instalación cancelada"
 msgstr ""
 
-#: wiibackup_manager/oscwii_installer.py:1398
-msgid "instalación cancelada"
+#: wiibackup_manager/oscwii_installer.py:1484
+#, python-brace-format
+msgid ""
+"FAT32 no acepta el nombre {name} (lleva <>:\"\\|?*, un carácter de control, "
+"o un punto o un espacio al final); rechazada"
+msgstr ""
+
+#: wiibackup_manager/oscwii_installer.py:1489
+#, python-brace-format
+msgid ""
+"la carpeta contiene {name}, que no es un archivo ni una carpeta; rechazada"
+msgstr ""
+
+#: wiibackup_manager/oscwii_installer.py:1532
+#, python-brace-format
+msgid "la carpeta contiene un enlace simbólico ({name}); rechazada"
+msgstr ""
+
+#: wiibackup_manager/oscwii_installer.py:1541
+#, python-brace-format
+msgid ""
+"la carpeta trae {name}, que no va en ninguna de las carpetas que la Store "
+"puede usar (apps/, controllers/, los .wad de wad/ y las carpetas de datos de "
+"las apps conocidas); rechazada"
+msgstr ""
+
+#: wiibackup_manager/oscwii_installer.py:1547
+#, python-brace-format
+msgid ""
+"la carpeta tiene más de {limit}, lo máximo que puede traer un paquete; "
+"rechazada"
+msgstr ""
+
+#: wiibackup_manager/oscwii_installer.py:1563
+msgid ""
+"la carpeta no tiene apps/ ni un boot.dol o boot.elf: elegí la raíz de una SD "
+"o USB armada (con apps/) o la carpeta de una app (con su boot.dol o boot.elf)"
+msgstr ""
+
+#: wiibackup_manager/oscwii_installer.py:1568
+#, python-brace-format
+msgid "no se pudo leer la carpeta: {error}"
+msgstr ""
+
+#: wiibackup_manager/oscwii_installer.py:1574
+#, python-brace-format
+msgid ""
+"la carpeta tiene nombres que colisionan en el destino: {reason}; rechazada"
+msgstr ""
+
+#: wiibackup_manager/oscwii_installer.py:1657
+#, python-brace-format
+msgid "no se pudo preparar la copia de la carpeta: {error}"
 msgstr ""
 
 #: wiibackup_manager/pdf_export.py:530 wiibackup_manager/pdf_export.py:554
