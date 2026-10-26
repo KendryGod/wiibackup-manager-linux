@@ -8,8 +8,9 @@ se separen:
 
 - el `id` es el de la app y el `launchable` apunta al `.desktop` real;
 - la licencia del proyecto y la de los metadatos son MIT, como `LICENSE`;
-- la versión más nueva de `<releases>` es la de `pyproject.toml` (al subir
-  la versión hay que sumarla acá);
+- la versión es la misma en `pyproject.toml`, `wiibackup_manager/__init__.py`
+  (la que muestra "Acerca de"), la release más nueva de `<releases>` y el
+  badge del README: al subir la versión hay que cambiar las cuatro;
 - las capturas apuntan a archivos que existen en `docs/screenshots/`;
 - el texto está en inglés (el idioma base de AppStream) y en español;
 - `appstreamcli validate` no encuentra problemas, si está instalado.
@@ -26,11 +27,12 @@ from pathlib import Path
 
 import pytest
 
-from wiibackup_manager import config
+from wiibackup_manager import __version__, config
 
 RAIZ = Path(__file__).resolve().parent.parent
 METAINFO = RAIZ / "data" / f"{config.APP_ID}.metainfo.xml"
 DESKTOP = RAIZ / "data" / f"{config.APP_ID}.desktop"
+README = RAIZ / "README.md"
 LANG = "{http://www.w3.org/XML/1998/namespace}lang"
 
 
@@ -71,12 +73,26 @@ def test_el_desarrollador_y_el_binario_son_los_del_proyecto(raiz):
     assert raiz.findtext("provides/binary") in proyecto["scripts"]
 
 
-def test_la_version_mas_nueva_es_la_de_pyproject(raiz):
-    releases = raiz.findall("releases/release")
-    versiones = [r.get("version") for r in releases]
-    fechas = [datetime.date.fromisoformat(r.get("date")) for r in releases]
+def _version_del_badge() -> str:
+    """La del badge "Versión" del README (img.shields.io)."""
+    badge = re.search(r"!\[Versión\]\(https://img\.shields\.io/badge/versión-([^-)]+)-",
+                      README.read_text(encoding="utf-8"))
+    assert badge is not None, "el README no tiene el badge de la versión"
+    return badge.group(1)
 
-    assert versiones[0] == _proyecto()["project"]["version"]
+
+def test_la_version_es_la_misma_en_todos_lados(raiz):
+    releases = raiz.findall("releases/release")
+    fechas = [datetime.date.fromisoformat(r.get("date")) for r in releases]
+    pyproject = _proyecto()["project"]["version"]
+    versiones = {
+        "pyproject.toml": pyproject,
+        "wiibackup_manager/__init__.py": __version__,
+        "metainfo.xml (la release más nueva)": releases[0].get("version"),
+        "README.md (el badge)": _version_del_badge(),
+    }
+
+    assert versiones == dict.fromkeys(versiones, pyproject)
     assert fechas == sorted(fechas, reverse=True)
 
 

@@ -102,6 +102,32 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.2.4" date="2026-10-26">
+      <description>
+        <ul>
+          <li>Homebrew Store: installs the apps that also write outside apps/, merging their data folders without overwriting the user's files</li>
+          <li xml:lang="es">Homebrew Store: instala las apps que también escriben fuera de apps/, fusionando sus carpetas de datos sin pisar los archivos del usuario</li>
+          <li>Homebrew Store: WAD files are left in /wad/, and YAWM ModMii Edition is offered as an option</li>
+          <li xml:lang="es">Homebrew Store: los WAD quedan en /wad/, y se ofrece YAWM ModMii Edition como opción</li>
+          <li>Homebrew Store: shows where a package will write and warns about large packages before installing; checks boot.dol, boot.elf and .wad files and detects incomplete downloads</li>
+          <li xml:lang="es">Homebrew Store: muestra dónde va a escribir un paquete y avisa de los paquetes grandes antes de instalar; valida boot.dol, boot.elf y los .wad, y detecta las descargas incompletas</li>
+          <li>Install from a folder on this PC, with the same checks as a package from the store</li>
+          <li xml:lang="es">Instalar desde una carpeta de esta PC, con las mismas comprobaciones que un paquete de la tienda</li>
+          <li>Preferences: a folder for master configurations, and the path to wit</li>
+          <li xml:lang="es">Preferencias: una carpeta de configuraciones maestras y la ruta de wit</li>
+          <li>GameCube copies are verified by comparing their SHA-1 with the original (switch on by default)</li>
+          <li xml:lang="es">Las copias de GameCube se verifican comparando su SHA-1 con el original (interruptor prendido por defecto)</li>
+          <li>Converting and comparing work in folders with double spaces in their names</li>
+          <li xml:lang="es">Convertir y comparar funcionan en carpetas con espacios dobles en el nombre</li>
+          <li>Factory Mode rejects drives with logical sectors other than 512 bytes</li>
+          <li xml:lang="es">Modo Fábrica rechaza unidades con sectores lógicos distintos de 512 bytes</li>
+          <li>With libadwaita older than 1.5, the app says why instead of failing to open</li>
+          <li xml:lang="es">Con libadwaita anterior a la 1.5, la app avisa por qué en vez de no abrir</li>
+          <li>Packaging: pycairo is declared as a dependency, and these AppStream metadata are new</li>
+          <li xml:lang="es">Empaquetado: pycairo declarado como dependencia, y estos datos de AppStream son nuevos</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.2.3" date="2026-10-19"/>
     <release version="0.2.2" date="2026-10-08"/>
     <release version="0.2.1" date="2026-08-30"/>

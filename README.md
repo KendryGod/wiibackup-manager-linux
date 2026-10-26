@@ -6,7 +6,7 @@ de Windows. Hecho con GTK4 + libadwaita para verse nativo en Fedora/GNOME.
 [![CI](https://github.com/KendryGod/wiibackup-manager-linux/actions/workflows/ci.yml/badge.svg)](https://github.com/KendryGod/wiibackup-manager-linux/actions/workflows/ci.yml)
 ![Estado](https://img.shields.io/badge/estado-alpha-orange)
 ![Licencia](https://img.shields.io/badge/licencia-MIT-blue)
-![Versión](https://img.shields.io/badge/versión-0.2.3-green)
+![Versión](https://img.shields.io/badge/versión-0.2.4-green)
 
 ![La pestaña Biblioteca con las carátulas descargadas](docs/screenshots/biblioteca.png)
 
