@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright 2026 GameFix SPS -->
+<!--
+  Datos de AppStream para GNOME Software y Flathub. El idioma base es el
+  inglés, como pide AppStream; el español va en los elementos con
+  xml:lang="es". La versión más nueva de <releases> tiene que ser la de
+  pyproject.toml (lo comprueba tests/test_metainfo.py).
+-->
+<component type="desktop-application">
+  <id>com.gamefixsps.WiiBackupManager</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+
+  <name>WiiBackup Manager</name>
+  <summary>Manage Wii and GameCube backups and prepare drives for them</summary>
+  <summary xml:lang="es">Gestioná respaldos de Wii y GameCube y prepará unidades para jugarlos</summary>
+
+  <developer id="com.gamefixsps">
+    <name>GameFix SPS</name>
+  </developer>
+
+  <description>
+    <p>
+      WiiBackup Manager keeps a library of Wii and GameCube backups (ISO, WBFS,
+      CISO and WDF) in order and prepares USB drives and SD cards to play them
+      with USB Loader GX and Nintendont.
+    </p>
+    <p xml:lang="es">
+      WiiBackup Manager ordena una biblioteca de respaldos de Wii y GameCube
+      (ISO, WBFS, CISO y WDF) y prepara memorias USB y tarjetas SD para
+      jugarlos con USB Loader GX y Nintendont.
+    </p>
+    <ul>
+      <li>Scan, identify and rename games, with covers and details from GameTDB</li>
+      <li xml:lang="es">Escanea, identifica y renombra los juegos, con carátulas y datos de GameTDB</li>
+      <li>Convert between ISO and WBFS and verify them with wit (Wiimms ISO Tools)</li>
+      <li xml:lang="es">Convierte entre ISO y WBFS y los verifica con wit (Wiimms ISO Tools)</li>
+      <li>Copy queue to a drive that splits files for FAT32 and can verify what it wrote</li>
+      <li xml:lang="es">Cola de copia a una unidad que divide los archivos para FAT32 y puede verificar lo que escribió</li>
+      <li>Factory Mode: formats a drive as FAT32 with the folders the loaders expect</li>
+      <li xml:lang="es">Modo Fábrica: formatea una unidad en FAT32 con las carpetas que esperan los loaders</li>
+      <li>Memory Check: finds fake-capacity USB sticks and SD cards with f3</li>
+      <li xml:lang="es">Verificar Memoria: detecta pendrives y tarjetas SD truchos con f3</li>
+      <li>Homebrew Store: installs apps from the Open Shop Channel</li>
+      <li xml:lang="es">Homebrew Store: instala apps del Open Shop Channel</li>
+      <li>Delivery Receipt in PDF with what the drive carries</li>
+      <li xml:lang="es">Ticket de Entrega en PDF con lo que lleva la unidad</li>
+    </ul>
+    <p>
+      It asks before replacing a file, never overwrites a different one with the
+      same name, and offers to recover what an interrupted operation left behind.
+    </p>
+    <p xml:lang="es">
+      Pregunta antes de reemplazar un archivo, nunca pisa uno distinto que se
+      llame igual y ofrece recuperar lo que dejó una operación interrumpida.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">com.gamefixsps.WiiBackupManager.desktop</launchable>
+
+  <provides>
+    <binary>wiibackup-manager</binary>
+  </provides>
+
+  <url type="homepage">https://github.com/KendryGod/wiibackup-manager-linux</url>
+  <url type="bugtracker">https://github.com/KendryGod/wiibackup-manager-linux/issues</url>
+  <url type="vcs-browser">https://github.com/KendryGod/wiibackup-manager-linux</url>
+
+  <screenshots>
+    <screenshot type="default">
+      <caption>Transfer games to a drive</caption>
+      <caption xml:lang="es">Transferir juegos a una unidad</caption>
+      <image>https://raw.githubusercontent.com/KendryGod/wiibackup-manager-linux/main/docs/screenshots/transferir.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>The library</caption>
+      <caption xml:lang="es">La biblioteca</caption>
+      <image>https://raw.githubusercontent.com/KendryGod/wiibackup-manager-linux/main/docs/screenshots/biblioteca.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Game details</caption>
+      <caption xml:lang="es">Detalle de un juego</caption>
+      <image>https://raw.githubusercontent.com/KendryGod/wiibackup-manager-linux/main/docs/screenshots/detalle.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Operation history</caption>
+      <caption xml:lang="es">Historial de operaciones</caption>
+      <image>https://raw.githubusercontent.com/KendryGod/wiibackup-manager-linux/main/docs/screenshots/log.png</image>
+    </screenshot>
+  </screenshots>
+
+  <categories>
+    <category>Utility</category>
+    <category>Game</category>
+  </categories>
+
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.2.3" date="2026-10-19"/>
+    <release version="0.2.2" date="2026-10-08"/>
+    <release version="0.2.1" date="2026-08-30"/>
+    <release version="0.2.0" date="2026-08-30"/>
+    <release version="0.1.6" date="2026-08-25"/>
+  </releases>
+</component>
