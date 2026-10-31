@@ -1,0 +1,39 @@
+# BORRADOR NO VERIFICADO. NO ESTÁ ACTIVO.
+#
+# Packit solo lee .packit.yaml, .packit.yml, packit.yaml o packit.yml en
+# la RAÍZ del repo: este archivo, en packaging/ y con el sufijo .borrador,
+# no lo lee nadie. Cada clave está comprobada contra la documentación
+# oficial (https://packit.dev/docs/configuration y
+# https://packit.dev/docs/configuration/upstream/copr_build, leídas el
+# 2026-10-30), pero nunca se corrió en Packit. Para activarlo hay que
+# copiarlo a /.packit.yaml (un archivo fuera de packaging/: decisión
+# pendiente), completar `owner` y hacer los pasos de packaging/README.md
+# (cuenta FAS, proyecto COPR, permisos para Packit).
+#
+# Solo cubre wiibackup-manager. wit no sale de este repo y se construye en
+# el mismo proyecto COPR por otra vía (ver packaging/README.md); tiene que
+# estar ahí para que se pueda instalar la app (Requires: wit >= 3.05a).
+
+specfile_path: packaging/wiibackup-manager.spec
+# Nombre del repo: Packit lo usa para el archivo que arma desde git y para
+# el directorio de adentro (wiibackup-manager-linux-<versión>), que es el
+# mismo que espera el %autosetup del spec.
+upstream_package_name: wiibackup-manager-linux
+downstream_package_name: wiibackup-manager
+# Los tags del repo son v0.2.4, v0.2.3...
+upstream_tag_template: "v{version}"
+# Sin esto Packit le cambia el Release al spec (le agrega fecha, rama y
+# commit). Para builds que salen de una release, mejor el NVR limpio
+# 0.2.4-1.fcNN.
+update_release: false
+
+jobs:
+  # Un build en COPR por cada release que se publique en GitHub, con el
+  # contenido del tag de esa release.
+  - job: copr_build
+    trigger: release
+    owner: COMPLETAR-USUARIO-FAS
+    project: wiibackup-manager
+    # Sin `targets`: con un proyecto propio Packit toma los chroots de la
+    # configuración del proyecto en COPR, y no necesita permiso de admin
+    # para cambiarlos.
