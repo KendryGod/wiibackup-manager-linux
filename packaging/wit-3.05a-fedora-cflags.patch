@@ -1,0 +1,27 @@
+Que manden los flags de compilación de Fedora.
+
+El Makefile agrega "-fomit-frame-pointer" y "-O3" a CFLAGS después de lo
+que llega del entorno (%set_build_flags), así que pisaban el
+-fno-omit-frame-pointer y el -O2 de Fedora. Se sacan esos dos; el resto
+de las opciones propias (-std=gnu99, -fno-strict-aliasing,
+-funroll-loops, los -I y los -W) quedan como están.
+
+Upstream: no enviado (es una decisión de empaquetado, no un error).
+
+diff --git a/Makefile b/Makefile
+index adaa48a..cfcbf20 100644
+--- a/Makefile
++++ b/Makefile
+@@ -297,10 +297,10 @@ DEFINES1	+= -D_7ZIP_ST=1		# disable 7zip multi threading
+ DEFINES1	+= -D_LZMA_PROB32=1	# LZMA option
+ DEFINES		=  $(strip $(DEFINES1) $(MODE) $(XDEF))
+ 
+-CFLAGS		+= -std=gnu99 -fomit-frame-pointer -fno-strict-aliasing -funroll-loops
++CFLAGS		+= -std=gnu99 -fno-strict-aliasing -funroll-loops
+ CFLAGS		+= -Wall -Wno-parentheses -Wno-unused-function
+ #CFLAGS		+= -O3 -Isrc/libwbfs -Isrc/lzma -Isrc -I$(UI) -I. -Iwork
+-CFLAGS		+= -O3 -Isrc/libwbfs -Isrc -I$(UI) -I. -Iwork
++CFLAGS		+= -Isrc/libwbfs -Isrc -I$(UI) -I. -Iwork
+ 
+ ifeq ($(SYSTEM_LINUX),1)
+   LIBS		+= -ltinfo

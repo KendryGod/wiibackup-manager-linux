@@ -1,0 +1,31 @@
+No enlazar el objeto de ensamblador vacío cuando se usa el SHA-1 de OpenSSL.
+
+Con openssl-devel, setup.sh activa HAVE_SHA y el Makefile compila con
+-DUSE_SHA_LIB y -lcrypto. En ese caso src/crypto/ssl-asm.h deja vacío
+a ssl-asm.S, pero ssl-asm.o se enlazaba igual: un objeto sin código y
+sin la propiedad "x86 feature: IBT, SHSTK" en .note.gnu.property. Basta
+con un objeto así para que el enlazador le quite CET al binario entero,
+aunque todo lo demás esté compilado con -fcf-protection: annocheck daba
+FAIL en cf-protection y property-note para wit, wwt y wdf (medido en
+mock fedora-44-x86_64; ssl-asm.o era el único objeto sin esa nota). Se
+vacía ASM_OBJECTS en esa misma rama del Makefile.
+
+Sin openssl-devel (HAVE_SHA=0) no cambia nada: se sigue enlazando el
+SHA-1 en ensamblador de src/crypto, que es lo que hace upstream.
+
+Upstream: no enviado.
+
+diff --git a/Makefile b/Makefile
+index 19b0bf1..8668840 100644
+--- a/Makefile
++++ b/Makefile
+@@ -341,6 +341,9 @@ ifeq ($(HAVE_SHA),1)
+   ifneq ($(STATIC),1)
+     DEFINES1	+= -DUSE_SHA_LIB
+     LIBS	+= -lcrypto
++    # ssl-asm.S assembles to nothing with USE_SHA_LIB, and that empty
++    # object (no CET property note) disables IBT/SHSTK for the whole tool
++    ASM_OBJECTS	:=
+   endif
+  else ifeq ($(SYSTEM),cygwin)
+     DEFINES1	+= -DUSE_SHA_LIB

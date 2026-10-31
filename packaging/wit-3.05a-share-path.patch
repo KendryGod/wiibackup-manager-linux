@@ -1,0 +1,50 @@
+Encontrar los datos en <prefijo>/share/wit/ cuando wit está en <prefijo>/bin/.
+
+SetupLib() arma la lista de directorios donde wit busca titles.txt (la
+base de títulos) y sus otros archivos de datos: el directorio del
+binario, <prefijo>/share/wit/ si el binario está en un ".../bin/",
+/usr/local/share/wit/ y el directorio actual. Dos errores hacían que el
+segundo no se agregara nunca:
+
+- readlink() no termina la ruta con NUL, y el resultado se usaba como si
+  lo hiciera (y también cuando readlink() fallaba y devolvía -1).
+- Después de cortar la ruta detrás de la última "/", el memcmp contra
+  "/bin/" empezaba en file_ptr-4, o sea que comparaba "bin/" más el NUL
+  y nunca coincidía. El StringCopyS de la línea siguiente sí usa
+  file_ptr-5, que es el lugar correcto.
+
+Con la instalación de upstream (install.sh copia todo a /usr/local) no
+se nota, porque /usr/local/share/wit/ está fijo en la lista. Instalado
+en /usr/bin, wit nunca encontraba /usr/share/wit/titles.txt: medido con
+strace, probaba /usr/bin/titles.txt, /usr/local/share/wit/titles.txt y
+./titles.txt, y "wit TITLES" devolvía la base vacía. WiiBackup Manager
+usa esa base para el título de los juegos de GameCube (scanning.py,
+_titulo_de_wit).
+
+Upstream: no enviado todavía.
+
+diff --git a/src/lib-std.c b/src/lib-std.c
+index c3ba7c6..9b923ac 100644
+--- a/src/lib-std.c
++++ b/src/lib-std.c
+@@ -548,8 +548,10 @@ void SetupLib ( int argc, char ** argv, ccp p_progname, enumProgID prid )
+     static char local_share[] = "/usr/local/share/wit/";
+ 
+     char path[PATH_MAX];
+-    if (readlink(proc_path,path,sizeof(path)))
++    const ssize_t path_len = readlink(proc_path,path,sizeof(path)-1);
++    if ( path_len > 0 )
+     {
++	path[path_len] = 0;
+ 	// program path found!
+ 	TRACE("PROG-PATH: %s\n",path);
+ 
+@@ -572,7 +574,7 @@ void SetupLib ( int argc, char ** argv, ccp p_progname, enumProgID prid )
+ 	    TRACE("SEARCH_PATH[%zd] = %s\n",sp-search_path,*sp);
+ 	    sp++;
+ 
+-	    if ( file_ptr-5 >= path && !memcmp(file_ptr-4,"/bin/",5) )
++	    if ( file_ptr-5 >= path && !memcmp(file_ptr-5,"/bin/",5) )
+ 	    {
+ 		StringCopyS(file_ptr-5,sizeof(path),share);
+ 		*sp = STRDUP(path);

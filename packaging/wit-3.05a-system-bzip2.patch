@@ -1,0 +1,50 @@
+Usar el bzip2 del sistema en vez de la copia incluida en src/libbz2.
+
+wit 3.05a compila su propia copia de bzip2 1.0.6 (src/libbz2/*.c) y la
+incluye como "libbz2/bzlib.h". Fedora trae bzip2 1.0.8 (bzip2-devel) y
+sus guías piden usar la biblioteca del sistema. wit solo usa la API
+pública de bzlib.h (BZ2_bzReadOpen/Read/ReadClose,
+BZ2_bzWriteOpen/Write/WriteClose y BZ2_bzBuffToBuff*), así que alcanza
+con incluir <bzlib.h>, no compilar src/libbz2 y enlazar con -lbz2. El
+spec borra src/libbz2 en %prep para que no quede ninguna copia a mano.
+
+Upstream: no enviado.
+
+diff --git a/Makefile b/Makefile
+index cfcbf20..19b0bf1 100644
+--- a/Makefile
++++ b/Makefile
+@@ -206,8 +206,8 @@ else
+ endif
+ 
+ # lib summary
+-LIB_LIST	+= libbz2 lzma
+-LIB_OBJECTS	+= $(LIBBZ2_OBJ) $(LZMA_OBJ)
++LIB_LIST	+= lzma
++LIB_OBJECTS	+= $(LZMA_OBJ)
+ RM_FILES	+= $(foreach l,$(LIB_LIST),src/$(l)/*.{d,o})
+ 
+ 
+@@ -334,7 +334,7 @@ LDFLAGS		:= $(strip $(LDFLAGS))
+ ifeq ($(HAVE_ZLIB),1)
+  LIBS		+= -lz
+ endif
+-LIBS		+= -lm -lncurses $(XLIBS)
++LIBS		+= -lbz2 -lm -lncurses $(XLIBS)
+ 
+ ifeq ($(HAVE_SHA),1)
+  ifeq ($(SYSTEM_LINUX),1)
+diff --git a/src/lib-bzip2.c b/src/lib-bzip2.c
+index abdcada..a3248d2 100644
+--- a/src/lib-bzip2.c
++++ b/src/lib-bzip2.c
+@@ -40,8 +40,7 @@
+   #ifndef NO_BZIP2
+ /******************/
+ 
+-//#include <bzlib.h>
+-#include "libbz2/bzlib.h"
++#include <bzlib.h>
+ #include "lib-bzip2.h"
+ 
+ /************************************************************************
