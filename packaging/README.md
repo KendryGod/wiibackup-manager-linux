@@ -327,3 +327,36 @@ Para la decisión de polkit: el mismo udisks2 de Fedora deja
 para `modify-device-system`). Antes de diseñar el formateo sobre UDisks2
 hay que confirmar en el código de udisks qué acción pide cada llamada
 (`Block.Format`, `PartitionTable.CreatePartition`); eso no se verificó.
+
+## Pendiente para 0.2.5
+
+Cambios fuera de `packaging/` que salieron del empaquetado. Ninguno hace
+falta para que los RPM de la 0.2.4 funcionen, y no se hizo ninguno: tocan
+el código de la app, las pruebas, el `.desktop` o el CI.
+
+| # | Dónde | Qué pasa | Cambio propuesto |
+|---|---|---|---|
+| 1 | `pyproject.toml:11` | `license = { text = "MIT" }` está obsoleto: setuptools avisa *"By 2027-Feb-18 … your builds will no longer be supported"* (F44 trae la 80, F45 la 83 y rawhide la 84). | `license = "MIT"` y `license-files = ["LICENSE"]`, con `requires = ["setuptools>=77.0"]` en `pyproject.toml:2` (F43 trae la 78.1.1). |
+| 2 | `tests/test_caratulas_cierre.py:25` | `from tests.test_window_close import …` necesita la raíz del repo en `sys.path`; el `%check` lo compensa con `PYTHONPATH`. | `from test_window_close import …`: pytest pone `tests/` en `sys.path` porque no tiene `__init__.py`. Sin probar. |
+| 3 | `tests/test_library.py:323` | Le falta el `skipif(os.geteuid() == 0, …)` que tiene, por ejemplo, `tests/test_config_danada.py:54`: como root, la carpeta `chmod 000` se lee igual y la prueba falla. | El mismo `skipif`. |
+| 4 | Las fixtures con GUI, por ejemplo `tests/test_caratulas_boton_ocupada.py:27` | Solo miran la variable `DISPLAY`. Si GTK no llegó a abrir el display, la prueba se cae con un segfault (en `gtk_widget_init`) en vez de saltearse o fallar con un mensaje. | Comprobar también `Gdk.Display.get_default()`. |
+| 5 | `wiibackup_manager/drives.py:1220` y `:1359` (formateo) | pkexec devuelve 127 cuando no hubo autorización, pero también cuando el script sale con 127 porque le falta un comando. En ese caso la app dice "No se tocó el dispositivo", y el script ya pudo haber corrido `wipefs` y `parted` (`:1167-1171`): sin `awk` (`:1160`), el `for` sobre las particiones queda vacío sin cortar el `set -e`, y el script recién corta después de particionar. Con las Requires del RPM no puede pasar; en una instalación sin esas herramientas, sí. | Que el script compruebe que están todas sus herramientas antes de tocar el disco y salga con un código propio, y que el mensaje no afirme que no se tocó nada cuando no se puede saber. Toca los mensajes de `format_fat32`. |
+| 6 | `data/com.gamefixsps.WiiBackupManager.desktop:14` | `Categories=Utility;Game;`: `desktop-file-validate` avisa que son dos categorías principales y que la app puede aparecer dos veces en el menú. | Una sola categoría principal. |
+| 7 | `data/com.gamefixsps.WiiBackupManager.desktop:11` | `Exec=python3 -m wiibackup_manager` depende del Python de cada usuario: sin `-s`, `~/.local/lib/python3.*/site-packages` va en `sys.path` antes que el del sistema, así que una copia instalada con `pip install --user` le gana a la del RPM. El `/usr/bin/wiibackup-manager` del RPM corre con `python3 -sP`. rpmlint lo marca (`desktopfile-without-binary`). | `Exec=wiibackup-manager`. Hay que cambiar también el `grep` del CI (`.github/workflows/ci.yml:114`) y el README (`README.md:231`, `:254` y `:1200`), y resolver las instalaciones con `pip install --user`, que usan `python3 -m` porque `~/.local/bin` puede no estar en el PATH de la sesión gráfica. |
+
+Además:
+
+- **Una política de polkit propia** para el formateo. Hoy corre con
+  `pkexec /bin/sh -c …`: el diálogo es el genérico de pkexec y pide la
+  contraseña de administrador cada vez (`auth_admin`). El inventario está
+  en [Dónde se piden privilegios](#dónde-se-piden-privilegios).
+- **Reportar a Wiimm los dos errores de wit** que corrigen los parches:
+  instalado en `/usr/bin`, wit no encuentra nunca la base de títulos de
+  `/usr/share/wit` (`wit-3.05a-share-path.patch`), y un objeto de
+  ensamblador vacío les saca IBT/SHSTK a `wit`, `wwt` y `wdf`
+  (`wit-3.05a-cet.patch`). La cabecera de cada parche tiene el detalle y
+  cómo se midió.
+- **Probar Verificar Memoria con f3 10.0.** `f3_wrapper.py` está probado
+  con f3 9.0, el de Fedora 43 y 44; Fedora 45 y rawhide traen la 10.0
+  (`dnf repoquery`, 2026-10-30 para rawhide y 2026-11-06 para F45), y el
+  `Recommends: f3` del RPM la instala.
